@@ -443,12 +443,7 @@ func resolveEffectiveProvider(cfg latest.ProviderConfig) string {
 }
 
 func isGithubCopilotProvider(providerType string) bool {
-	switch providerType {
-	case "github-copilot":
-		return true
-	default:
-		return false
-	}
+	return providerType == "github-copilot"
 }
 
 func isCopilotResponsesModel(model string) bool {

@@ -68,8 +68,6 @@ func initOTelSDK(ctx context.Context) (err error) {
 	return nil
 }
 
-// isLocalhostEndpoint reports whether the given endpoint refers to a
-// loopback address so that we can safely skip TLS.
 func newOTelResource() (*resource.Resource, error) {
 	return resource.Merge(
 		resource.Default(),
@@ -81,6 +79,8 @@ func newOTelResource() (*resource.Resource, error) {
 	)
 }
 
+// isLocalhostEndpoint reports whether the given endpoint refers to a
+// loopback address so that we can safely skip TLS.
 func isLocalhostEndpoint(endpoint string) bool {
 	host := endpoint
 	// Strip port if present.

@@ -86,6 +86,9 @@ func applyMCPDefaults(ts, def *latest.Toolset) {
 	if ts.Defer.IsEmpty() {
 		ts.Defer = def.Defer
 	}
+	if ts.WorkingDir == "" {
+		ts.WorkingDir = def.WorkingDir
+	}
 	if len(def.Env) > 0 {
 		merged := make(map[string]string, len(def.Env)+len(ts.Env))
 		maps.Copy(merged, def.Env)

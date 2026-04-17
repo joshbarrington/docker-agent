@@ -86,6 +86,22 @@ func NewDefaultToolsetRegistry() *ToolsetRegistry {
 	return r
 }
 
+// resolveToolsetWorkingDir returns the effective working directory for a toolset process.
+// If toolsetWorkingDir is set, it is resolved relative to agentWorkingDir (when relative).
+// If toolsetWorkingDir is empty, agentWorkingDir is returned unchanged.
+func resolveToolsetWorkingDir(toolsetWorkingDir, agentWorkingDir string) string {
+	if toolsetWorkingDir == "" {
+		return agentWorkingDir
+	}
+	if filepath.IsAbs(toolsetWorkingDir) {
+		return toolsetWorkingDir
+	}
+	if agentWorkingDir != "" {
+		return filepath.Join(agentWorkingDir, toolsetWorkingDir)
+	}
+	return toolsetWorkingDir
+}
+
 // resolveToolsetPath expands shell patterns (~, env vars) in the given path,
 // then validates it relative to the working directory or parent directory.
 func resolveToolsetPath(toolsetPath, parentDir string, runConfig *config.RuntimeConfig) (string, error) {
@@ -289,7 +305,8 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 		// Prepend tools bin dir to PATH so child processes can find installed tools
 		env = toolinstall.PrependBinDirToEnv(env)
 
-		return mcp.NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, runConfig.WorkingDir), nil
+		cwd := resolveToolsetWorkingDir(toolset.WorkingDir, runConfig.WorkingDir)
+		return mcp.NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, cwd), nil
 
 	// Remote MCP Server
 	case toolset.Remote.URL != "":
@@ -329,7 +346,8 @@ func createLSPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 	// Prepend tools bin dir to PATH so child processes can find installed tools
 	env = toolinstall.PrependBinDirToEnv(env)
 
-	tool := builtin.NewLSPTool(resolvedCommand, toolset.Args, env, runConfig.WorkingDir)
+	cwd := resolveToolsetWorkingDir(toolset.WorkingDir, runConfig.WorkingDir)
+	tool := builtin.NewLSPTool(resolvedCommand, toolset.Args, env, cwd)
 	if len(toolset.FileTypes) > 0 {
 		tool.SetFileTypes(toolset.FileTypes)
 	}

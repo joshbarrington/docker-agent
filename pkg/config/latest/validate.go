@@ -114,6 +114,9 @@ func (t *Toolset) validate() error {
 	if t.RAGConfig != nil && t.Type != "rag" {
 		return errors.New("rag_config can only be used with type 'rag'")
 	}
+	if t.WorkingDir != "" && t.Type != "mcp" && t.Type != "lsp" {
+		return errors.New("working_dir can only be used with type 'mcp' or 'lsp'")
+	}
 
 	switch t.Type {
 	case "shell":

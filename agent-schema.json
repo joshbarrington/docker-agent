@@ -901,6 +901,10 @@
               }
             }
           ]
+        },
+        "working_dir": {
+          "type": "string",
+          "description": "Optional working directory for the MCP server process. Relative paths are resolved relative to the agent's working directory."
         }
       },
       "anyOf": [
@@ -1141,6 +1145,10 @@
         "version": {
           "type": "string",
           "description": "Package reference for auto-installation of MCP/LSP tool binaries. Format: 'owner/repo' or 'owner/repo@version'. Set to 'false' to disable auto-install for this toolset."
+        },
+        "working_dir": {
+          "type": "string",
+          "description": "Optional working directory for MCP/LSP toolset processes. Relative paths are resolved relative to the agent's working directory. Only valid for type 'mcp' or 'lsp'."
         }
       },
       "additionalProperties": false,

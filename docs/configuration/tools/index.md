@@ -65,6 +65,7 @@ Browse available tools at the [Docker MCP Catalog](https://hub.docker.com/search
 | `tools`       | array  | Optional: only expose these tools                                |
 | `instruction` | string | Custom instructions injected into the agent's context            |
 | `config`      | any    | MCP server-specific configuration (passed during initialization) |
+| `working_dir` | string | Working directory for the MCP gateway subprocess. Only applies when the catalog entry runs as a local process (not remote). Relative paths are resolved against the agent's working directory. |
 
 ### Local MCP (stdio)
 
@@ -86,6 +87,7 @@ toolsets:
 | `args` | array | Command arguments |
 | `tools` | array | Optional: only expose these tools |
 | `env` | object | Environment variables (key-value pairs) |
+| `working_dir` | string | Working directory for the MCP server process. Relative paths are resolved against the agent's working directory. Defaults to the agent's working directory when omitted. |
 | `instruction` | string | Custom instructions injected into the agent's context |
 | `version` | string | Package reference for [auto-installing](#auto-installing-tools) the command binary |
 

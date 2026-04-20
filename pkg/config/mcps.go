@@ -86,6 +86,13 @@ func applyMCPDefaults(ts, def *latest.Toolset) {
 	if ts.Defer.IsEmpty() {
 		ts.Defer = def.Defer
 	}
+	if ts.WorkingDir == "" {
+		// An empty working_dir in the referencing toolset is treated as "unset":
+		// inherit the definition's value. This matches the semantics of all other
+		// string fields in this function. An explicit `working_dir: ""` in YAML
+		// is indistinguishable from omission and will therefore be overridden.
+		ts.WorkingDir = def.WorkingDir
+	}
 	if len(def.Env) > 0 {
 		merged := make(map[string]string, len(def.Env)+len(ts.Env))
 		maps.Copy(merged, def.Env)

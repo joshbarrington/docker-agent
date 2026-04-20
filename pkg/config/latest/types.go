@@ -741,6 +741,11 @@ type Toolset struct {
 
 	// For the `model_picker` tool
 	Models []string `json:"models,omitempty"`
+
+	// For `mcp` and `lsp` tools - optional working directory override.
+	// When set, the toolset process is started from this directory.
+	// Relative paths are resolved relative to the agent's working directory.
+	WorkingDir string `json:"working_dir,omitempty"`
 }
 
 func (t *Toolset) UnmarshalYAML(unmarshal func(any) error) error {

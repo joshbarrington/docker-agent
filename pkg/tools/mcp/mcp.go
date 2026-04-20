@@ -126,6 +126,16 @@ func NewRemoteToolset(name, urlString, transport string, headers map[string]stri
 // retries via ensureToolSetsAreStarted on the next conversation turn.
 var errServerUnavailable = errors.New("MCP server unavailable")
 
+// WorkingDir returns the working directory of the underlying stdio client,
+// or an empty string if this toolset uses a remote transport.
+// This is intended for testing only.
+func (ts *Toolset) WorkingDir() string {
+	if c, ok := ts.mcpClient.(*stdioMCPClient); ok {
+		return c.cwd
+	}
+	return ""
+}
+
 // Describe returns a short, user-visible description of this toolset instance.
 // It never includes secrets.
 func (ts *Toolset) Describe() string {

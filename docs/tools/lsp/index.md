@@ -65,6 +65,7 @@ agents:
 | `args` | array | ✗ | Command-line arguments for the LSP server |
 | `env` | object | ✗ | Environment variables for the LSP process |
 | `file_types` | array | ✗ | File extensions this LSP handles (e.g., `[".go", ".mod"]`) |
+| `working_dir` | string | ✗ | Working directory for the LSP server process. Relative paths are resolved against the agent's working directory. Defaults to the agent's working directory when omitted. |
 | `version` | string | ✗ | Package reference for [auto-installing]({{ '/configuration/tools/#auto-installing-tools' | relative_url }}) the command binary |
 
 ## Common LSP Servers
@@ -79,6 +80,16 @@ toolsets:
     command: gopls
     version: "golang/tools@v0.21.0" # optional: auto-install if not in PATH
     file_types: [".go"]
+```
+
+If your Go module lives in a subdirectory (e.g. a monorepo where `go.mod` is under `./backend`), set `working_dir` so `gopls` is started from the module root:
+
+```yaml
+toolsets:
+  - type: lsp
+    command: gopls
+    file_types: [".go"]
+    working_dir: ./backend  # gopls must be started from the module root
 ```
 
 ### TypeScript/JavaScript (typescript-language-server)

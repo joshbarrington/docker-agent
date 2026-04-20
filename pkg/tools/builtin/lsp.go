@@ -346,6 +346,12 @@ func (t *LSPTool) SetFileTypes(fileTypes []string) {
 	t.handler.fileTypes = fileTypes
 }
 
+// WorkingDir returns the working directory of the LSP server process.
+// This is intended for testing only.
+func (t *LSPTool) WorkingDir() string {
+	return t.handler.workingDir
+}
+
 // HandlesFile checks if this LSP handles the given file based on its extension.
 func (t *LSPTool) HandlesFile(path string) bool {
 	return t.handler.handlesFile(path)

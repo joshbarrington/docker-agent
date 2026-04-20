@@ -114,6 +114,13 @@ func (t *Toolset) validate() error {
 	if t.RAGConfig != nil && t.Type != "rag" {
 		return errors.New("rag_config can only be used with type 'rag'")
 	}
+	if t.WorkingDir != "" && t.Type != "mcp" && t.Type != "lsp" {
+		return errors.New("working_dir can only be used with type 'mcp' or 'lsp'")
+	}
+	// working_dir requires a local subprocess; it is meaningless for remote MCP toolsets.
+	if t.WorkingDir != "" && t.Type == "mcp" && t.Remote.URL != "" {
+		return errors.New("working_dir is not valid for remote MCP toolsets (no local subprocess)")
+	}
 
 	switch t.Type {
 	case "shell":

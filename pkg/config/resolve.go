@@ -142,8 +142,36 @@ func singleSource(key string, source Source) Sources {
 	return Sources{key: source}
 }
 
+// autodiscoverConfigFile checks the current working directory for a
+// docker-agent.yaml or docker-agent.yml file. It returns the absolute
+// path of the first match found, or "" if neither file exists.
+var autodiscoverConfigNames = []string{"docker-agent.yaml", "docker-agent.yml"}
+
+func autodiscoverConfigFile() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for _, name := range autodiscoverConfigNames {
+		path := filepath.Join(wd, name)
+		if fileExists(path) {
+			slog.Debug("Auto-discovered agent config", "path", path)
+			return path
+		}
+	}
+	return ""
+}
+
 // resolve resolves an agent reference, handling aliases and defaults
 func resolve(agentFilename string) (string, error) {
+	// When no agent file is specified, try to auto-discover a config file
+	// in the current directory before falling back to the embedded default.
+	if agentFilename == "" {
+		if discovered := autodiscoverConfigFile(); discovered != "" {
+			agentFilename = discovered
+		}
+	}
+
 	agentFilename = cmp.Or(agentFilename, "default")
 
 	// Try to resolve as an alias first

@@ -89,10 +89,94 @@ func TestResolveAgentFile_EmptyIsDefault(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
+	// Ensure no docker-agent.yaml in the working directory
+	t.Chdir(t.TempDir())
+
 	resolved, err := resolve("")
 
 	require.NoError(t, err)
 	assert.Equal(t, "default", resolved)
+}
+
+func TestResolveAgentFile_AutodiscoverYaml(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "docker-agent.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`version: "1"`), 0o644))
+	t.Chdir(dir)
+
+	resolved, err := resolve("")
+
+	require.NoError(t, err)
+	assert.Equal(t, configFile, resolved)
+}
+
+func TestResolveAgentFile_AutodiscoverYml(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	configFile := filepath.Join(dir, "docker-agent.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`version: "1"`), 0o644))
+	t.Chdir(dir)
+
+	resolved, err := resolve("")
+
+	require.NoError(t, err)
+	assert.Equal(t, configFile, resolved)
+}
+
+func TestResolveAgentFile_AutodiscoverYamlTakesPrecedenceOverYml(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	primaryConfig := filepath.Join(dir, "docker-agent.yaml")
+	secondaryConfig := filepath.Join(dir, "docker-agent.yml")
+	require.NoError(t, os.WriteFile(primaryConfig, []byte(`version: "1"`), 0o644))
+	require.NoError(t, os.WriteFile(secondaryConfig, []byte(`version: "1"`), 0o644))
+	t.Chdir(dir)
+
+	resolved, err := resolve("")
+
+	require.NoError(t, err)
+	assert.Equal(t, primaryConfig, resolved)
+}
+
+func TestResolveAgentFile_AutodiscoverIgnoredWhenExplicitArg(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	// Place a docker-agent.yaml in cwd
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-agent.yaml"), []byte(`version: "1"`), 0o644))
+	t.Chdir(dir)
+
+	// Explicitly passing "default" should not trigger autodiscovery
+	resolved, err := resolve("default")
+
+	require.NoError(t, err)
+	assert.Equal(t, "default", resolved)
+}
+
+func TestResolveAgentFile_AutodiscoverIgnoredWhenExplicitFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	// Place a docker-agent.yaml in cwd
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "docker-agent.yaml"), []byte(`version: "1"`), 0o644))
+	// Place an explicit agent file
+	explicitFile := filepath.Join(dir, "my-agent.yaml")
+	require.NoError(t, os.WriteFile(explicitFile, []byte(`version: "1"`), 0o644))
+	t.Chdir(dir)
+
+	resolved, err := resolve(explicitFile)
+
+	require.NoError(t, err)
+	assert.Equal(t, explicitFile, resolved)
 }
 
 func TestResolveAgentFile_DefaultIsDefault(t *testing.T) {

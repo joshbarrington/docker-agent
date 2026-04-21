@@ -280,6 +280,11 @@ func (c *Client) CreateChatCompletionStream(
 	// reasoning tokens don't exhaust the max_completion_tokens budget.
 	// We use "low" instead of "minimal" because older models (o3-mini, o1)
 	// only accept low/medium/high.
+	//
+	// If the caller also supplied a small MaxTokens cap, raise it to
+	// noThinkingMinOutputTokens so residual hidden reasoning can't starve
+	// visible output. The nil-guard is intentional: when MaxTokens is unset
+	// the caller has imposed no cap, so there is nothing to floor.
 	if isOpenAIReasoningModel(c.ModelConfig.Model) {
 		if c.ModelOptions.NoThinking() {
 			params.ReasoningEffort = shared.ReasoningEffort("low")
@@ -408,6 +413,11 @@ func (c *Client) CreateResponseStream(
 	// Those hidden reasoning tokens still count against max_output_tokens,
 	// so with a small budget (e.g. title generation) the model can exhaust
 	// all tokens on reasoning and return empty visible text.
+	//
+	// If the caller also supplied a small MaxTokens cap, raise it to
+	// noThinkingMinOutputTokens so residual hidden reasoning can't starve
+	// visible output. The nil-guard is intentional: when MaxTokens is unset
+	// the caller has imposed no cap, so there is nothing to floor.
 	if isOpenAIReasoningModel(c.ModelConfig.Model) {
 		if c.ModelOptions.NoThinking() {
 			// Use low effort so the model spends as few output tokens as
@@ -1074,12 +1084,14 @@ func isOpenAIReasoningModel(model string) bool {
 		strings.HasPrefix(m, "gpt-5")
 }
 
-// noThinkingMinOutputTokens is the minimum max-output-token budget for
-// reasoning models when NoThinking is set.  Even with low reasoning effort
-// the model still produces hidden reasoning tokens that count against
-// max_output_tokens / max_completion_tokens.  A small budget (e.g. 20)
-// gets entirely consumed by reasoning, leaving nothing for visible text.
-// 256 tokens is enough for low-effort reasoning plus a short visible response.
+// noThinkingMinOutputTokens is the minimum output-token budget we enforce for
+// reasoning models when NoThinking is set and the caller has also supplied a
+// smaller MaxTokens cap. Even with low reasoning effort the model still
+// produces hidden reasoning tokens that count against max_output_tokens /
+// max_completion_tokens, so a tiny cap (e.g. 20) can get entirely consumed
+// by reasoning and leave nothing for visible text. The floor only raises an
+// explicit cap; if MaxTokens is unset the caller has imposed no cap and there
+// is nothing to floor.
 const noThinkingMinOutputTokens int64 = 256
 
 // openAIReasoningEffort validates a ThinkingBudget effort string for the

@@ -3,6 +3,31 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.48.0] - 2026-04-20
+
+This release adds working directory configuration for MCP and LSP toolsets and improves toolset reliability with better retry handling.
+
+## What's New
+- Adds optional `working_dir` field to MCP and LSP toolset configurations to launch processes from a specific directory
+
+## Bug Fixes
+- Fixes retry behavior for MCP toolsets after tool calls within the same turn
+- Stops retrying SQLITE_CANTOPEN (14) errors that cannot be resolved
+- Fixes filepath handling to satisfy gocritic filepathJoin lint rule
+- Returns explicit error when ref-based MCP resolves to remote server with working_dir
+
+## Technical Changes
+- Documents working_dir field for MCP and LSP toolsets in configuration
+
+### Pull Requests
+
+- [#2457](https://github.com/docker/docker-agent/pull/2457) - fix(#2457): retry MCP toolsets after tool calls within the same turn
+- [#2458](https://github.com/docker/docker-agent/pull/2458) - fix: retry LSP/MCP toolsets after tool calls, covering env-wrapped commands (fixes #2457)
+- [#2460](https://github.com/docker/docker-agent/pull/2460) - feat: add optional working_dir to MCP and LSP toolset configs
+- [#2466](https://github.com/docker/docker-agent/pull/2466) - Don't retry SQLITE_CANTOPEN (14) errors
+- [#2468](https://github.com/docker/docker-agent/pull/2468) - docs: update CHANGELOG.md for v1.47.0
+
+
 ## [v1.47.0] - 2026-04-20
 
 This release fixes several issues with AI model interactions, including title generation failures with reasoning models and shell command hangs.
@@ -2038,3 +2063,5 @@ This release improves the terminal user interface with better error handling and
 [v1.46.0]: https://github.com/docker/docker-agent/releases/tag/v1.46.0
 
 [v1.47.0]: https://github.com/docker/docker-agent/releases/tag/v1.47.0
+
+[v1.48.0]: https://github.com/docker/docker-agent/releases/tag/v1.48.0

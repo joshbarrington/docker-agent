@@ -81,8 +81,8 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		}
 	}()
 
-	if f.pullIntervalMins > 0 && !config.IsOCIReference(agentsPath) {
-		return errors.New("--pull-interval flag can only be used with OCI references, not local files")
+	if f.pullIntervalMins > 0 && !config.IsOCIReference(agentsPath) && !config.IsURLReference(agentsPath) {
+		return errors.New("--pull-interval flag can only be used with OCI or URL references, not local files")
 	}
 
 	ln, lnCleanup, err := newListener(ctx, f.listenAddr)

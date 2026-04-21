@@ -197,6 +197,29 @@ models:
 
 See the [Anthropic provider page](/providers/anthropic/#thinking-display) for details.
 
+## Custom HTTP Headers
+
+For OpenAI-compatible providers (`openai`, `github-copilot`, `mistral`, `xai`,
+`nebius`, `minimax`, `ollama`, and any custom provider using the OpenAI API),
+`provider_opts.http_headers` adds arbitrary HTTP headers to every outgoing
+request:
+
+```yaml
+models:
+  my_model:
+    provider: openai
+    model: gpt-4o
+    provider_opts:
+      http_headers:
+        X-Request-Source: docker-agent
+        X-Tenant-Id: my-team
+```
+
+Header names are matched case-insensitively. The `github-copilot` provider
+automatically sets `Copilot-Integration-Id: vscode-chat` — see the
+[GitHub Copilot provider page]({{ '/providers/github-copilot/' | relative_url }})
+for details.
+
 ## Examples by Provider
 
 ```yaml

@@ -92,6 +92,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			clientOptions = append(clientOptions, option.WithBaseURL(cfg.BaseURL))
 		}
 
+		// Apply custom HTTP headers from provider_opts (e.g. github-copilot's
+		// required Copilot-Integration-Id) and any provider-specific defaults.
+		clientOptions = append(clientOptions, buildHeaderOptions(cfg)...)
+
 		httpClient := httpclient.NewHTTPClient(ctx)
 		clientOptions = append(clientOptions, option.WithHTTPClient(httpClient))
 
@@ -514,6 +518,9 @@ func (c *Client) createWebSocketStream(
 
 // buildWSHeaderFn returns a function that produces the HTTP headers needed
 // for the WebSocket handshake, including the Authorization header.
+// buildWSHeaderFn returns a function that produces the HTTP headers needed
+// for the WebSocket handshake, including the Authorization header and any
+// custom headers from provider_opts.http_headers.
 func (c *Client) buildWSHeaderFn() func(ctx context.Context) (http.Header, error) {
 	return func(ctx context.Context) (http.Header, error) {
 		h := http.Header{}
@@ -531,6 +538,13 @@ func (c *Client) buildWSHeaderFn() func(ctx context.Context) (http.Header, error
 		}
 		if apiKey != "" {
 			h.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		// Apply custom headers from provider_opts (e.g. github-copilot's
+		// required Copilot-Integration-Id) and any provider-specific defaults.
+		// This ensures WebSocket connections have the same headers as HTTP.
+		for name, value := range buildHeaderMap(&c.ModelConfig) {
+			h.Set(name, value)
 		}
 
 		return h, nil

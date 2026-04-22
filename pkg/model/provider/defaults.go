@@ -43,6 +43,11 @@ func isOpenAICompatibleProvider(providerType string) bool {
 	return exists && alias.APIType == "openai"
 }
 
+// IsGithubCopilotProvider returns true if the provider type is "github-copilot".
+func isGithubCopilotProvider(providerType string) bool {
+	return providerType == "github-copilot"
+}
+
 // ---------------------------------------------------------------------------
 // Provider defaults
 // ---------------------------------------------------------------------------
@@ -180,6 +185,9 @@ func cloneModelConfig(cfg *latest.ModelConfig) *latest.ModelConfig {
 //
 // NOTE: max_tokens is NOT set here; see teamloader and runtime/model_switcher.
 func applyModelDefaults(cfg *latest.ModelConfig) {
+	// Set appropriate github copilot api_type.
+	applyGithubCopilotAPIType(cfg)
+
 	// Explicitly disabled → normalise to nil so providers never see it.
 	if cfg.ThinkingBudget.IsDisabled() {
 		cfg.ThinkingBudget = nil
@@ -222,6 +230,18 @@ func ensureInterleavedThinking(cfg *latest.ModelConfig, providerType string) {
 		cfg.ProviderOpts["interleaved_thinking"] = true
 		slog.Debug("Auto-enabled interleaved_thinking",
 			"provider", cfg.Provider, "model", cfg.Model)
+	}
+}
+
+func applyGithubCopilotAPIType(cfg *latest.ModelConfig) {
+	if isGithubCopilotProvider(cfg.Provider) && isCopilotResponsesModel(cfg.Model) {
+		if cfg.ProviderOpts == nil {
+			cfg.ProviderOpts = make(map[string]any)
+		}
+		// If it's not set, or was set to openai_chatcompletions by the generic fallback, override it.
+		if apiType, ok := cfg.ProviderOpts["api_type"].(string); !ok || apiType == "" || apiType == "openai_chatcompletions" {
+			cfg.ProviderOpts["api_type"] = "openai_responses"
+		}
 	}
 }
 
@@ -280,4 +300,15 @@ func isGeminiProModel(model string) bool {
 
 func isGeminiFlashModel(model string) bool {
 	return strings.HasPrefix(gemini3Family(model), "flash")
+}
+
+// isCopilotResponsesModel returns true if the model is a GitHub Copilot model that requires the openai_responses API type.
+func isCopilotResponsesModel(model string) bool {
+	codex := map[string]bool{
+		"gpt-5.3-codex": true,
+		"gpt-5.2-codex": true,
+		"gpt-5.4-mini":  true,
+		"gpt-5.4-nano":  true,
+	}
+	return codex[model]
 }

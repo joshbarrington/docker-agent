@@ -289,3 +289,13 @@ func TestApplyProviderDefaults_DoesNotModifyOriginal(t *testing.T) {
 	// Original custom key must still be there.
 	assert.Equal(t, "original_value", original.ProviderOpts["custom_key"])
 }
+
+func TestIsCopilotResponsesModel(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, isCopilotResponsesModel("gpt-5.3-codex"))
+	assert.True(t, isCopilotResponsesModel("gpt-5.2-codex"))
+	assert.False(t, isCopilotResponsesModel("gpt-4o"))
+	assert.False(t, isCopilotResponsesModel("claude-sonnet-4-5"))
+	assert.False(t, isCopilotResponsesModel(""))
+}

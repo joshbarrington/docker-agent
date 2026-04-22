@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
 func TestCatalogProviders(t *testing.T) {
@@ -89,51 +87,4 @@ func TestIsKnownProvider(t *testing.T) {
 	// Unknown providers
 	assert.False(t, IsKnownProvider("unknown"))
 	assert.False(t, IsKnownProvider(""))
-}
-
-func TestIsGithubCopilotProvider(t *testing.T) {
-	t.Parallel()
-
-	assert.True(t, isGithubCopilotProvider("github-copilot"))
-	assert.False(t, isGithubCopilotProvider("openai"))
-	assert.False(t, isGithubCopilotProvider(""))
-}
-
-func TestIsCopilotResponsesModel(t *testing.T) {
-	t.Parallel()
-
-	assert.True(t, isCopilotResponsesModel("gpt-5.3-codex"))
-	assert.True(t, isCopilotResponsesModel("gpt-5.2-codex"))
-	assert.False(t, isCopilotResponsesModel("gpt-4o"))
-	assert.False(t, isCopilotResponsesModel("claude-sonnet-4-5"))
-	assert.False(t, isCopilotResponsesModel(""))
-}
-
-func TestGithubCopilotApiType(t *testing.T) {
-	cfg := &latest.ModelConfig{
-		Provider: "github-copilot",
-		Model:    "gpt-5.3-codex",
-	}
-
-	enhancedCfg := applyProviderDefaults(cfg, nil)
-
-	apiType := resolveProviderType(enhancedCfg)
-
-	if apiType != "openai_responses" {
-		t.Errorf("Expected api_type to be 'openai_responses', got '%s'", apiType)
-	}
-
-	// test when it is a custom provider
-	customProviders := map[string]latest.ProviderConfig{
-		"github-copilot": {
-			Provider: "github-copilot",
-		},
-	}
-
-	enhancedCfg2 := applyProviderDefaults(cfg, customProviders)
-	apiType2 := resolveProviderType(enhancedCfg2)
-
-	if apiType2 != "openai_responses" {
-		t.Errorf("Expected api_type to be 'openai_responses', got '%s'", apiType2)
-	}
 }

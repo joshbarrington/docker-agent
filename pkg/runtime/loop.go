@@ -41,10 +41,7 @@ func (r *LocalRuntime) registerDefaultTools() {
 	})
 }
 
-// appendSteerAndEmit appends a steered message to the session as a plain
-// user message and emits the corresponding UserMessage event. Steer messages
-// are always injected as plain user turns regardless of when they arrive
-// (idle window, mid-turn, or end-of-iteration).
+// appendSteerAndEmit adds a steer message to the session and emits the corresponding event.
 func (r *LocalRuntime) appendSteerAndEmit(sess *session.Session, sm QueuedMessage, events chan<- Event) {
 	sess.AddMessage(session.UserMessage(sm.Content, sm.MultiContent...))
 	events <- UserMessage(sm.Content, sess.ID, sm.MultiContent, len(sess.Messages)-1)
@@ -303,17 +300,8 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 				}
 			}
 
-			// --- STEERING: top-of-turn injection ---
-			// Drain steer messages that arrived while the runtime was idle
-			// (between RunStream invocations) or before the first model call
-			// of this turn. Two gaps in the old code motivated this drain:
-			//   1. Idle-window race: Steer called between RunStream invocations;
-			//      nothing was running to consume the message.
-			//   2. First-turn miss: a plain-text response with no tool calls
-			//      fires res.Stopped before the mid-loop drain is reached.
-			// Steer messages are always injected as plain user turns.
-			// Placement after contextLimit initialization means compactIfNeeded
-			// can be called immediately.
+			// Drain steer messages queued while idle or before the first model call
+			// (covers idle-window and first-turn-miss races).
 			if steered := r.steerQueue.Drain(ctx); len(steered) > 0 {
 				messageCountBeforeSteer := len(sess.GetAllMessages())
 				for _, sm := range steered {
@@ -446,10 +434,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 			// Record per-toolset model override for the next LLM turn.
 			toolModelOverride = resolveToolCallModelOverride(res.Calls, agentTools)
 
-			// --- STEERING: mid-turn injection ---
-			// Drain ALL pending steer messages injected while tool calls were
-			// running. These are plain user messages; the model sees them on
-			// the very next iteration.
+			// Drain steer messages that arrived during tool calls.
 			if steered := r.steerQueue.Drain(ctx); len(steered) > 0 {
 				for _, sm := range steered {
 					r.appendSteerAndEmit(sess, sm, events)
@@ -463,13 +448,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 				slog.Debug("Conversation stopped", "agent", a.Name())
 				r.executeStopHooks(ctx, sess, a, res.Content, events)
 
-				// --- STEERING: end-of-iteration drain ---
-				// A Steer() call that lands in the narrow window between the
-				// mid-loop drain above and this stop-check would otherwise be
-				// stranded until the next RunStream invocation. Re-checking
-				// here closes that race: any message that enqueued successfully
-				// is guaranteed to be consumed within the current RunStream.
-				// Steer messages are always plain user turns.
+				// Re-check steer queue: closes the race between the mid-loop drain and this stop.
 				if steered := r.steerQueue.Drain(ctx); len(steered) > 0 {
 					for _, sm := range steered {
 						r.appendSteerAndEmit(sess, sm, events)

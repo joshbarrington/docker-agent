@@ -2440,6 +2440,7 @@ func TestSteer_EmptySessionBootstrap(t *testing.T) {
 // drain runs, exercising the end-of-iteration drain at res.Stopped.
 type hookStream struct {
 	*mockStream
+
 	onStop func()
 }
 
@@ -2580,6 +2581,6 @@ func TestSteer_EndOfIterationRaceIsConsumedInCurrentRunStream(t *testing.T) {
 		}
 	}
 	require.NotNil(t, steerSessionMsg, "expected a session message for the end-of-iteration steer")
-	assert.True(t, strings.Contains(steerSessionMsg.Message.Content, "end-of-iter steer"),
+	assert.Contains(t, steerSessionMsg.Message.Content, "end-of-iter steer",
 		"stored session message must contain the steer content")
 }

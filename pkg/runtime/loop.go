@@ -41,6 +41,12 @@ func (r *LocalRuntime) registerDefaultTools() {
 	})
 }
 
+// appendSteerAndEmit adds a steer message to the session and emits the corresponding event.
+func (r *LocalRuntime) appendSteerAndEmit(sess *session.Session, sm QueuedMessage, events chan<- Event) {
+	sess.AddMessage(session.UserMessage(sm.Content, sm.MultiContent...))
+	events <- UserMessage(sm.Content, sess.ID, sm.MultiContent, len(sess.Messages)-1)
+}
+
 // finalizeEventChannel performs cleanup at the end of a RunStream goroutine:
 // restores the previous elicitation channel, emits the StreamStopped event,
 // fires hooks, and closes the events channel.
@@ -294,6 +300,16 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 				}
 			}
 
+			// Drain steer messages queued while idle or before the first model call
+			// (covers idle-window and first-turn-miss races).
+			if steered := r.steerQueue.Drain(ctx); len(steered) > 0 {
+				messageCountBeforeSteer := len(sess.GetAllMessages())
+				for _, sm := range steered {
+					r.appendSteerAndEmit(sess, sm, events)
+				}
+				r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeSteer, events)
+			}
+
 			messages := sess.GetMessages(a)
 			slog.Debug("Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
 
@@ -418,19 +434,10 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 			// Record per-toolset model override for the next LLM turn.
 			toolModelOverride = resolveToolCallModelOverride(res.Calls, agentTools)
 
-			// --- STEERING: mid-turn injection ---
-			// Drain ALL pending steer messages. These are urgent course-
-			// corrections that the model should see on the very next
-			// iteration, wrapped in <system-reminder> tags.
+			// Drain steer messages that arrived during tool calls.
 			if steered := r.steerQueue.Drain(ctx); len(steered) > 0 {
 				for _, sm := range steered {
-					wrapped := fmt.Sprintf(
-						"<system-reminder>\nThe user sent the following message while you were working:\n%s\n\nPlease address this in your next response while continuing with your current tasks.\n</system-reminder>",
-						sm.Content,
-					)
-					userMsg := session.UserMessage(wrapped, sm.MultiContent...)
-					sess.AddMessage(userMsg)
-					events <- UserMessage(sm.Content, sess.ID, sm.MultiContent, len(sess.Messages)-1)
+					r.appendSteerAndEmit(sess, sm, events)
 				}
 
 				r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
@@ -440,6 +447,15 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 			if res.Stopped {
 				slog.Debug("Conversation stopped", "agent", a.Name())
 				r.executeStopHooks(ctx, sess, a, res.Content, events)
+
+				// Re-check steer queue: closes the race between the mid-loop drain and this stop.
+				if steered := r.steerQueue.Drain(ctx); len(steered) > 0 {
+					for _, sm := range steered {
+						r.appendSteerAndEmit(sess, sm, events)
+					}
+					r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
+					continue
+				}
 
 				// --- FOLLOW-UP: end-of-turn injection ---
 				// Pop exactly one follow-up message. Unlike steered

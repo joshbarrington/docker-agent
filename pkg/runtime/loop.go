@@ -41,6 +41,16 @@ func (r *LocalRuntime) registerDefaultTools() {
 	})
 }
 
+// wrapSteerMessage wraps a raw steer message in a <system-reminder> envelope
+// so the model receives the user's course-correction as a clearly-labelled
+// side-channel injection rather than a plain conversational turn.
+func wrapSteerMessage(content string) string {
+	return fmt.Sprintf(
+		"<system-reminder>\nThe user sent the following message while you were working:\n%s\n\nPlease address this in your next response while continuing with your current tasks.\n</system-reminder>",
+		content,
+	)
+}
+
 // finalizeEventChannel performs cleanup at the end of a RunStream goroutine:
 // restores the previous elicitation channel, emits the StreamStopped event,
 // fires hooks, and closes the events channel.
@@ -249,6 +259,20 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 			}
 			slog.Debug("Starting conversation loop iteration", "agent", a.Name())
 
+			// --- STEERING: top-of-turn injection ---
+			// Drain any steer messages that arrived while the runtime was idle
+			// (between RunStream invocations) or before the first model call of
+			// this turn. Without this drain, a Steer call made while no tool
+			// calls are running would be silently dropped when the model returns
+			// a plain-text response with no tool calls.
+			if steered := r.steerQueue.Drain(ctx); len(steered) > 0 {
+				for _, sm := range steered {
+					userMsg := session.UserMessage(wrapSteerMessage(sm.Content), sm.MultiContent...)
+					sess.AddMessage(userMsg)
+					events <- UserMessage(sm.Content, sess.ID, sm.MultiContent, len(sess.Messages)-1)
+				}
+			}
+
 			streamCtx, streamSpan := r.startSpan(ctx, "runtime.stream", trace.WithAttributes(
 				attribute.String("agent", a.Name()),
 				attribute.String("session.id", sess.ID),
@@ -424,11 +448,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 			// iteration, wrapped in <system-reminder> tags.
 			if steered := r.steerQueue.Drain(ctx); len(steered) > 0 {
 				for _, sm := range steered {
-					wrapped := fmt.Sprintf(
-						"<system-reminder>\nThe user sent the following message while you were working:\n%s\n\nPlease address this in your next response while continuing with your current tasks.\n</system-reminder>",
-						sm.Content,
-					)
-					userMsg := session.UserMessage(wrapped, sm.MultiContent...)
+					userMsg := session.UserMessage(wrapSteerMessage(sm.Content), sm.MultiContent...)
 					sess.AddMessage(userMsg)
 					events <- UserMessage(sm.Content, sess.ID, sm.MultiContent, len(sess.Messages)-1)
 				}

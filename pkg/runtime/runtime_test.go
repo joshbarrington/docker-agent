@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -2197,4 +2198,190 @@ func toolNames(ts []tools.Tool) []string {
 		names[i] = t.Name
 	}
 	return names
+}
+
+// messageRecordingProvider records the chat.Message slices passed to each
+// CreateChatCompletionStream call so tests can inspect what the model saw.
+type messageRecordingProvider struct {
+	id      string
+	mu      sync.Mutex
+	streams []*mockStream
+	callIdx int
+
+	recordedMessages [][]chat.Message // messages passed on each call
+}
+
+func (p *messageRecordingProvider) ID() string { return p.id }
+
+func (p *messageRecordingProvider) CreateChatCompletionStream(_ context.Context, msgs []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	snapshot := make([]chat.Message, len(msgs))
+	copy(snapshot, msgs)
+	p.recordedMessages = append(p.recordedMessages, snapshot)
+
+	if p.callIdx >= len(p.streams) {
+		return newStreamBuilder().AddStopWithUsage(1, 1).Build(), nil
+	}
+	s := p.streams[p.callIdx]
+	p.callIdx++
+	return s, nil
+}
+
+func (p *messageRecordingProvider) BaseConfig() base.Config { return base.Config{} }
+func (p *messageRecordingProvider) MaxTokens() int          { return 0 }
+
+// TestSteer_IdleWindowIsConsumedOnNextTurn verifies that a Steer call made
+// while no RunStream is active (i.e. in the idle window between turns) is
+// picked up by the very next RunStream iteration. Before the fix the steer
+// queue was only drained mid-loop (after tool calls), so a message enqueued
+// while idle was stranded and never seen by the model.
+func TestSteer_IdleWindowIsConsumedOnNextTurn(t *testing.T) {
+	t.Parallel()
+
+	// The model returns a plain-text stop (no tool calls) so we stay in the
+	// single-iteration path — this is the exact scenario where the old code
+	// would miss the steer message.
+	stream := newStreamBuilder().
+		AddContent("Got it").
+		AddStopWithUsage(5, 3).
+		Build()
+
+	prov := &messageRecordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{stream},
+	}
+
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	// Enqueue a steer message BEFORE calling RunStream — simulating the
+	// idle-window race where a Steer call lands between two RunStream
+	// invocations.
+	err = rt.Steer(QueuedMessage{Content: "urgent: change direction"})
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Do the task"))
+	sess.Title = "steer idle-window test"
+
+	evCh := rt.RunStream(t.Context(), sess)
+	var events []Event
+	for ev := range evCh {
+		events = append(events, ev)
+	}
+
+	// Verify the model received a message containing the steer content.
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+
+	require.NotEmpty(t, prov.recordedMessages, "expected at least one model call")
+	firstCallMsgs := prov.recordedMessages[0]
+
+	var foundSteer bool
+	for _, m := range firstCallMsgs {
+		if strings.Contains(m.Content, "urgent: change direction") {
+			foundSteer = true
+			break
+		}
+	}
+	assert.True(t, foundSteer,
+		"model should have received the steer message in its first turn; messages seen: %v",
+		firstCallMsgs)
+
+	// The run must complete normally (StreamStopped as the last event).
+	require.NotEmpty(t, events)
+	assert.IsType(t, &StreamStoppedEvent{}, events[len(events)-1],
+		"expected StreamStopped as the final event")
+
+	// A UserMessageEvent must have been emitted for the steer message.
+	var steerEventFound bool
+	for _, ev := range events {
+		if ue, ok := ev.(*UserMessageEvent); ok && strings.Contains(ue.Message, "urgent: change direction") {
+			steerEventFound = true
+			break
+		}
+	}
+	assert.True(t, steerEventFound, "expected a UserMessageEvent for the steer message")
+}
+
+// TestSteer_EmptySessionBootstrap verifies that when RunStream is started
+// with zero messages in the session but one or more messages already queued
+// via Steer, the model receives those messages as its initial context — i.e.
+// the run completes normally rather than erroring or producing a vacuous
+// response. The behaviour must be identical to a session where those messages
+// were added directly via session.WithUserMessage before the call.
+func TestSteer_EmptySessionBootstrap(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("Hello from the model").
+		AddStopWithUsage(5, 3).
+		Build()
+
+	prov := &messageRecordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{stream},
+	}
+
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	// Enqueue before RunStream — zero messages in the session.
+	err = rt.Steer(QueuedMessage{Content: "bootstrap message"})
+	require.NoError(t, err)
+
+	// Fresh session with NO messages (SendUserMessage defaults to true but
+	// there is nothing to send yet).
+	sess := session.New()
+	sess.Title = "steer bootstrap test"
+
+	evCh := rt.RunStream(t.Context(), sess)
+	var events []Event
+	for ev := range evCh {
+		events = append(events, ev)
+	}
+
+	// The run must complete normally.
+	require.NotEmpty(t, events)
+	assert.IsType(t, &StreamStoppedEvent{}, events[len(events)-1],
+		"expected StreamStopped as the final event; got %T", events[len(events)-1])
+
+	// The model must have received exactly one call and that call must
+	// contain the bootstrap message.
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+
+	require.Len(t, prov.recordedMessages, 1,
+		"expected exactly one model call for the bootstrap turn")
+
+	firstCallMsgs := prov.recordedMessages[0]
+
+	var foundBootstrap bool
+	for _, m := range firstCallMsgs {
+		if strings.Contains(m.Content, "bootstrap message") {
+			foundBootstrap = true
+			break
+		}
+	}
+	assert.True(t, foundBootstrap,
+		"model must receive the bootstrap steer message as its first (and only) user turn; messages: %v",
+		firstCallMsgs)
+
+	// A UserMessageEvent must have been emitted for the steer message.
+	var steerEventFound bool
+	for _, ev := range events {
+		if ue, ok := ev.(*UserMessageEvent); ok && strings.Contains(ue.Message, "bootstrap message") {
+			steerEventFound = true
+			break
+		}
+	}
+	assert.True(t, steerEventFound,
+		"expected a UserMessageEvent for the bootstrap steer message")
 }

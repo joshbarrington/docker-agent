@@ -3,6 +3,40 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.50.0] - 2026-04-23
+
+This release fixes several runtime issues with message steering and sandbox argument handling, along with TUI improvements for user prompts and speech commands.
+
+## What's New
+
+- Adds support for custom OAuth callback redirect URLs for remote MCP toolsets, allowing public-facing proxies for authentication
+
+## Improvements
+
+- Adds custom component for user_prompt tool calls in TUI that shows only status and name without exposing internal details
+
+## Bug Fixes
+
+- Fixes sandbox mode incorrectly interpreting agent file path as first chat message due to duplicate argument handling
+- Fixes runtime race conditions where steer messages could be silently dropped during idle windows or first turns
+- Fixes /speak slash command not dispatching immediately in TUI
+
+## Technical Changes
+
+- Updates Go to version 1.26.2
+- Refactors runtime steer message injection to remove system-reminder envelope
+
+### Pull Requests
+
+- [#2486](https://github.com/docker/docker-agent/pull/2486) - docs: update CHANGELOG.md for v1.49.2
+- [#2487](https://github.com/docker/docker-agent/pull/2487) - fix(sandbox): don't duplicate agent file and --config-dir args
+- [#2488](https://github.com/docker/docker-agent/pull/2488) - chore: bump Go to 1.26.2
+- [#2492](https://github.com/docker/docker-agent/pull/2492) - fix(runtime): drain steerQueue at top of RunStream loop to close idle-window race
+- [#2494](https://github.com/docker/docker-agent/pull/2494) - feat(mcp): support custom OAuth callbackRedirectURL for remote toolsets
+- [#2496](https://github.com/docker/docker-agent/pull/2496) - fix(tui): make /speak slash command dispatch immediately
+- [#2497](https://github.com/docker/docker-agent/pull/2497) - tui: add custom component for user_prompt tool calls
+
+
 ## [v1.49.2] - 2026-04-21
 
 This release fixes an issue with the --pull-interval flag when using URL gordon references.
@@ -2140,3 +2174,5 @@ This release improves the terminal user interface with better error handling and
 [v1.49.1]: https://github.com/docker/docker-agent/releases/tag/v1.49.1
 
 [v1.49.2]: https://github.com/docker/docker-agent/releases/tag/v1.49.2
+
+[v1.50.0]: https://github.com/docker/docker-agent/releases/tag/v1.50.0

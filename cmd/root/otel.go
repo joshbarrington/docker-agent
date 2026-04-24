@@ -29,11 +29,18 @@ func initOTelSDK(ctx context.Context) (err error) {
 
 	// Only initialize if endpoint is configured
 	if endpoint != "" {
-		opts := []otlptracehttp.Option{
-			otlptracehttp.WithEndpoint(endpoint),
-		}
-		if isLocalhostEndpoint(endpoint) {
-			opts = append(opts, otlptracehttp.WithInsecure())
+		var opts []otlptracehttp.Option
+		// An endpoint with an http:// or https:// scheme goes through
+		// WithEndpointURL so the SDK picks the transport from the scheme
+		// (per the OTLP/HTTP spec). Bare host:port still flows through
+		// WithEndpoint with the loopback-insecure shortcut preserved.
+		if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+			opts = []otlptracehttp.Option{otlptracehttp.WithEndpointURL(endpoint)}
+		} else {
+			opts = []otlptracehttp.Option{otlptracehttp.WithEndpoint(endpoint)}
+			if isLocalhostEndpoint(endpoint) {
+				opts = append(opts, otlptracehttp.WithInsecure())
+			}
 		}
 		traceExporter, err = otlptracehttp.New(ctx, opts...)
 		if err != nil {

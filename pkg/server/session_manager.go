@@ -207,6 +207,13 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	needsTitle := sess.Title == "" && len(userMessages) > 0 && titleGen != nil
 
 	go func() {
+		// Defers run LIFO: close(streamChan) last, so by the time the
+		// consumer's range loop terminates, streaming.Unlock has already
+		// fired. Otherwise a caller that immediately calls RunSession
+		// after draining the channel can race the Unlock and spuriously
+		// see ErrSessionBusy.
+		defer close(streamChan)
+		defer cancel()
 		defer runtimeSession.streaming.Unlock()
 
 		// Start title generation in parallel if needed
@@ -215,8 +222,6 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		}
 
 		stream := runtimeSession.runtime.RunStream(streamCtx, sess)
-		defer cancel()
-		defer close(streamChan)
 		for event := range stream {
 			if streamCtx.Err() != nil {
 				return

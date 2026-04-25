@@ -22,6 +22,21 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+// listenTCPRetry retries Listen on addr until it succeeds or a short
+// deadline passes (the port may be momentarily busy after a previous
+// server shutdown). The returned listener should be closed by the caller.
+func listenTCPRetry(t *testing.T, addr string) net.Listener {
+	t.Helper()
+	var lc net.ListenConfig
+	var ln net.Listener
+	require.Eventually(t, func() bool {
+		var err error
+		ln, err = lc.Listen(t.Context(), "tcp", addr)
+		return err == nil
+	}, 2*time.Second, 50*time.Millisecond, "port %s not available in time", addr)
+	return ln
+}
+
 // startMCPServer creates a minimal MCP server on addr with the given tools
 // and returns a function to shut it down.
 func startMCPServer(t *testing.T, addr string, mcpTools ...*gomcp.Tool) (shutdown func()) {
@@ -36,14 +51,7 @@ func startMCPServer(t *testing.T, addr string, mcpTools ...*gomcp.Tool) (shutdow
 		})
 	}
 
-	// Retry Listen until the port is available (e.g. after a server shutdown).
-	var srvLn net.Listener
-	require.Eventually(t, func() bool {
-		var listenErr error
-		srvLn, listenErr = net.Listen("tcp", addr)
-		return listenErr == nil
-	}, 2*time.Second, 50*time.Millisecond, "port %s not available in time", addr)
-
+	srvLn := listenTCPRetry(t, addr)
 	srv := &http.Server{
 		Handler: gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return s }, nil),
 	}
@@ -55,8 +63,7 @@ func startMCPServer(t *testing.T, addr string, mcpTools ...*gomcp.Tool) (shutdow
 // allocateAddr returns a free TCP address on localhost.
 func allocateAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
+	ln := listenTCPRetry(t, "127.0.0.1:0")
 	addr := ln.Addr().String()
 	ln.Close()
 	return addr
@@ -99,12 +106,7 @@ func TestRemoteReconnectAfterServerRestart(t *testing.T) {
 		})
 
 		// Retry Listen until the port is available (e.g. after a server shutdown).
-		var srvLn net.Listener
-		require.Eventually(t, func() bool {
-			var listenErr error
-			srvLn, listenErr = net.Listen("tcp", addr)
-			return listenErr == nil
-		}, 2*time.Second, 50*time.Millisecond, "port %s not available in time", addr)
+		srvLn := listenTCPRetry(t, addr)
 
 		srv := &http.Server{
 			Handler: gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return s }, nil),

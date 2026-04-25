@@ -40,7 +40,7 @@ func TestHandler_InjectsHeaders(t *testing.T) {
 	})
 
 	handler := Handler(inner)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
 	req.Header.Set("X-Test", "hello")
 
 	handler.ServeHTTP(httptest.NewRecorder(), req)

@@ -48,7 +48,9 @@ func TestNewTransport_WorksWithoutDesktopProxy(t *testing.T) {
 
 	// Make a simple HTTP request to verify the transport works
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(server.URL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 

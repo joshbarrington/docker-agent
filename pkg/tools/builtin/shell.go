@@ -220,7 +220,10 @@ func (h *shellHandler) RunShell(ctx context.Context, params RunShellArgs) (*tool
 const waitDelayAfterShellExit = 500 * time.Millisecond
 
 func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, command, cwd string, timeout time.Duration) *tools.ToolCallResult {
-	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, command)...)
+	// Cancellation is handled manually below (timeoutCtx + Process.Kill +
+	// process group + WaitDelay), so we use exec.Command rather than
+	// exec.CommandContext to keep that flow in one place.
+	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, command)...) //nolint:noctx // see comment above
 	cmd.Env = h.env
 	cmd.Dir = cwd
 	cmd.SysProcAttr = platformSpecificSysProcAttr()
@@ -275,7 +278,7 @@ func (h *shellHandler) RunShellBackground(_ context.Context, params RunShellBack
 	counter := h.jobCounter.Add(1)
 	jobID := fmt.Sprintf("job_%d_%d", time.Now().Unix(), counter)
 
-	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, params.Cmd)...)
+	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, params.Cmd)...) //nolint:noctx // RunShellBackground intentionally outlives the request context
 	cmd.Env = h.env
 	cmd.Dir = h.resolveWorkDir(params.Cwd)
 	cmd.SysProcAttr = platformSpecificSysProcAttr()

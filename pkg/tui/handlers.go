@@ -640,28 +640,35 @@ func (m *appModel) handleElicitationResponse(action tools.ElicitationAction, con
 }
 
 func (m *appModel) startShell() (tea.Model, tea.Cmd) {
-	exitMsg := "Type 'exit' to return to " + m.appName
-
-	var cmd *exec.Cmd
-	if goruntime.GOOS == "windows" {
-		if path, err := exec.LookPath("pwsh.exe"); err == nil {
-			cmd = exec.Command(path, "-NoLogo", "-NoExit", "-Command",
-				`Write-Host ""; Write-Host "`+exitMsg+`"`)
-		} else if path, err := exec.LookPath("powershell.exe"); err == nil {
-			cmd = exec.Command(path, "-NoLogo", "-NoExit", "-Command",
-				`Write-Host ""; Write-Host "`+exitMsg+`"`)
-		} else {
-			// Use absolute path to cmd.exe to prevent PATH hijacking (CWE-426).
-			shell := shellpath.WindowsCmdExe()
-			cmd = exec.Command(shell, "/K", "echo. & echo "+exitMsg)
-		}
-	} else {
-		shell := shellpath.DetectUnixShell()
-		cmd = exec.Command(shell, "-i", "-c",
-			`echo -e "\n`+exitMsg+`"; exec `+shell)
-	}
+	cmd := newInteractiveShellCmd("Type 'exit' to return to " + m.appName)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return m, tea.ExecProcess(cmd, nil)
+}
+
+// newInteractiveShellCmd returns a command that launches the user's preferred
+// interactive shell. The command is owned by tea.ExecProcess, not by any
+// request-scoped context, so exec.Command is intentional.
+func newInteractiveShellCmd(exitMsg string) *exec.Cmd {
+	if goruntime.GOOS != "windows" {
+		shell := shellpath.DetectUnixShell()
+		return execCmd(shell, "-i", "-c", `echo -e "\n`+exitMsg+`"; exec `+shell)
+	}
+
+	psArgs := []string{"-NoLogo", "-NoExit", "-Command", `Write-Host ""; Write-Host "` + exitMsg + `"`}
+	if path, err := exec.LookPath("pwsh.exe"); err == nil {
+		return execCmd(path, psArgs...)
+	}
+	if path, err := exec.LookPath("powershell.exe"); err == nil {
+		return execCmd(path, psArgs...)
+	}
+	// Use absolute path to cmd.exe to prevent PATH hijacking (CWE-426).
+	return execCmd(shellpath.WindowsCmdExe(), "/K", "echo. & echo "+exitMsg)
+}
+
+// execCmd is a thin wrapper around exec.Command used for interactive
+// processes whose lifecycle is owned by tea.ExecProcess (not a context).
+func execCmd(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...) //nolint:noctx // owned by tea.ExecProcess
 }

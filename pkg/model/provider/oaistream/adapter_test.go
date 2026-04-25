@@ -21,7 +21,9 @@ func newTestStream(t *testing.T, sseData string) *ssestream.Stream[openai.ChatCo
 	}))
 	t.Cleanup(srv.Close)
 
-	resp, err := http.Get(srv.URL) //nolint:gosec,bodyclose // body is closed by the stream
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // body is closed by the stream
 	require.NoError(t, err)
 	return ssestream.NewStream[openai.ChatCompletionChunk](ssestream.NewDecoder(resp), nil)
 }

@@ -247,7 +247,9 @@ func TestBearerTokenTransport(t *testing.T) {
 
 	// Make a request through the transport
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(server.URL)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 

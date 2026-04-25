@@ -18,6 +18,24 @@ import (
 	"github.com/docker/docker-agent/pkg/remote"
 )
 
+// remoteHTTPTimeout caps each HTTP request made to a remote skills source.
+const remoteHTTPTimeout = 30 * time.Second
+
+// httpGet performs a GET request using the standard remote transport so that
+// Docker Desktop proxy/SSL settings are honoured. The returned response body
+// must be closed by the caller.
+func httpGet(ctx context.Context, url string) (*http.Response, error) {
+	client := &http.Client{
+		Timeout:   remoteHTTPTimeout,
+		Transport: remote.NewTransport(ctx),
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("creating request for %s: %w", url, err)
+	}
+	return client.Do(req)
+}
+
 type diskCache struct {
 	baseDir string
 }
@@ -70,11 +88,7 @@ func (c *diskCache) Get(baseURL, skillName, filePath string) (string, bool) {
 func (c *diskCache) FetchAndStore(ctx context.Context, baseURL, skillName, filePath, fileURL string) (string, error) {
 	slog.Debug("Fetching remote skill file", "url", fileURL)
 
-	httpClient := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: remote.NewTransport(ctx),
-	}
-	resp, err := httpClient.Get(fileURL)
+	resp, err := httpGet(ctx, fileURL)
 	if err != nil {
 		return "", fmt.Errorf("fetching %s: %w", fileURL, err)
 	}

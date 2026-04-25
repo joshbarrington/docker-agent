@@ -10,10 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/docker/docker-agent/pkg/paths"
-	"github.com/docker/docker-agent/pkg/remote"
 )
 
 // remoteIndex represents the index.json served at /.well-known/skills/index.json
@@ -45,11 +43,7 @@ func loadRemoteSkillsWithCache(ctx context.Context, baseURL string, cache *diskC
 
 	slog.Debug("Fetching remote skills index", "url", indexURL)
 
-	httpClient := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: remote.NewTransport(ctx),
-	}
-	resp, err := httpClient.Get(indexURL)
+	resp, err := httpGet(ctx, indexURL)
 	if err != nil {
 		slog.Warn("Failed to fetch remote skills index", "url", indexURL, "error", err)
 		return nil

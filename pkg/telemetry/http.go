@@ -123,8 +123,12 @@ func (tc *Client) performHTTPRequest(event *EventPayload, version string) error 
 		return fmt.Errorf("failed to marshal request to JSON: %w", err)
 	}
 
+	// Send request with timeout context
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	// Create HTTP request
-	req, err := http.NewRequest(http.MethodPost, tc.endpoint, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tc.endpoint, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -147,11 +151,6 @@ func (tc *Client) performHTTPRequest(event *EventPayload, version string) error 
 		"payload_size", len(jsonData),
 		"payload", string(jsonData),
 	)
-
-	// Send request with timeout context
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	req = req.WithContext(ctx)
 
 	resp, err := tc.httpClient.Do(req)
 	if err != nil {

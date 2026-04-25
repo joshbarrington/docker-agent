@@ -17,7 +17,8 @@ import (
 
 // makeTestOpenAIError creates an *openai.Error with the given status code and
 // optional Retry-After header value for testing.
-func makeTestOpenAIError(statusCode int, retryAfterValue string) *openaisdk.Error {
+func makeTestOpenAIError(t *testing.T, statusCode int, retryAfterValue string) *openaisdk.Error {
+	t.Helper()
 	header := http.Header{}
 	if retryAfterValue != "" {
 		header.Set("Retry-After", retryAfterValue)
@@ -26,7 +27,7 @@ func makeTestOpenAIError(statusCode int, retryAfterValue string) *openaisdk.Erro
 	resp.StatusCode = statusCode
 	resp.Header = header
 	// openai.Error.Error() dereferences Request, so we must provide a non-nil one.
-	req, _ := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/chat/completions", http.NoBody)
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://api.openai.com/v1/chat/completions", http.NoBody)
 	return &openaisdk.Error{
 		StatusCode: statusCode,
 		Response:   resp,
@@ -53,7 +54,7 @@ func TestWrapOpenAIError(t *testing.T) {
 
 	t.Run("429 without Retry-After wraps with zero RetryAfter", func(t *testing.T) {
 		t.Parallel()
-		apiErr := makeTestOpenAIError(429, "")
+		apiErr := makeTestOpenAIError(t, 429, "")
 		result := WrapOpenAIError(apiErr)
 		var se *modelerrors.StatusError
 		require.ErrorAs(t, result, &se)
@@ -65,7 +66,7 @@ func TestWrapOpenAIError(t *testing.T) {
 
 	t.Run("429 with Retry-After header sets RetryAfter", func(t *testing.T) {
 		t.Parallel()
-		apiErr := makeTestOpenAIError(429, "30")
+		apiErr := makeTestOpenAIError(t, 429, "30")
 		result := WrapOpenAIError(apiErr)
 		var se *modelerrors.StatusError
 		require.ErrorAs(t, result, &se)
@@ -75,7 +76,7 @@ func TestWrapOpenAIError(t *testing.T) {
 
 	t.Run("500 wraps with correct status code", func(t *testing.T) {
 		t.Parallel()
-		apiErr := makeTestOpenAIError(500, "")
+		apiErr := makeTestOpenAIError(t, 500, "")
 		result := WrapOpenAIError(apiErr)
 		var se *modelerrors.StatusError
 		require.ErrorAs(t, result, &se)
@@ -84,7 +85,7 @@ func TestWrapOpenAIError(t *testing.T) {
 
 	t.Run("wrapped error is classified correctly by ClassifyModelError", func(t *testing.T) {
 		t.Parallel()
-		apiErr := makeTestOpenAIError(429, "10")
+		apiErr := makeTestOpenAIError(t, 429, "10")
 		result := WrapOpenAIError(apiErr)
 		retryable, rateLimited, retryAfter := modelerrors.ClassifyModelError(result)
 		assert.False(t, retryable)
@@ -94,7 +95,7 @@ func TestWrapOpenAIError(t *testing.T) {
 
 	t.Run("wrapped in fmt.Errorf still classified correctly", func(t *testing.T) {
 		t.Parallel()
-		apiErr := makeTestOpenAIError(500, "")
+		apiErr := makeTestOpenAIError(t, 500, "")
 		wrapped := fmt.Errorf("stream error: %w", WrapOpenAIError(apiErr))
 		retryable, rateLimited, _ := modelerrors.ClassifyModelError(wrapped)
 		assert.True(t, retryable)

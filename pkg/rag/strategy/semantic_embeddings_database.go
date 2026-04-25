@@ -79,12 +79,12 @@ func (d *semanticVectorDB) createSchema() error {
 	);
 	`, d.filesTable, d.tablePrefix, d.filesTable, d.chunksTable, d.filesTable)
 
-	if _, err := d.db.Exec(schema); err != nil {
+	if _, err := d.db.ExecContext(context.Background(), schema); err != nil {
 		return err
 	}
 
 	// Migration for existing databases that don't have embedding_input column
-	_, _ = d.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN embedding_input TEXT`, d.chunksTable))
+	_, _ = d.db.ExecContext(context.Background(), fmt.Sprintf(`ALTER TABLE %s ADD COLUMN embedding_input TEXT`, d.chunksTable))
 
 	return nil
 }
@@ -254,8 +254,5 @@ func (d *semanticVectorDB) DeleteFileMetadata(ctx context.Context, sourcePath st
 }
 
 func (d *semanticVectorDB) Close() error {
-	if _, err := d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		slog.Warn("Failed to checkpoint WAL before close", "error", err)
-	}
-	return d.db.Close()
+	return sqliteutil.CheckpointAndClose(d.db)
 }

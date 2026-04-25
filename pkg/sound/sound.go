@@ -3,6 +3,7 @@
 package sound
 
 import (
+	"context"
 	"log/slog"
 	"os/exec"
 	"runtime"
@@ -42,6 +43,12 @@ func playSound(event Event) error {
 	}
 }
 
+// runDetached executes a command for fire-and-forget audio playback. The
+// process is short-lived and not tied to any caller-provided context.
+func runDetached(name string, args ...string) error {
+	return exec.CommandContext(context.Background(), name, args...).Run()
+}
+
 func playDarwin(event Event) error {
 	// Use macOS built-in system sounds via afplay
 	var soundFile string
@@ -51,7 +58,7 @@ func playDarwin(event Event) error {
 	case Failure:
 		soundFile = "/System/Library/Sounds/Basso.aiff"
 	}
-	return exec.Command("afplay", soundFile).Run()
+	return runDetached("afplay", soundFile)
 }
 
 func playLinux(event Event) error {
@@ -65,11 +72,11 @@ func playLinux(event Event) error {
 	}
 
 	if path, err := exec.LookPath("paplay"); err == nil {
-		return exec.Command(path, soundFile).Run()
+		return runDetached(path, soundFile)
 	}
 
 	// Fallback: terminal bell via printf
-	return exec.Command("printf", `\a`).Run()
+	return runDetached("printf", `\a`)
 }
 
 func playWindows(event Event) error {
@@ -81,5 +88,5 @@ func playWindows(event Event) error {
 	case Failure:
 		script = `[System.Media.SystemSounds]::Hand.Play()`
 	}
-	return exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", script).Run()
+	return runDetached("powershell", "-NoProfile", "-NonInteractive", "-Command", script)
 }

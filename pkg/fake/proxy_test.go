@@ -61,7 +61,7 @@ func TestAPIKeyHeaderUpdater(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(tt.envKey, tt.envValue)
 
-			req, err := http.NewRequest(http.MethodPost, "https://example.com", http.NoBody)
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.com", http.NoBody)
 			require.NoError(t, err)
 
 			APIKeyHeaderUpdater(tt.host, req)
@@ -72,7 +72,7 @@ func TestAPIKeyHeaderUpdater(t *testing.T) {
 }
 
 func TestAPIKeyHeaderUpdater_UnknownHost(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "https://example.com", http.NoBody)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "https://example.com", http.NoBody)
 	require.NoError(t, err)
 
 	APIKeyHeaderUpdater("https://unknown.host.com", req)
@@ -222,7 +222,7 @@ func TestStreamCopy_ContextCancellation(t *testing.T) {
 
 	// Create an echo context with a request that has a cancelable context
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
 	rec := &readerFromRecorder{httptest.NewRecorder()}
 	ctx, cancel := context.WithCancel(t.Context())
 	req = req.WithContext(ctx)
@@ -258,7 +258,7 @@ func TestStreamCopy_NormalCompletion(t *testing.T) {
 
 	// Create an echo context with a wrapped recorder
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
 	rec := &readerFromRecorder{httptest.NewRecorder()}
 	c := e.NewContext(req, rec)
 
@@ -279,7 +279,7 @@ func TestSimulatedStreamCopy_SSEEvents(t *testing.T) {
 
 	// Create an echo context
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
@@ -340,7 +340,7 @@ func TestSimulatedStreamCopy_ContextCancellation(t *testing.T) {
 	}
 
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
 	rec := httptest.NewRecorder()
 	ctx, cancel := context.WithCancel(t.Context())
 	req = req.WithContext(ctx)

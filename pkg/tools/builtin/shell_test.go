@@ -359,7 +359,7 @@ func TestReapSpawnedChild(t *testing.T) {
 		t.Skip("POSIX-specific: relies on /bin/sh and ProcessState.Exited()")
 	}
 
-	cmd := exec.Command("/bin/sh", "-c", "sleep 60")
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", "sleep 60")
 	cmd.SysProcAttr = platformSpecificSysProcAttr()
 	require.NoError(t, cmd.Start())
 
@@ -381,7 +381,7 @@ func TestReapSpawnedChild_HandlesAlreadyExited(t *testing.T) {
 		t.Skip("POSIX-specific")
 	}
 
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", "exit 0")
 	require.NoError(t, cmd.Start())
 	// Give the child a moment to exit on its own.
 	time.Sleep(50 * time.Millisecond)

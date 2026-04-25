@@ -1,9 +1,11 @@
 package sqliteutil
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -40,7 +42,7 @@ func OpenDB(path string) (*sql.DB, error) {
 	db.SetConnMaxLifetime(0)
 
 	// Verify connection works (this will trigger file creation/open)
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(context.Background()); err != nil {
 		db.Close()
 		if IsCantOpenError(err) {
 			return nil, DiagnoseDBOpenError(path, err)
@@ -77,4 +79,15 @@ func DiagnoseDBOpenError(path string, originalErr error) error {
 	}
 
 	return fmt.Errorf("cannot create database at %q: permission denied or file cannot be created in %q (original error: %w)", path, dir, originalErr)
+}
+
+// CheckpointAndClose runs a final WAL checkpoint and closes the database.
+// The TRUNCATE checkpoint folds the -wal file back into the main database
+// so it isn't left behind on disk after shutdown. A checkpoint failure is
+// logged but does not prevent the close.
+func CheckpointAndClose(db *sql.DB) error {
+	if _, err := db.ExecContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		slog.Warn("Failed to checkpoint WAL before close", "error", err)
+	}
+	return db.Close()
 }

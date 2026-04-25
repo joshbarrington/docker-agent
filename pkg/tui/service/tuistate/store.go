@@ -35,7 +35,8 @@ func New() (*Store, error) {
 
 // migrate runs database migrations.
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+	ctx := context.Background()
+	_, err := s.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS tabs (
 			session_id TEXT PRIMARY KEY,
 			working_dir TEXT NOT NULL,
@@ -63,18 +64,18 @@ func (s *Store) migrate() error {
 	}
 
 	// Add sidebar_collapsed column if it doesn't exist (migration for existing databases).
-	_, _ = s.db.Exec(`ALTER TABLE tabs ADD COLUMN sidebar_collapsed BOOLEAN NOT NULL DEFAULT 0`)
+	_, _ = s.db.ExecContext(ctx, `ALTER TABLE tabs ADD COLUMN sidebar_collapsed BOOLEAN NOT NULL DEFAULT 0`)
 
 	// Add position column for explicit tab ordering.
-	_, _ = s.db.Exec(`ALTER TABLE tabs ADD COLUMN position INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.ExecContext(ctx, `ALTER TABLE tabs ADD COLUMN position INTEGER NOT NULL DEFAULT 0`)
 
 	// Backfill position for databases that predate the column: assign positions
 	// based on existing created_at order so the visible order is preserved.
 	// Only runs when all positions are 0 (i.e. column was just added).
 	var maxPos int
-	_ = s.db.QueryRow(`SELECT COALESCE(MAX(position), 0) FROM tabs`).Scan(&maxPos)
+	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(position), 0) FROM tabs`).Scan(&maxPos)
 	if maxPos == 0 {
-		_, _ = s.db.Exec(`
+		_, _ = s.db.ExecContext(ctx, `
 			UPDATE tabs SET position = (
 				SELECT COUNT(*) FROM tabs t2 WHERE t2.created_at < tabs.created_at
 			)

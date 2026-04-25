@@ -647,7 +647,7 @@ func TestNewSQLiteSessionStore_RejectsNewerDatabase(t *testing.T) {
 	// Inject a future migration into the database to simulate a newer version
 	db, err := sql.Open("sqlite", dbPath)
 	require.NoError(t, err)
-	_, err = db.Exec(
+	_, err = db.ExecContext(t.Context(),
 		"INSERT INTO migrations (id, name, description, applied_at) VALUES (?, ?, ?, ?)",
 		9999, "9999_future_migration", "Added by a newer version", "2099-01-01T00:00:00Z")
 	require.NoError(t, err)

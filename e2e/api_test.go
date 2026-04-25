@@ -47,7 +47,9 @@ func TestCagentAPI_ListSessions(t *testing.T) {
 				},
 			}
 
-			resp, err := client.Get("http://localhost/api/sessions")
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://localhost/api/sessions", http.NoBody)
+			require.NoError(t, err)
+			resp, err := client.Do(req)
 			require.NoError(t, err)
 			defer resp.Body.Close()
 

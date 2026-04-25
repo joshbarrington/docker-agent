@@ -2461,7 +2461,8 @@ func (m *appModel) openExternalEditor() (tea.Model, tea.Cmd) {
 	// Parse editor command (may include arguments like "code --wait")
 	parts := strings.Fields(editorCmd)
 	args := append(parts[1:], tmpPath)
-	cmd := exec.Command(parts[0], args...)
+	// External editor is owned by tea.ExecProcess, so exec.Command is intentional.
+	cmd := exec.Command(parts[0], args...) //nolint:noctx // owned by tea.ExecProcess
 
 	ed := m.editor
 	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {

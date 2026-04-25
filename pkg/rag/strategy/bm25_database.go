@@ -81,7 +81,7 @@ func (d *bm25DB) createSchema() error {
 		d.metadataTable,
 		d.tablePrefix, d.metadataTable)
 
-	_, err := d.db.Exec(schema)
+	_, err := d.db.ExecContext(context.Background(), schema)
 	return err
 }
 
@@ -208,10 +208,7 @@ func (d *bm25DB) DeleteFileMetadata(ctx context.Context, sourcePath string) erro
 }
 
 func (d *bm25DB) Close() error {
-	if _, err := d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		slog.Warn("Failed to checkpoint WAL before close", "error", err)
-	}
-	return d.db.Close()
+	return sqliteutil.CheckpointAndClose(d.db)
 }
 
 // ensureDir creates the parent directory for a file path if it doesn't exist

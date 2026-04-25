@@ -491,14 +491,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			slog.Debug("Conversation stopped", "agent", a.Name())
 			r.executeStopHooks(ctx, sess, a, res.Content, events)
 
-			// Persist the response in the cache so the same question
-			// returns the same answer next time. Only the first stop
-			// of the stream (i.e. the response to the original user
-			// question, before any follow-ups) is cached.
-			if c := a.Cache(); c != nil && cacheQuestion != "" && strings.TrimSpace(res.Content) != "" {
-				c.Store(cacheQuestion, res.Content)
-				cacheQuestion = ""
-			}
+			// Persist this turn's response under the user's original
+			// question. Only the first stop is cached: follow-ups in
+			// the same RunStream answer different questions.
+			r.cacheTurnResponse(a, &cacheQuestion, res.Content)
 
 			// Re-check steer queue: closes the race between the mid-loop drain and this stop.
 			if drained, _ := r.drainAndEmitSteered(ctx, sess, events); drained {

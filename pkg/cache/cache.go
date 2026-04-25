@@ -77,16 +77,60 @@ func New(cfg Config) (Cache, error) {
 		return nil, nil //nolint:nilnil // intentional: nil signals caching disabled
 	}
 
-	normalize := keyNormalizer(cfg.CaseSensitive, cfg.TrimSpaces)
-
-	if cfg.Path == "" {
-		return &memoryCache{
-			entries:   make(map[string]string),
-			normalize: normalize,
-		}, nil
+	c := &cache{
+		entries:   make(map[string]string),
+		normalize: keyNormalizer(cfg.CaseSensitive, cfg.TrimSpaces),
 	}
 
-	return newFileCache(cfg.Path, normalize)
+	if cfg.Path != "" {
+		if err := loadFromFile(cfg.Path, c.entries); err != nil {
+			return nil, err
+		}
+		path := cfg.Path
+		c.persist = func(snapshot map[string]string) {
+			// Persistence failures must not break a successful agent
+			// turn — entries remain available from memory and the next
+			// Store will retry the file write.
+			_ = writeJSON(path, snapshot)
+		}
+	}
+
+	return c, nil
+}
+
+// cache is a single in-memory store. When persist is non-nil it is also
+// invoked with a snapshot after every Store to mirror entries to durable
+// storage; that keeps the in-memory and on-disk implementations as one
+// piece of code with one extra optional callback.
+type cache struct {
+	mu        sync.RWMutex
+	entries   map[string]string
+	normalize func(string) string
+	persist   func(map[string]string)
+}
+
+func (c *cache) Lookup(question string) (string, bool) {
+	key := c.normalize(question)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	resp, ok := c.entries[key]
+	return resp, ok
+}
+
+func (c *cache) Store(question, response string) {
+	key := c.normalize(question)
+
+	c.mu.Lock()
+	c.entries[key] = response
+	var snapshot map[string]string
+	if c.persist != nil {
+		snapshot = maps.Clone(c.entries)
+	}
+	c.mu.Unlock()
+
+	if c.persist != nil {
+		c.persist(snapshot)
+	}
 }
 
 // keyNormalizer returns a function that applies the configured
@@ -103,102 +147,36 @@ func keyNormalizer(caseSensitive, trimSpaces bool) func(string) string {
 	}
 }
 
-// memoryCache is the default in-memory cache implementation.
-type memoryCache struct {
-	mu        sync.RWMutex
-	entries   map[string]string
-	normalize func(string) string
-}
-
-func (c *memoryCache) Lookup(question string) (string, bool) {
-	key := c.normalize(question)
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	resp, ok := c.entries[key]
-	return resp, ok
-}
-
-func (c *memoryCache) Store(question, response string) {
-	key := c.normalize(question)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries[key] = response
-}
-
-// fileCache wraps memoryCache and persists every Store to a JSON file.
-type fileCache struct {
-	mu        sync.RWMutex
-	path      string
-	entries   map[string]string
-	normalize func(string) string
-}
-
-func newFileCache(path string, normalize func(string) string) (*fileCache, error) {
-	c := &fileCache{
-		path:      path,
-		entries:   make(map[string]string),
-		normalize: normalize,
-	}
-
+// loadFromFile decodes path into entries. A missing file is not an error
+// and leaves entries empty.
+func loadFromFile(path string, entries map[string]string) error {
 	data, err := os.ReadFile(path)
 	switch {
-	case err == nil:
-		if len(data) > 0 {
-			if err := json.Unmarshal(data, &c.entries); err != nil {
-				return nil, fmt.Errorf("loading cache file %q: %w", path, err)
-			}
-		}
 	case errors.Is(err, os.ErrNotExist):
-		// First run: starting with an empty cache is fine.
-	default:
-		return nil, fmt.Errorf("reading cache file %q: %w", path, err)
+		return nil
+	case err != nil:
+		return fmt.Errorf("reading cache file %q: %w", path, err)
 	}
-
-	return c, nil
-}
-
-func (c *fileCache) Lookup(question string) (string, bool) {
-	key := c.normalize(question)
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	resp, ok := c.entries[key]
-	return resp, ok
-}
-
-func (c *fileCache) Store(question, response string) {
-	key := c.normalize(question)
-	c.mu.Lock()
-	c.entries[key] = response
-	snapshot := make(map[string]string, len(c.entries))
-	maps.Copy(snapshot, c.entries)
-	path := c.path
-	c.mu.Unlock()
-
-	if err := writeJSON(path, snapshot); err != nil {
-		// We deliberately swallow the error here: a transient write
-		// failure should not break a successful agent turn. The cache
-		// will still serve from memory and try to persist again on the
-		// next Store.
-		_ = err
+	if len(data) == 0 {
+		return nil
 	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return fmt.Errorf("loading cache file %q: %w", path, err)
+	}
+	return nil
 }
 
-// writeJSON atomically writes the given map to path as pretty-printed JSON.
+// writeJSON atomically writes entries to path as pretty-printed JSON.
 //
-// Atomicity is achieved by writing to a temporary file in the same
-// directory and then renaming it over the destination: POSIX guarantees
-// concurrent readers see either the old file or the new file in full,
-// never a partially written one.
-//
-// Durability across an OS crash or power loss is achieved by fsync'ing
-// the temp file before the rename and fsync'ing the parent directory
-// after, so the rename itself is persisted.
+// The new content is written to a sibling temp file, fsync'd, and renamed
+// over the destination. POSIX guarantees the rename is atomic, so a
+// concurrent reader sees either the previous content or the new content
+// in full — never a partial write. The parent directory is fsync'd
+// after the rename so the rename itself is durable across an OS crash.
 func writeJSON(path string, entries map[string]string) error {
 	dir := filepath.Dir(path)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("creating cache directory %q: %w", dir, err)
-		}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating cache directory %q: %w", dir, err)
 	}
 
 	data, err := json.MarshalIndent(entries, "", "  ")
@@ -211,18 +189,13 @@ func writeJSON(path string, entries map[string]string) error {
 		return fmt.Errorf("creating temp cache file: %w", err)
 	}
 	tmpName := tmp.Name()
-	// If anything below fails, make sure the temp file is cleaned up.
-	// On the success path the rename moves it away and Remove becomes a
-	// harmless no-op.
+	// Cleanup on any error path; harmless once Rename has moved the file.
 	defer os.Remove(tmpName)
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("writing temp cache file: %w", err)
 	}
-	// fsync the file contents to disk before the rename so a crash
-	// between rename and flush cannot leave the destination pointing at
-	// a zero-length file.
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return fmt.Errorf("syncing temp cache file: %w", err)
@@ -235,15 +208,18 @@ func writeJSON(path string, entries map[string]string) error {
 		return fmt.Errorf("renaming cache file: %w", err)
 	}
 
-	// fsync the parent directory so the rename itself is durable.
-	// Best-effort: directory fsync is not supported on every platform
-	// (e.g. Windows), and a failure here does not invalidate the data
-	// already written to disk.
-	if dirName := dir; dirName != "" {
-		if d, err := os.Open(dirName); err == nil {
-			_ = d.Sync()
-			_ = d.Close()
-		}
-	}
+	syncDir(dir)
 	return nil
+}
+
+// syncDir best-effort fsyncs a directory so a recent rename inside it is
+// persisted. Directory fsync is not portable (e.g. unsupported on
+// Windows); a failure here does not invalidate the data.
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }

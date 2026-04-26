@@ -188,6 +188,80 @@ func TestModelOverride(t *testing.T) {
 	assert.Equal(t, "openai/gpt-4o", model.ID())
 }
 
+func TestSnapshotAndRestoreModelOverride(t *testing.T) {
+	t.Parallel()
+
+	defaultModel := &mockProvider{id: "openai/gpt-4o"}
+	skillModel := &mockProvider{id: "openai/gpt-4o-mini"}
+	userModel := &mockProvider{id: "anthropic/claude-sonnet-4-0"}
+
+	t.Run("restores when no concurrent change", func(t *testing.T) {
+		t.Parallel()
+		a := New("root", "test", WithModel(defaultModel))
+
+		prev := a.SnapshotModelOverride()
+		a.SetModelOverride(skillModel)
+		ours := a.SnapshotModelOverride()
+		assert.Equal(t, "openai/gpt-4o-mini", a.Model().ID())
+
+		a.RestoreModelOverride(prev, ours)
+		assert.False(t, a.HasModelOverride())
+		assert.Equal(t, "openai/gpt-4o", a.Model().ID())
+	})
+
+	t.Run("restores back to a pre-existing override", func(t *testing.T) {
+		t.Parallel()
+		a := New("root", "test", WithModel(defaultModel))
+		a.SetModelOverride(userModel)
+
+		prev := a.SnapshotModelOverride()
+		a.SetModelOverride(skillModel)
+		ours := a.SnapshotModelOverride()
+		assert.Equal(t, "openai/gpt-4o-mini", a.Model().ID())
+
+		a.RestoreModelOverride(prev, ours)
+		assert.Equal(t, "anthropic/claude-sonnet-4-0", a.Model().ID())
+	})
+
+	t.Run("keeps a concurrent change instead of restoring", func(t *testing.T) {
+		// This is the TUI-while-skill-runs scenario: another caller
+		// changes the override between SnapshotModelOverride and
+		// RestoreModelOverride. The deferred restore must NOT clobber
+		// that change.
+		t.Parallel()
+		a := New("root", "test", WithModel(defaultModel))
+
+		prev := a.SnapshotModelOverride()
+		a.SetModelOverride(skillModel)
+		ours := a.SnapshotModelOverride()
+
+		// Simulate concurrent TUI model switch.
+		a.SetModelOverride(userModel)
+
+		a.RestoreModelOverride(prev, ours)
+		require.True(t, a.HasModelOverride(), "user's model choice must be preserved")
+		assert.Equal(t, "anthropic/claude-sonnet-4-0", a.Model().ID())
+	})
+
+	t.Run("keeps a concurrent clear instead of restoring", func(t *testing.T) {
+		// Same as above but the concurrent caller clears the override
+		// (e.g. user revert via TUI). The restore must respect that.
+		t.Parallel()
+		a := New("root", "test", WithModel(defaultModel))
+		a.SetModelOverride(userModel)
+
+		prev := a.SnapshotModelOverride()
+		a.SetModelOverride(skillModel)
+		ours := a.SnapshotModelOverride()
+
+		// Simulate concurrent TUI revert.
+		a.SetModelOverride()
+
+		a.RestoreModelOverride(prev, ours)
+		assert.False(t, a.HasModelOverride(), "user's revert must be preserved")
+	})
+}
+
 func TestModel_LogsSelection(t *testing.T) {
 	t.Parallel()
 

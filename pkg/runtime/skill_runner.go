@@ -68,22 +68,27 @@ func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session
 	)
 
 	// If the skill declares a model override, apply it for the duration of
-	// the sub-session and restore the previous override when done. The
-	// parent agent loop is blocked while the sub-session runs, so this
-	// save/restore is safe. SetAgentModel handles every accepted form
-	// (named model, alloy, inline provider/model, inline alloy); on
-	// failure we just log a warning and fall back to the parent's model.
+	// the sub-session and restore the previous override when done.
+	// SetAgentModel handles every accepted form (named model, alloy, inline
+	// provider/model, inline alloy); on failure we just log a warning and
+	// fall back to the agent's currently-active model.
+	//
+	// We snapshot before and after the apply so the deferred restore can
+	// CAS back to the previous value only if no concurrent caller (e.g. the
+	// TUI model picker) changed the override in the meantime — otherwise
+	// the user's choice would be silently reverted on skill completion.
 	if skill.Model != "" {
-		prev := a.ModelOverrides()
+		prev := a.SnapshotModelOverride()
 		if err := r.SetAgentModel(ctx, ca, skill.Model); err != nil {
-			slog.Warn("Failed to apply skill model override; using default model",
+			slog.Warn("Failed to apply skill model override; using current model",
 				"agent", ca,
 				"skill", params.Name,
 				"model", skill.Model,
 				"error", err,
 			)
 		} else {
-			defer a.SetModelOverride(prev...)
+			ours := a.SnapshotModelOverride()
+			defer a.RestoreModelOverride(prev, ours)
 		}
 	}
 

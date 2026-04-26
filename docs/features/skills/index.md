@@ -168,7 +168,15 @@ model: openai/gpt-4o-mini
 
 If the model reference cannot be resolved (unknown name, missing
 credentials, runtime not configured for model switching, …) the skill
-falls back to the parent agent's default model and a warning is logged.
+falls back to the agent's currently-active model (its configured
+default, or any override the user previously set via the model picker)
+and a warning is logged.
+
+When the skill completes, the agent's previous model is restored — but
+only if no one else changed the model in the meantime. If the user
+switches the model via the TUI model picker while the fork skill is
+running, their choice is preserved (the deferred restore becomes a
+no-op).
 
 ## Search Paths
 

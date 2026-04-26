@@ -182,14 +182,53 @@ func (a *Agent) HasModelOverride() bool {
 
 // ModelOverrides returns the currently active model override providers,
 // or nil when no override is set. The returned slice is a copy so it can
-// be safely retained by the caller (e.g. to save/restore the override
-// around a sub-session).
+// be safely retained by the caller for read-only inspection.
+//
+// Do NOT use this for save/restore around a temporary override: the
+// returned slice is a snapshot of the contents at call time, so naive
+// save+restore can clobber a concurrent change made by another caller
+// (e.g. the TUI model picker switching the model while a skill
+// sub-session is running). Use SnapshotModelOverride / RestoreModelOverride
+// for safe scoped overrides instead.
 func (a *Agent) ModelOverrides() []provider.Provider {
 	overrides := a.modelOverrides.Load()
 	if overrides == nil || len(*overrides) == 0 {
 		return nil
 	}
 	return append([]provider.Provider(nil), (*overrides)...)
+}
+
+// ModelOverrideSnapshot is an opaque token that captures the agent's model
+// override at a point in time. Pass it to RestoreModelOverride to undo a
+// scoped override safely.
+type ModelOverrideSnapshot struct {
+	// ptr is the raw atomic pointer value at snapshot time. It is used for
+	// pointer-identity compare-and-swap, never dereferenced by callers.
+	ptr *[]provider.Provider
+}
+
+// SnapshotModelOverride captures the agent's current model override. The
+// returned snapshot is opaque; pass it to RestoreModelOverride later to
+// restore the captured value.
+func (a *Agent) SnapshotModelOverride() ModelOverrideSnapshot {
+	return ModelOverrideSnapshot{ptr: a.modelOverrides.Load()}
+}
+
+// RestoreModelOverride atomically restores the override to the value
+// captured by `prev`, but only if the current override is still the one
+// captured by `current` (pointer identity). If another caller has changed
+// the override since `current` was captured, the restore is a no-op so
+// that the concurrent change wins.
+//
+// This is the safe primitive for applying a temporary override around a
+// scope (e.g. a skill sub-session) without clobbering changes made by
+// concurrent callers such as the TUI model picker.
+func (a *Agent) RestoreModelOverride(prev, current ModelOverrideSnapshot) {
+	if a.modelOverrides.CompareAndSwap(current.ptr, prev.ptr) {
+		slog.Debug("Restored model override", "agent", a.name)
+	} else {
+		slog.Debug("Model override changed concurrently; skipping restore", "agent", a.name)
+	}
 }
 
 // ConfiguredModels returns the originally configured models for this agent.

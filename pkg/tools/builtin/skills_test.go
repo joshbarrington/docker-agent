@@ -361,6 +361,66 @@ func TestSkillsToolset_Tools_NoForkSkills(t *testing.T) {
 	assert.Equal(t, ToolNameReadSkill, result[0].Name)
 }
 
+func TestSkillsToolset_PrepareForkSubSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillFile := filepath.Join(tmpDir, "SKILL.md")
+	require.NoError(t, os.WriteFile(skillFile, []byte("system instructions"), 0o644))
+
+	st := NewSkillsToolset([]skills.Skill{
+		{Name: "forked", Description: "Forked", Context: "fork", FilePath: skillFile, BaseDir: tmpDir},
+	}, "")
+
+	prepared, errResult := st.PrepareForkSubSession(t.Context(), RunSkillArgs{Name: "forked", Task: "do the thing"})
+	require.Nil(t, errResult)
+	require.NotNil(t, prepared)
+	assert.Equal(t, "forked", prepared.SkillName)
+	assert.Equal(t, "do the thing", prepared.Task)
+	assert.Equal(t, "system instructions", prepared.Content)
+}
+
+func TestSkillsToolset_PrepareForkSubSession_NotFound(t *testing.T) {
+	st := NewSkillsToolset([]skills.Skill{
+		{Name: "exists", Description: "Exists", Context: "fork", FilePath: "/tmp/nonexistent"},
+	}, "")
+
+	prepared, errResult := st.PrepareForkSubSession(t.Context(), RunSkillArgs{Name: "missing", Task: "x"})
+	assert.Nil(t, prepared)
+	require.NotNil(t, errResult)
+	assert.True(t, errResult.IsError)
+	assert.Contains(t, errResult.Output, "not found")
+}
+
+func TestSkillsToolset_PrepareForkSubSession_NotFork(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillFile := filepath.Join(tmpDir, "SKILL.md")
+	require.NoError(t, os.WriteFile(skillFile, []byte("inline"), 0o644))
+
+	st := NewSkillsToolset([]skills.Skill{
+		// No Context: "fork" — this is an inline skill.
+		{Name: "inline-only", Description: "Inline", FilePath: skillFile, BaseDir: tmpDir},
+	}, "")
+
+	prepared, errResult := st.PrepareForkSubSession(t.Context(), RunSkillArgs{Name: "inline-only", Task: "x"})
+	assert.Nil(t, prepared)
+	require.NotNil(t, errResult)
+	assert.True(t, errResult.IsError)
+	assert.Contains(t, errResult.Output, "not configured for sub-agent execution")
+	assert.Contains(t, errResult.Output, "use read_skill instead")
+}
+
+func TestSkillsToolset_PrepareForkSubSession_ReadFailure(t *testing.T) {
+	st := NewSkillsToolset([]skills.Skill{
+		// FilePath does not exist on disk; ReadSkillContent will fail.
+		{Name: "forked", Description: "Forked", Context: "fork", FilePath: "/does/not/exist/SKILL.md"},
+	}, "")
+
+	prepared, errResult := st.PrepareForkSubSession(t.Context(), RunSkillArgs{Name: "forked", Task: "x"})
+	assert.Nil(t, prepared)
+	require.NotNil(t, errResult)
+	assert.True(t, errResult.IsError)
+	assert.Contains(t, errResult.Output, "failed to read skill content")
+}
+
 func TestSkillsToolset_Tools_ForkAndFiles(t *testing.T) {
 	st := NewSkillsToolset([]skills.Skill{
 		{Name: "full", Description: "Full skill", Context: "fork", Files: []string{"SKILL.md", "ref.md"}},

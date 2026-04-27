@@ -69,11 +69,21 @@ type Options struct {
 	// run. Zero means use the package default (5 minutes). The cap covers
 	// model calls, tool calls, and SSE streaming combined.
 	RequestTimeout time.Duration
+	// ConversationsMaxSessions, when > 0, enables the X-Conversation-Id
+	// header: clients can pass a stable id to reuse the same session
+	// across requests instead of re-sending the full message history
+	// every turn. This is the size of the in-memory LRU cache.
+	ConversationsMaxSessions int
+	// ConversationTTL is how long a cached conversation may be idle
+	// before it's evicted. Zero means use the package default
+	// (30 minutes).
+	ConversationTTL time.Duration
 }
 
 const (
 	defaultMaxRequestBytes int64         = 1 << 20 // 1 MiB
 	defaultRequestTimeout  time.Duration = 5 * time.Minute
+	defaultConversationTTL time.Duration = 30 * time.Minute
 )
 
 // Run starts an OpenAI-compatible HTTP server on the given listener and
@@ -99,10 +109,17 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 	}
 
 	httpServer := &http.Server{
-		Handler:           newRouter(&server{team: t, policy: policy}, opts),
+		Handler:           newRouter(&server{team: t, policy: policy, conversations: newConversationStore(opts.ConversationsMaxSessions, conversationTTL(opts))}, opts),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	return serve(ctx, httpServer, ln)
+}
+
+func conversationTTL(opts Options) time.Duration {
+	if opts.ConversationTTL > 0 {
+		return opts.ConversationTTL
+	}
+	return defaultConversationTTL
 }
 
 // loadTeam resolves and loads the team referenced by agentFilename.
@@ -139,10 +156,11 @@ func serve(ctx context.Context, httpServer *http.Server, ln net.Listener) error 
 
 // server is concurrent-safe: every request creates its own session and
 // runtime, so the only shared state is the team (whose toolsets are
-// independently safe to call).
+// independently safe to call) and the optional conversation cache.
 type server struct {
-	team   *team.Team
-	policy agentPolicy
+	team          *team.Team
+	policy        agentPolicy
+	conversations *conversationStore
 }
 
 func newRouter(s *server, opts Options) http.Handler {
@@ -235,7 +253,8 @@ func (s *server) handleChatCompletions(c echo.Context) error {
 		return writeError(c, http.StatusBadRequest, err.Error())
 	}
 
-	sess := buildSession(req.Messages)
+	conversationID := c.Request().Header.Get("X-Conversation-Id")
+	sess, isNew := s.resolveSession(conversationID, req.Messages)
 	if sess == nil {
 		return writeError(c, http.StatusBadRequest, "no user message provided")
 	}
@@ -254,9 +273,44 @@ func (s *server) handleChatCompletions(c echo.Context) error {
 	}
 
 	if req.Stream {
-		return s.streamChatCompletion(c, rt, sess, model)
+		err := s.streamChatCompletion(c, rt, sess, model)
+		s.maybeStoreConversation(conversationID, sess, isNew)
+		return err
 	}
-	return s.chatCompletion(c, rt, sess, model)
+	err = s.chatCompletion(c, rt, sess, model)
+	s.maybeStoreConversation(conversationID, sess, isNew)
+	return err
+}
+
+// resolveSession decides whether to start fresh or continue an existing
+// conversation. When X-Conversation-Id is set and we have an existing
+// session for it, we append only the latest user message from the
+// request (the prior history is already in the session). Otherwise we
+// build a brand-new session from the full request history.
+//
+// Returns the session to run, plus a flag indicating whether it was
+// freshly created (so callers know whether they need to insert it into
+// the cache).
+func (s *server) resolveSession(id string, msgs []ChatCompletionMessage) (*session.Session, bool) {
+	if id != "" {
+		if existing := s.conversations.Get(id); existing != nil {
+			appendLatestUser(existing, msgs)
+			return existing, false
+		}
+	}
+	return buildSession(msgs), true
+}
+
+// maybeStoreConversation inserts the session into the cache after a
+// run. We only need to insert when the conversation is new — existing
+// entries are mutated in place.
+func (s *server) maybeStoreConversation(id string, sess *session.Session, isNew bool) {
+	if id == "" || s.conversations == nil {
+		return
+	}
+	if isNew {
+		s.conversations.Put(id, sess)
+	}
 }
 
 // chatCompletion runs the agent to completion and replies with one

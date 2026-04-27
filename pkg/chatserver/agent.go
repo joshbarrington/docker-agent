@@ -104,6 +104,28 @@ func buildSession(messages []ChatCompletionMessage) *session.Session {
 	return sess
 }
 
+// appendLatestUser walks msgs from the end and appends only the last
+// user-role message into sess. Used by conversation continuation, where
+// the session already contains the full prior history and we just need
+// to inject what the client just said.
+func appendLatestUser(sess *session.Session, msgs []ChatCompletionMessage) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		content := strings.TrimSpace(m.Content)
+		if content == "" {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(m.Role))
+		// Treat any non-system/assistant/tool role as user (matches
+		// buildSession's policy).
+		if role == "system" || role == "assistant" || role == "tool" {
+			continue
+		}
+		sess.AddMessage(session.UserMessage(m.Content))
+		return
+	}
+}
+
 // runAgentLoop drives the runtime to completion, forwarding assistant
 // content to emit (which may be nil for non-streaming mode).
 //

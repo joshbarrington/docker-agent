@@ -13,14 +13,16 @@ import (
 )
 
 type chatFlags struct {
-	agentName      string
-	listenAddr     string
-	corsOrigin     string
-	apiKey         string
-	apiKeyEnv      string
-	maxRequestSize int64
-	requestTimeout time.Duration
-	runConfig      config.RuntimeConfig
+	agentName             string
+	listenAddr            string
+	corsOrigin            string
+	apiKey                string
+	apiKeyEnv             string
+	maxRequestSize        int64
+	requestTimeout        time.Duration
+	conversationsMaxItems int
+	conversationTTL       time.Duration
+	runConfig             config.RuntimeConfig
 }
 
 func newChatCmd() *cobra.Command {
@@ -47,6 +49,8 @@ agent without any custom integration.`,
 	cmd.Flags().StringVar(&flags.apiKeyEnv, "api-key-env", "", "Read the API key from this environment variable instead of the command line")
 	cmd.Flags().Int64Var(&flags.maxRequestSize, "max-request-size", 1<<20, "Maximum request body size in bytes (default 1 MiB)")
 	cmd.Flags().DurationVar(&flags.requestTimeout, "request-timeout", 5*time.Minute, "Per-request timeout (covers model + tool calls + streaming)")
+	cmd.Flags().IntVar(&flags.conversationsMaxItems, "conversations-max", 0, "Cache up to N conversations server-side, keyed by X-Conversation-Id (0 disables; clients must resend full history)")
+	cmd.Flags().DurationVar(&flags.conversationTTL, "conversation-ttl", 30*time.Minute, "Idle TTL after which a cached conversation is evicted")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
 	return cmd
@@ -79,11 +83,13 @@ func (f *chatFlags) runChatCommand(cmd *cobra.Command, args []string) (commandEr
 	}
 
 	return chatserver.Run(ctx, agentFilename, chatserver.Options{
-		AgentName:       f.agentName,
-		RunConfig:       &f.runConfig,
-		CORSOrigin:      f.corsOrigin,
-		APIKey:          apiKey,
-		MaxRequestBytes: f.maxRequestSize,
-		RequestTimeout:  f.requestTimeout,
+		AgentName:                f.agentName,
+		RunConfig:                &f.runConfig,
+		CORSOrigin:               f.corsOrigin,
+		APIKey:                   apiKey,
+		MaxRequestBytes:          f.maxRequestSize,
+		RequestTimeout:           f.requestTimeout,
+		ConversationsMaxSessions: f.conversationsMaxItems,
+		ConversationTTL:          f.conversationTTL,
 	}, ln)
 }

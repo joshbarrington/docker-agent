@@ -425,6 +425,7 @@ func (s *server) maybeStoreConversation(id string, sess *session.Session) {
 	s.conversations.Put(id, sess)
 }
 
+// chatCompletion runs the agent to completion and replies with one
 // non-streaming OpenAI ChatCompletion object.
 func (s *server) chatCompletion(c echo.Context, rt runtime.Runtime, sess *session.Session, model string) error {
 	var toolCalls []ToolCallReference

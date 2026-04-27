@@ -328,18 +328,18 @@ func (e *EvalCriteria) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// deepCopyMessage returns a deep copy of a session Message.
+// cloneMessage returns a deep copy of a session Message.
 // It copies the inner chat.Message's slice and pointer fields so that the
 // returned value shares no mutable state with the original.
-func deepCopyMessage(m *Message) *Message {
+func cloneMessage(m *Message) *Message {
 	cp := *m
-	cp.Message = deepCopyChatMessage(m.Message)
+	cp.Message = cloneChatMessage(m.Message)
 	return &cp
 }
 
-// deepCopyChatMessage returns a deep copy of a chat.Message, duplicating
+// cloneChatMessage returns a deep copy of a chat.Message, duplicating
 // all slice and pointer fields that would otherwise alias the original.
-func deepCopyChatMessage(m chat.Message) chat.Message {
+func cloneChatMessage(m chat.Message) chat.Message {
 	if m.MultiContent != nil {
 		orig := m.MultiContent
 		m.MultiContent = make([]chat.MessagePart, len(orig))
@@ -425,7 +425,7 @@ func (s *Session) GetAllMessages() []Message {
 	items := make([]Item, len(s.Messages))
 	for i, item := range s.Messages {
 		if item.Message != nil {
-			items[i] = Item{Message: deepCopyMessage(item.Message)}
+			items[i] = Item{Message: cloneMessage(item.Message)}
 		} else {
 			items[i] = item
 		}
@@ -885,7 +885,7 @@ func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Messag
 	items := make([]Item, len(s.Messages))
 	for i, item := range s.Messages {
 		if item.Message != nil {
-			items[i] = Item{Message: deepCopyMessage(item.Message), Summary: item.Summary, SubSession: item.SubSession, Cost: item.Cost}
+			items[i] = Item{Message: cloneMessage(item.Message), Summary: item.Summary, SubSession: item.SubSession, Cost: item.Cost}
 		} else {
 			items[i] = item
 		}

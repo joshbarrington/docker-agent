@@ -265,7 +265,7 @@ func (s *InMemorySessionStore) AddMessage(_ context.Context, sessionID string, m
 func (s *InMemorySessionStore) UpdateMessage(_ context.Context, messageID int64, msg *Message) error {
 	// Create a deep copy of the message to avoid mutating the caller's pointer,
 	// which may be shared with another Session object.
-	updated := deepCopyMessage(msg)
+	updated := cloneMessage(msg)
 	updated.ID = messageID
 
 	// For in-memory store, we need to find the message across all sessions

@@ -306,10 +306,24 @@ func googleFactory(ctx context.Context, cfg *latest.ModelConfig, env environment
 	// Route non-Gemini models on Vertex AI (Model Garden) through the
 	// vertexai package, which picks the right endpoint per publisher.
 	if vertexai.IsModelGardenConfig(cfg) {
+		return vertexClientFactory(ctx, cfg, env, opts...)
+	}
+	return geminiClientFactory(ctx, cfg, env, opts...)
+}
+
+// geminiClientFactory and vertexClientFactory are the inner constructors used
+// by googleFactory. They are package-level variables (rather than direct
+// references to gemini.NewClient / vertexai.NewClient) so that tests can swap
+// them with fakes via t.Cleanup and assert that googleFactory routes correctly
+// based on vertexai.IsModelGardenConfig — without spinning up real clients.
+var (
+	geminiClientFactory providerFactory = func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+		return gemini.NewClient(ctx, cfg, env, opts...)
+	}
+	vertexClientFactory providerFactory = func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
 		return vertexai.NewClient(ctx, cfg, env, opts...)
 	}
-	return gemini.NewClient(ctx, cfg, env, opts...)
-}
+)
 
 func dmrFactory(ctx context.Context, cfg *latest.ModelConfig, _ environment.Provider, opts ...options.Opt) (Provider, error) {
 	return dmr.NewClient(ctx, cfg, opts...)

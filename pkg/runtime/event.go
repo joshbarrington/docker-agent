@@ -6,6 +6,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -605,6 +606,61 @@ func RAGIndexingCompleted(ragName, strategyName string) Event {
 		StrategyName: strategyName,
 		AgentContext: newAgentContext(""),
 	}
+}
+
+// HookStartedEvent is emitted when a configured hook event begins dispatching.
+type HookStartedEvent struct {
+	AgentContext
+
+	Type      string          `json:"type"`
+	SessionID string          `json:"session_id"`
+	HookEvent hooks.EventType `json:"hook_event"`
+}
+
+func (e *HookStartedEvent) GetSessionID() string { return e.SessionID }
+
+func HookStarted(event hooks.EventType, sessionID, agentName string) Event {
+	return &HookStartedEvent{
+		Type:         "hook_started",
+		SessionID:    sessionID,
+		HookEvent:    event,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+// HookFinishedEvent is emitted when a configured hook event completes.
+type HookFinishedEvent struct {
+	AgentContext
+
+	Type       string          `json:"type"`
+	SessionID  string          `json:"session_id"`
+	HookEvent  hooks.EventType `json:"hook_event"`
+	DurationMs int64           `json:"duration_ms"`
+	Allowed    bool            `json:"allowed"`
+	Error      string          `json:"error,omitempty"`
+	Message    string          `json:"message,omitempty"`
+}
+
+func (e *HookFinishedEvent) GetSessionID() string { return e.SessionID }
+
+func HookFinished(event hooks.EventType, sessionID string, result *hooks.Result, dispatchErr error, duration time.Duration, agentName string) Event {
+	e := &HookFinishedEvent{
+		Type:         "hook_finished",
+		SessionID:    sessionID,
+		HookEvent:    event,
+		DurationMs:   duration.Milliseconds(),
+		Allowed:      true,
+		AgentContext: newAgentContext(agentName),
+	}
+	if result != nil {
+		e.Allowed = result.Allowed
+		e.Message = result.Message
+	}
+	if dispatchErr != nil {
+		e.Allowed = false
+		e.Error = dispatchErr.Error()
+	}
+	return e
 }
 
 // HookBlockedEvent is sent when a pre-tool hook blocks a tool call

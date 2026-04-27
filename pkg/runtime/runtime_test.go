@@ -2895,3 +2895,69 @@ func TestPostToolHookReceivesToolResult(t *testing.T) {
 	assert.False(t, got.ToolError)
 	assert.Equal(t, "hello", got.ToolInput["message"])
 }
+
+func TestPostToolHookEmitsLifecycleEvents(t *testing.T) {
+	registry := hooks.NewRegistry()
+	require.NoError(t, registry.RegisterBuiltin("noop_post_tool", func(_ context.Context, _ *hooks.Input, _ []string) (*hooks.Output, error) {
+		return nil, nil
+	}))
+
+	agentTools := []tools.Tool{{
+		Name:       "echo_tool",
+		Parameters: map[string]any{},
+		Handler: func(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("ok"), nil
+		},
+	}}
+
+	root := agent.New("root", "You are a test agent",
+		agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}),
+		agent.WithToolSets(newStubToolSet(nil, agentTools, nil)),
+		agent.WithHooks(&latest.HooksConfig{
+			PostToolUse: []latest.HookMatcherConfig{{
+				Matcher: "echo_tool",
+				Hooks: []latest.HookDefinition{{
+					Type:    "builtin",
+					Command: "noop_post_tool",
+				}},
+			}},
+		}),
+	)
+	tm := team.New(team.WithAgents(root))
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.hooksRegistry = registry
+	rt.buildHooksExecutors()
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	calls := []tools.ToolCall{{
+		ID:       "call_1",
+		Type:     "function",
+		Function: tools.FunctionCall{Name: "echo_tool", Arguments: `{}`},
+	}}
+
+	events := make(chan Event, 10)
+	rt.processToolCalls(t.Context(), sess, calls, agentTools, events)
+
+	var started *HookStartedEvent
+	var finished *HookFinishedEvent
+	for len(events) > 0 {
+		switch ev := (<-events).(type) {
+		case *HookStartedEvent:
+			started = ev
+		case *HookFinishedEvent:
+			finished = ev
+		}
+	}
+
+	require.NotNil(t, started)
+	assert.Equal(t, hooks.EventPostToolUse, started.HookEvent)
+	assert.Equal(t, sess.ID, started.SessionID)
+	assert.Equal(t, "root", started.AgentName)
+
+	require.NotNil(t, finished)
+	assert.Equal(t, hooks.EventPostToolUse, finished.HookEvent)
+	assert.Equal(t, sess.ID, finished.SessionID)
+	assert.True(t, finished.Allowed)
+	assert.Empty(t, finished.Error)
+}

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -69,11 +70,18 @@ func (r *LocalRuntime) dispatchHook(
 	events chan Event,
 ) *hooks.Result {
 	exec := r.hooksExec(a)
-	if exec == nil {
+	if exec == nil || !exec.Has(event) {
 		return nil
 	}
 
+	started := time.Now()
+	if events != nil {
+		events <- HookStarted(event, input.SessionID, a.Name())
+	}
 	result, err := exec.Dispatch(ctx, event, input)
+	if events != nil {
+		events <- HookFinished(event, input.SessionID, result, err, time.Since(started), a.Name())
+	}
 	if err != nil {
 		slog.Warn("Hook execution failed", "event", event, "agent", a.Name(), "error", err)
 		return nil

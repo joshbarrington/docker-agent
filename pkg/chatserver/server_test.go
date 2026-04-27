@@ -175,6 +175,48 @@ func TestNewRouter_CORSAllowsConfiguredOrigin(t *testing.T) {
 	assert.Equal(t, "https://example.com", rec.Header().Get("Access-Control-Allow-Origin"))
 }
 
+func TestBearerAuthMiddleware(t *testing.T) {
+	cases := []struct {
+		name       string
+		header     string
+		wantStatus int
+	}{
+		{"missing", "", http.StatusUnauthorized},
+		{"wrong scheme", "Basic abc", http.StatusUnauthorized},
+		{"wrong token", "Bearer wrong", http.StatusUnauthorized},
+		{"correct token", "Bearer secret", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newTestServer("root")
+			r := newRouter(srv, Options{APIKey: "secret"})
+
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/models", http.NoBody)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+			rec := httptest.NewRecorder()
+			r.ServeHTTP(rec, req)
+
+			assert.Equal(t, tc.wantStatus, rec.Code)
+		})
+	}
+}
+
+func TestBearerAuthMiddleware_AllowsCORSPreflight(t *testing.T) {
+	// CORS preflight must succeed without an Authorization header.
+	srv, _ := newTestServer("root")
+	r := newRouter(srv, Options{APIKey: "secret", CORSOrigin: "https://example.com"})
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodOptions, "/v1/models", http.NoBody)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusUnauthorized, rec.Code)
+}
+
 func TestNewRouter_RejectsOversizedBody(t *testing.T) {
 	srv, _ := newTestServer("root")
 	r := newRouter(srv, Options{MaxRequestBytes: 16})

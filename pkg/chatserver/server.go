@@ -17,6 +17,7 @@ package chatserver
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,6 +55,13 @@ type Options struct {
 	// header. When empty, the CORS middleware is not registered at all
 	// (the server never emits any Access-Control-* response header).
 	CORSOrigin string
+	// APIKey, if non-empty, is the static bearer token clients must
+	// present in the `Authorization` header (`Authorization: Bearer X`).
+	// Empty disables authentication; once set, every request to /v1/* is
+	// rejected with 401 unless it carries the matching token.
+	// /v1/models is also protected so an unauthenticated client can't
+	// fingerprint the server.
+	APIKey string
 	// MaxRequestBytes caps the size of an incoming request body. Zero
 	// means use the package default (1 MiB).
 	MaxRequestBytes int64
@@ -153,6 +162,9 @@ func newRouter(s *server, opts Options) http.Handler {
 	e.Use(middleware.RequestLogger())
 	e.Use(middleware.BodyLimit(strconv.FormatInt(maxBytes, 10)))
 	e.Use(requestTimeoutMiddleware(timeout))
+	if opts.APIKey != "" {
+		e.Use(bearerAuthMiddleware(opts.APIKey))
+	}
 	if opts.CORSOrigin != "" {
 		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 			AllowOrigins: []string{opts.CORSOrigin},
@@ -175,6 +187,29 @@ func requestTimeoutMiddleware(d time.Duration) echo.MiddlewareFunc {
 			ctx, cancel := context.WithTimeout(c.Request().Context(), d)
 			defer cancel()
 			c.SetRequest(c.Request().WithContext(ctx))
+			return next(c)
+		}
+	}
+}
+
+// bearerAuthMiddleware enforces the static `Authorization: Bearer <token>`
+// header. CORS preflight requests (OPTIONS) are exempted so that browsers
+// can negotiate before sending the auth header.
+//
+// The expected token is captured by closure rather than read per-request,
+// and the comparison uses subtle.ConstantTimeCompare so timing observation
+// can't reveal valid prefixes.
+func bearerAuthMiddleware(expected string) echo.MiddlewareFunc {
+	exp := []byte(expected)
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if c.Request().Method == http.MethodOptions {
+				return next(c)
+			}
+			got, ok := strings.CutPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
+			if !ok || subtle.ConstantTimeCompare([]byte(got), exp) != 1 {
+				return writeError(c, http.StatusUnauthorized, "missing or invalid bearer token")
+			}
 			return next(c)
 		}
 	}

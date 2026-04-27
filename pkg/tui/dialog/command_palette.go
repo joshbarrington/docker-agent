@@ -14,11 +14,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-// CommandExecuteMsg is sent when a command is selected
-type CommandExecuteMsg struct {
-	Command commands.Item
-}
-
 // commandPaletteDialog implements Dialog for the command palette.
 // It uses pickerCore for the shared filter/scroll/select skeleton and only
 // adds the bits that are specific to running commands.

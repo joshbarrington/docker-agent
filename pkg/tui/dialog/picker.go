@@ -306,28 +306,21 @@ func comparePickerSortKeys(a, b pickerSortKeys) int {
 		return cmp.Compare(a.Section, b.Section)
 	}
 	if a.IsCurrent != b.IsCurrent {
-		return boolCompare(b.IsCurrent, a.IsCurrent)
+		if a.IsCurrent {
+			return -1
+		}
+		return 1
 	}
 	if a.IsDefault != b.IsDefault {
-		return boolCompare(b.IsDefault, a.IsDefault)
+		if a.IsDefault {
+			return -1
+		}
+		return 1
 	}
 	if al, bl := strings.ToLower(a.Name), strings.ToLower(b.Name); al != bl {
 		return cmp.Compare(al, bl)
 	}
 	return cmp.Compare(a.Tiebreak, b.Tiebreak)
-}
-
-// boolCompare returns -1/0/1 when comparing booleans where true sorts after
-// false. Pass arguments swapped to invert.
-func boolCompare(a, b bool) int {
-	switch {
-	case a == b:
-		return 0
-	case a:
-		return 1
-	default:
-		return -1
-	}
 }
 
 // -----------------------------------------------------------------------------

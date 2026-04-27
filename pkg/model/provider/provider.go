@@ -292,105 +292,103 @@ func applyProviderDefaults(cfg *latest.ModelConfig, customProviders map[string]l
 	// cloneModelConfig also deep-copies ProviderOpts so writes are safe.
 	enhancedCfg := cloneModelConfig(cfg)
 
-	if customProviders != nil {
-		if providerCfg, exists := customProviders[cfg.Provider]; exists {
-			slog.Debug("Applying custom provider defaults",
-				"provider", cfg.Provider,
-				"model", cfg.Model,
-				"base_url", providerCfg.BaseURL,
-			)
-
-			// Apply the underlying provider type if set on the provider config.
-			// This allows the model to inherit the real provider type (e.g., "anthropic")
-			// so that the correct API client is selected.
-			if providerCfg.Provider != "" {
-				enhancedCfg.Provider = providerCfg.Provider
-			}
-
-			if enhancedCfg.BaseURL == "" && providerCfg.BaseURL != "" {
-				enhancedCfg.BaseURL = providerCfg.BaseURL
-			}
-			if enhancedCfg.TokenKey == "" && providerCfg.TokenKey != "" {
-				enhancedCfg.TokenKey = providerCfg.TokenKey
-			}
-			if enhancedCfg.Temperature == nil && providerCfg.Temperature != nil {
-				enhancedCfg.Temperature = providerCfg.Temperature
-			}
-			if enhancedCfg.MaxTokens == nil && providerCfg.MaxTokens != nil {
-				enhancedCfg.MaxTokens = providerCfg.MaxTokens
-			}
-			if enhancedCfg.TopP == nil && providerCfg.TopP != nil {
-				enhancedCfg.TopP = providerCfg.TopP
-			}
-			if enhancedCfg.FrequencyPenalty == nil && providerCfg.FrequencyPenalty != nil {
-				enhancedCfg.FrequencyPenalty = providerCfg.FrequencyPenalty
-			}
-			if enhancedCfg.PresencePenalty == nil && providerCfg.PresencePenalty != nil {
-				enhancedCfg.PresencePenalty = providerCfg.PresencePenalty
-			}
-			if enhancedCfg.ParallelToolCalls == nil && providerCfg.ParallelToolCalls != nil {
-				enhancedCfg.ParallelToolCalls = providerCfg.ParallelToolCalls
-			}
-			if enhancedCfg.TrackUsage == nil && providerCfg.TrackUsage != nil {
-				enhancedCfg.TrackUsage = providerCfg.TrackUsage
-			}
-			if enhancedCfg.ThinkingBudget == nil && providerCfg.ThinkingBudget != nil {
-				enhancedCfg.ThinkingBudget = providerCfg.ThinkingBudget
-			}
-			if enhancedCfg.TaskBudget == nil && providerCfg.TaskBudget != nil {
-				enhancedCfg.TaskBudget = providerCfg.TaskBudget
-			}
-
-			// Merge provider_opts from provider config (model opts take precedence)
-			if len(providerCfg.ProviderOpts) > 0 {
-				if enhancedCfg.ProviderOpts == nil {
-					enhancedCfg.ProviderOpts = make(map[string]any)
-				}
-				for k, v := range providerCfg.ProviderOpts {
-					if _, has := enhancedCfg.ProviderOpts[k]; !has {
-						enhancedCfg.ProviderOpts[k] = v
-					}
-				}
-			}
-
-			// Set api_type in ProviderOpts if not already set.
-			// Only default to openai_chatcompletions for OpenAI-compatible providers.
-			if providerCfg.APIType != "" {
-				if enhancedCfg.ProviderOpts == nil {
-					enhancedCfg.ProviderOpts = make(map[string]any)
-				}
-				if _, has := enhancedCfg.ProviderOpts["api_type"]; !has {
-					enhancedCfg.ProviderOpts["api_type"] = providerCfg.APIType
-				}
-			} else if isOpenAICompatibleProvider(resolveEffectiveProvider(providerCfg)) {
-				if enhancedCfg.ProviderOpts == nil {
-					enhancedCfg.ProviderOpts = make(map[string]any)
-				}
-				if _, has := enhancedCfg.ProviderOpts["api_type"]; !has {
-					enhancedCfg.ProviderOpts["api_type"] = "openai_chatcompletions"
-				}
-			}
-
-			applyModelDefaults(enhancedCfg)
-			return enhancedCfg
-		}
+	if providerCfg, exists := customProviders[cfg.Provider]; exists {
+		slog.Debug("Applying custom provider defaults",
+			"provider", cfg.Provider,
+			"model", cfg.Model,
+			"base_url", providerCfg.BaseURL,
+		)
+		mergeFromProviderConfig(enhancedCfg, providerCfg)
+		applyModelDefaults(enhancedCfg)
+		return enhancedCfg
 	}
 
 	if alias, exists := Aliases[cfg.Provider]; exists {
-		// Set default base URL if not already specified
-		if enhancedCfg.BaseURL == "" && alias.BaseURL != "" {
-			enhancedCfg.BaseURL = alias.BaseURL
-		}
-
-		// Set default token key if not already specified
-		if enhancedCfg.TokenKey == "" && alias.TokenEnvVar != "" {
-			enhancedCfg.TokenKey = alias.TokenEnvVar
-		}
+		applyAliasFallbacks(enhancedCfg, alias)
 	}
 
 	// Apply model-specific defaults (e.g., thinking budget for Claude/GPT models)
 	applyModelDefaults(enhancedCfg)
 	return enhancedCfg
+}
+
+// mergeFromProviderConfig merges defaults from a custom ProviderConfig into a
+// ModelConfig. Model-level fields always take precedence; provider-level fields
+// only fill in unset (nil/empty) fields. The destination ProviderOpts map is
+// assumed to be safe to mutate (cloneModelConfig copies it).
+func mergeFromProviderConfig(dst *latest.ModelConfig, src latest.ProviderConfig) {
+	// Apply the underlying provider type if set on the provider config.
+	// This allows the model to inherit the real provider type (e.g., "anthropic")
+	// so that the correct API client is selected.
+	if src.Provider != "" {
+		dst.Provider = src.Provider
+	}
+
+	if dst.BaseURL == "" {
+		dst.BaseURL = src.BaseURL
+	}
+	if dst.TokenKey == "" {
+		dst.TokenKey = src.TokenKey
+	}
+	setIfNil(&dst.Temperature, src.Temperature)
+	setIfNil(&dst.MaxTokens, src.MaxTokens)
+	setIfNil(&dst.TopP, src.TopP)
+	setIfNil(&dst.FrequencyPenalty, src.FrequencyPenalty)
+	setIfNil(&dst.PresencePenalty, src.PresencePenalty)
+	setIfNil(&dst.ParallelToolCalls, src.ParallelToolCalls)
+	setIfNil(&dst.TrackUsage, src.TrackUsage)
+	setIfNil(&dst.ThinkingBudget, src.ThinkingBudget)
+	setIfNil(&dst.TaskBudget, src.TaskBudget)
+
+	// Merge provider_opts from provider config (model opts take precedence).
+	for k, v := range src.ProviderOpts {
+		if dst.ProviderOpts == nil {
+			dst.ProviderOpts = make(map[string]any)
+		}
+		if _, has := dst.ProviderOpts[k]; !has {
+			dst.ProviderOpts[k] = v
+		}
+	}
+
+	// Set api_type in ProviderOpts if not already set.
+	// Prefer the explicit APIType from the provider config; otherwise default to
+	// openai_chatcompletions for OpenAI-compatible providers.
+	switch {
+	case src.APIType != "":
+		setProviderOptIfAbsent(dst, "api_type", src.APIType)
+	case isOpenAICompatibleProvider(resolveEffectiveProvider(src)):
+		setProviderOptIfAbsent(dst, "api_type", "openai_chatcompletions")
+	}
+}
+
+// applyAliasFallbacks applies BaseURL and TokenKey defaults from a built-in
+// alias when the model config does not already specify them.
+func applyAliasFallbacks(dst *latest.ModelConfig, alias Alias) {
+	if dst.BaseURL == "" {
+		dst.BaseURL = alias.BaseURL
+	}
+	if dst.TokenKey == "" {
+		dst.TokenKey = alias.TokenEnvVar
+	}
+}
+
+// setIfNil assigns src to *dst when *dst is nil. It centralises the repetitive
+// "only fill in if unset" pattern used when merging provider-level defaults.
+func setIfNil[T any](dst **T, src *T) {
+	if *dst == nil && src != nil {
+		*dst = src
+	}
+}
+
+// setProviderOptIfAbsent stores key=value in cfg.ProviderOpts unless the key is
+// already set. The map is created lazily.
+func setProviderOptIfAbsent(cfg *latest.ModelConfig, key string, value any) {
+	if cfg.ProviderOpts == nil {
+		cfg.ProviderOpts = make(map[string]any)
+	}
+	if _, has := cfg.ProviderOpts[key]; !has {
+		cfg.ProviderOpts[key] = value
+	}
 }
 
 // ---------------------------------------------------------------------------

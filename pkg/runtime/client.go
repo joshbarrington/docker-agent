@@ -342,7 +342,7 @@ func (c *Client) runAgentWithAgentName(ctx context.Context, sessionID, agent, ag
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	eventChan := make(chan Event, 128)
+	eventChan := make(chan Event, defaultEventChannelCapacity)
 
 	go func() {
 		defer close(eventChan)

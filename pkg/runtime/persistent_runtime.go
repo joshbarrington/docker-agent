@@ -49,7 +49,7 @@ func (r *PersistentRuntime) RunStream(ctx context.Context, sess *session.Session
 	}
 
 	innerEvents := r.LocalRuntime.RunStream(ctx, sess)
-	events := make(chan Event, 128)
+	events := make(chan Event, defaultEventChannelCapacity)
 
 	go func() {
 		defer close(events)

@@ -257,6 +257,13 @@ type LocalRuntime struct {
 	// a recorder via WithTelemetry to assert the lifecycle without
 	// standing up an OTel pipeline.
 	telemetry Telemetry
+
+	// maxOverflowCompactions caps the number of consecutive context-
+	// overflow auto-compactions the run loop attempts before surfacing the
+	// error. Defaults to defaultMaxOverflowCompactions; tests use
+	// WithMaxOverflowCompactions to exercise both the "compaction
+	// succeeded" and "compaction exhausted" branches.
+	maxOverflowCompactions int
 }
 
 type Opt func(*LocalRuntime)
@@ -352,6 +359,23 @@ func WithTelemetry(t Telemetry) Opt {
 	}
 }
 
+// WithMaxOverflowCompactions overrides how many consecutive context-overflow
+// auto-compactions the run loop is allowed to attempt before surfacing the
+// error. Defaults to defaultMaxOverflowCompactions (1).
+//
+// Tests use this to exercise both branches of the overflow-recovery code
+// path: pass 0 to verify the failure surface immediately; pass a higher
+// number to verify the loop bounds compaction attempts. Negative values
+// are clamped to 0.
+func WithMaxOverflowCompactions(n int) Opt {
+	return func(r *LocalRuntime) {
+		if n < 0 {
+			n = 0
+		}
+		r.maxOverflowCompactions = n
+	}
+}
+
 // WithRetryOnRateLimit enables automatic retry with backoff for HTTP 429 (rate limit)
 // errors when no fallback models are available. When enabled, the runtime will honor
 // the Retry-After header from the provider's response to determine wait time before
@@ -395,10 +419,11 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		managedOAuth:         true,
 		sessionStore:         session.NewInMemorySessionStore(),
 		fallbackCooldowns:    make(map[string]*fallbackCooldownState),
-		hooksRegistry:        hooksRegistry,
-		builtinsState:        builtinsState,
-		now:                  time.Now,
-		telemetry:            defaultTelemetry{},
+		hooksRegistry:          hooksRegistry,
+		builtinsState:          builtinsState,
+		now:                    time.Now,
+		telemetry:              defaultTelemetry{},
+		maxOverflowCompactions: defaultMaxOverflowCompactions,
 	}
 	r.bgAgents = agenttool.NewHandler(r)
 
@@ -776,7 +801,7 @@ func (r *LocalRuntime) emitToolsChanged() {
 	if r.onToolsChanged == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), toolsChangedTimeout)
 	defer cancel()
 	a := r.CurrentAgent()
 	agentTools, err := a.StartedTools(ctx)

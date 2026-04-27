@@ -156,7 +156,7 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 // or the iteration limit is reached.
 func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan Event {
 	slog.Debug("Starting runtime stream", "agent", r.CurrentAgentName(), "session_id", sess.ID)
-	events := make(chan Event, 128)
+	events := make(chan Event, defaultEventChannelCapacity)
 
 	go func() {
 		r.telemetry.RecordSessionStart(ctx, r.CurrentAgentName(), sess.ID)
@@ -228,9 +228,10 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 
 		// overflowCompactions counts how many consecutive context-overflow
 		// auto-compactions have been attempted without a successful model
-		// call in between. This prevents an infinite loop when compaction
-		// cannot reduce the context below the model's limit.
-		const maxOverflowCompactions = 1
+		// call in between. The cap (r.maxOverflowCompactions) prevents an
+		// infinite loop when compaction cannot reduce the context below the
+		// model's limit; see defaultMaxOverflowCompactions for the default
+		// and WithMaxOverflowCompactions for the test seam.
 		var overflowCompactions int
 
 		// toolModelOverride holds the per-toolset model from the most recent
@@ -432,10 +433,10 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 				// Auto-recovery: if the error is a context overflow and
 				// session compaction is enabled, compact the conversation
 				// and retry the request instead of surfacing raw errors.
-				// We allow at most maxOverflowCompactions consecutive attempts
+				// We allow at most r.maxOverflowCompactions consecutive attempts
 				// to avoid an infinite loop when compaction cannot reduce
 				// the context enough.
-				if _, ok := errors.AsType[*modelerrors.ContextOverflowError](err); ok && r.sessionCompaction && overflowCompactions < maxOverflowCompactions {
+				if _, ok := errors.AsType[*modelerrors.ContextOverflowError](err); ok && r.sessionCompaction && overflowCompactions < r.maxOverflowCompactions {
 					overflowCompactions++
 					slog.Warn("Context window overflow detected, attempting auto-compaction",
 						"agent", a.Name(),

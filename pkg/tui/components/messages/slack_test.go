@@ -111,11 +111,14 @@ func TestBottomSlackAnimationSubscribesWhileDecaying(t *testing.T) {
 		"no slack means no animation subscription")
 
 	// Slack > 0: a tick should subscribe so further ticks keep firing
-	// even after fade animations finish.
+	// even after fade animations finish, and Update must return the
+	// scheduling command so Bubbletea actually delivers the next tick.
 	m.bottomSlack = 2
-	m.Update(animation.TickMsg{Frame: 1})
+	_, cmd := m.Update(animation.TickMsg{Frame: 1})
 	assert.True(t, m.slackAnimationSub.IsActive(),
 		"subscription should be active while slack > 0")
+	assert.NotNil(t, cmd,
+		"Update must return a tick command so the next tick is scheduled")
 
 	// Once slack hits zero, the subscription must release the global tick.
 	m.Update(animation.TickMsg{Frame: 2})
@@ -197,4 +200,56 @@ func TestBottomSlackIsZeroWhenUserHasScrolledAway(t *testing.T) {
 
 	assert.Equal(t, 0, m.bottomSlack,
 		"slack must remain zero when the user scrolled away from the bottom")
+}
+
+func TestBottomSlackDecayPausesWhenUserScrollsAway(t *testing.T) {
+	t.Parallel()
+
+	sessionState := &service.SessionState{}
+	m := NewScrollableView(80, 24, sessionState).(*model)
+	m.SetSize(80, 24)
+
+	addShrinkingView(m, 10)
+	m.View()
+
+	// Pretend a previous shrinkage left some slack while auto-following.
+	m.bottomSlack = 3
+
+	// First tick decays one line as expected.
+	m.Update(animation.TickMsg{Frame: 1})
+	require.Equal(t, 2, m.bottomSlack)
+
+	// User scrolls away mid-decay. updateScrollState resets slack to zero
+	// for the userHasScrolled path; the next tick should leave it there
+	// and not produce a negative value.
+	m.userHasScrolled = true
+	m.Update(animation.TickMsg{Frame: 2})
+	assert.Equal(t, 0, m.bottomSlack,
+		"slack must drop to zero (not be decayed below it) once the user scrolls away")
+}
+
+func TestAdjustBottomSlackRespectsCapAndFloor(t *testing.T) {
+	t.Parallel()
+
+	sessionState := &service.SessionState{}
+	m := NewScrollableView(80, 24, sessionState).(*model)
+	m.SetSize(80, 24)
+
+	maxSlack := m.maxBottomSlack()
+
+	// Adding more than the cap must clamp to the cap.
+	m.AdjustBottomSlack(100)
+	assert.Equal(t, maxSlack, m.bottomSlack,
+		"AdjustBottomSlack must clamp positive deltas to maxBottomSlack")
+
+	// Subtracting below zero must clamp to zero.
+	m.AdjustBottomSlack(-100)
+	assert.Equal(t, 0, m.bottomSlack,
+		"AdjustBottomSlack must clamp negative deltas at zero")
+
+	// Zero delta is a no-op.
+	m.bottomSlack = 2
+	m.AdjustBottomSlack(0)
+	assert.Equal(t, 2, m.bottomSlack,
+		"AdjustBottomSlack(0) must leave slack unchanged")
 }

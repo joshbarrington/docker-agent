@@ -277,7 +277,7 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// applied their fade state, and before tui.go's HasActive() check so the
 	// subscription is registered when the next tick is scheduled.
 	if _, ok := msg.(animation.TickMsg); ok {
-		cmds = append(cmds, m.onAnimationTick())
+		cmds = append(cmds, m.handleAnimationTick())
 	}
 
 	return m, tea.Batch(cmds...)
@@ -526,9 +526,9 @@ func (m *model) View() string {
 	}
 
 	m.updateScrollState()
-	// Release the slack subscription once it's no longer needed. The reverse
-	// (starting it) is only done from Update via onAnimationTick, where the
-	// returned tea.Cmd can be propagated to actually schedule the next tick.
+	// Release the slack subscription once it's no longer needed. Starting it
+	// is only done from Update via handleAnimationTick, where the returned
+	// tea.Cmd can be propagated to actually schedule the next tick.
 	if m.bottomSlack == 0 {
 		m.slackAnimationSub.Stop()
 	}
@@ -614,11 +614,11 @@ func (m *model) maxBottomSlack() int {
 	return max(1, min(5, m.height/3))
 }
 
-// onAnimationTick refreshes scroll state, decays any leftover slack by one
-// line, and keeps the slack subscription alive while slack > 0 so further
-// ticks fire even after fade animations finish. Returns the command to
-// schedule the next tick when the subscription transitions to active.
-func (m *model) onAnimationTick() tea.Cmd {
+// handleAnimationTick refreshes scroll state, decays any leftover slack by
+// one line, and keeps the slack subscription alive while slack > 0 so
+// further ticks fire even after fade animations finish. Returns the command
+// to schedule the next tick when the subscription transitions to active.
+func (m *model) handleAnimationTick() tea.Cmd {
 	m.updateScrollState()
 	if !m.userHasScrolled && m.bottomSlack > 0 {
 		m.bottomSlack--
@@ -1584,7 +1584,7 @@ func (m *model) AdjustBottomSlack(delta int) {
 	if delta == 0 {
 		return
 	}
-	m.bottomSlack = max(0, m.bottomSlack+delta)
+	m.bottomSlack = max(0, min(m.bottomSlack+delta, m.maxBottomSlack()))
 }
 
 // contentWidth returns the width available for content.

@@ -22,9 +22,10 @@ func addPromptFiles(_ context.Context, in *hooks.Input, args []string) (*hooks.O
 	if in == nil || in.Cwd == "" || len(args) == 0 {
 		return nil, nil
 	}
+	home, _ := os.UserHomeDir() // empty string disables the home-dir lookup
 	var parts []string
 	for _, name := range args {
-		for _, path := range promptFilePaths(in.Cwd, name) {
+		for _, path := range promptFilePaths(in.Cwd, home, name) {
 			content, err := os.ReadFile(path)
 			if err != nil {
 				slog.Warn("reading prompt file", "path", path, "error", err)
@@ -41,15 +42,17 @@ func addPromptFiles(_ context.Context, in *hooks.Input, args []string) (*hooks.O
 
 // promptFilePaths returns the prompt-file paths to load for filename,
 // in order: the closest match found while walking up from workDir (if
-// any), followed by the user's home-directory match (if it exists and
-// differs from the first). Returns at most two paths.
-func promptFilePaths(workDir, filename string) []string {
+// any), followed by the homeDir match (if homeDir is non-empty, the
+// file exists, and the path differs from the first). Returns at most
+// two paths. Passing homeDir == "" disables the home-dir lookup —
+// useful in tests so they don't need to touch the real $HOME.
+func promptFilePaths(workDir, homeDir, filename string) []string {
 	var paths []string
 	if p := findFileInHierarchy(workDir, filename); p != "" {
 		paths = append(paths, p)
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		p := filepath.Join(home, filename)
+	if homeDir != "" {
+		p := filepath.Join(homeDir, filename)
 		if isFile(p) && !slices.Contains(paths, p) {
 			paths = append(paths, p)
 		}

@@ -6,6 +6,7 @@ package modelerrors
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,7 +31,20 @@ type StatusError struct {
 }
 
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Err.Error())
+	underlying := e.Err.Error()
+	// Try to lift structured details out of the SDK error message (URL +
+	// JSON body envelope produced by anthropic-sdk-go / openai-go / etc.).
+	// When successful, this strips the URL noise and surfaces the actual
+	// fields the provider sent (error.type, error.message, error.code,
+	// error.param, status, request id) instead of just "400 Bad Request".
+	if details, requestID := parseProviderErrorDetails(underlying); details != "" {
+		msg := fmt.Sprintf("HTTP %d: %s", e.StatusCode, details)
+		if requestID != "" {
+			msg += fmt.Sprintf(" (Request-ID: %s)", requestID)
+		}
+		return msg
+	}
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, underlying)
 }
 
 func (e *StatusError) Unwrap() error {
@@ -394,8 +408,9 @@ func ClassifyModelError(err error) (retryable, rateLimited bool, retryAfter time
 }
 
 // FormatError returns a user-friendly error message for model errors.
-// Context overflow gets a dedicated actionable message; all other errors
-// pass through their original message.
+// Context overflow gets a dedicated actionable message; other errors fall
+// through to err.Error() — for HTTP errors that comes from *StatusError,
+// which itself extracts structured provider details (see parseProviderErrorDetails).
 func FormatError(err error) string {
 	if err == nil {
 		return ""
@@ -408,4 +423,138 @@ func FormatError(err error) string {
 	}
 
 	return err.Error()
+}
+
+// requestIDRegex matches the `(Request-ID: <id>)` segment that anthropic-sdk-go
+// and openai-go append between the status text and the response body.
+var requestIDRegex = regexp.MustCompile(`\(Request-ID:\s*([^)\s]+)\)`)
+
+// providerErrorBody is the union of the JSON shapes returned by major LLM
+// providers in non-2xx responses:
+//
+//	Anthropic   {"type":"error","error":{"type":"...","message":"..."}}
+//	OpenAI      {"error":{"message":"...","type":"...","code":"...","param":"..."}}
+//	Gemini      {"error":{"code":N,"message":"...","status":"..."}}
+//	Proxies     {"message":"Bad Request"}
+type providerErrorBody struct {
+	Error *struct {
+		Type    string          `json:"type"`
+		Message string          `json:"message"`
+		Code    json.RawMessage `json:"code"`  // string (OpenAI) or int (Gemini)
+		Param   json.RawMessage `json:"param"` // string or null
+		Status  string          `json:"status"`
+	} `json:"error"`
+	Message string `json:"message"`
+}
+
+// parseProviderErrorDetails extracts a focused, human-readable details line
+// and the request id (if present) from a provider SDK error message.
+//
+// Input is the full err.Error() string of the underlying SDK error, which
+// for anthropic-sdk-go / openai-go has the shape:
+//
+//	POST "<URL>": <code> <statusText> [(Request-ID: <id>)] <jsonBody>
+//
+// Output is the structured details from the JSON body (provider error type,
+// message, code, param, status). Returns ("", "") when no JSON body is
+// present or it parses to nothing useful.
+func parseProviderErrorDetails(s string) (details, requestID string) {
+	if m := requestIDRegex.FindStringSubmatch(s); len(m) >= 2 {
+		requestID = m[1]
+	}
+	body := extractFirstJSONObject(s)
+	if body == "" {
+		return "", requestID
+	}
+	var parsed providerErrorBody
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return "", requestID
+	}
+
+	switch {
+	case parsed.Error != nil && parsed.Error.Message != "":
+		var b strings.Builder
+		if parsed.Error.Type != "" {
+			b.WriteString(parsed.Error.Type)
+			b.WriteString(": ")
+		}
+		b.WriteString(parsed.Error.Message)
+
+		var meta []string
+		if code := unquoteJSONScalar(parsed.Error.Code); code != "" {
+			meta = append(meta, "code="+code)
+		}
+		if param := unquoteJSONScalar(parsed.Error.Param); param != "" {
+			meta = append(meta, "param="+param)
+		}
+		if parsed.Error.Status != "" && !strings.EqualFold(parsed.Error.Status, parsed.Error.Type) {
+			meta = append(meta, "status="+parsed.Error.Status)
+		}
+		if len(meta) > 0 {
+			b.WriteString(" (")
+			b.WriteString(strings.Join(meta, ", "))
+			b.WriteString(")")
+		}
+		return b.String(), requestID
+	case parsed.Message != "":
+		return parsed.Message, requestID
+	}
+	return "", requestID
+}
+
+// extractFirstJSONObject returns the first balanced top-level JSON object
+// substring of s (from the first '{' through its matching '}'), correctly
+// skipping braces that appear inside JSON string literals. Returns "" if
+// no balanced object is found.
+func extractFirstJSONObject(s string) string {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return ""
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString {
+			switch c {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+// unquoteJSONScalar returns the textual representation of a JSON scalar
+// (string or number). Returns "" for null / empty / non-scalar values.
+func unquoteJSONScalar(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return ""
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err == nil {
+		return str
+	}
+	// Numeric or other scalar — return as-is.
+	return s
 }

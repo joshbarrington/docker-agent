@@ -239,6 +239,103 @@ func TestFormatError(t *testing.T) {
 		err := errors.New("authentication failed")
 		assert.Equal(t, "authentication failed", FormatError(err))
 	})
+
+	t.Run("context overflow takes precedence over status formatting", func(t *testing.T) {
+		t.Parallel()
+		underlying := errors.New("prompt is too long: 226360 tokens > 200000 maximum")
+		wrapped := NewContextOverflowError(&StatusError{StatusCode: 400, Err: underlying})
+		msg := FormatError(wrapped)
+		assert.Contains(t, msg, "context window")
+		assert.Contains(t, msg, "/compact")
+	})
+}
+
+func TestStatusErrorParsesProviderBody(t *testing.T) {
+	t.Parallel()
+
+	t.Run("opaque proxy body strips URL noise but keeps the message", func(t *testing.T) {
+		t.Parallel()
+		// This is the case the user reported: the Docker AI gateway returns
+		// only {"message":"Bad Request"}, no structured details.
+		inner := errors.New(`POST "https://ai-backend-service-stage.docker.com/proxy/v1/messages?beta=true": 400 Bad Request {"message":"Bad Request"}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t, "HTTP 400: Bad Request", se.Error())
+	})
+
+	t.Run("anthropic-style body surfaces error.type and error.message", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "https://api.anthropic.com/v1/messages": 400 Bad Request {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 226360 tokens > 200000 maximum"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: invalid_request_error: prompt is too long: 226360 tokens > 200000 maximum",
+			se.Error())
+	})
+
+	t.Run("anthropic-style body keeps the request id", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "https://api.anthropic.com/v1/messages": 400 Bad Request (Request-ID: req_abc123) {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: Field required"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: invalid_request_error: max_tokens: Field required (Request-ID: req_abc123)",
+			se.Error())
+	})
+
+	t.Run("openai-style body surfaces type, message, code and param", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "https://api.openai.com/v1/chat/completions": 400 Bad Request {"error":{"message":"Invalid model 'foo-bar'","type":"invalid_request_error","param":"model","code":"model_not_found"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: invalid_request_error: Invalid model 'foo-bar' (code=model_not_found, param=model)",
+			se.Error())
+	})
+
+	t.Run("gemini-style body surfaces numeric code and status", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`{"error":{"code":400,"message":"Invalid value at 'contents[0].parts[0]'","status":"INVALID_ARGUMENT"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: Invalid value at 'contents[0].parts[0]' (code=400, status=INVALID_ARGUMENT)",
+			se.Error())
+	})
+
+	t.Run("openai-style body with null param omits param meta", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/chat": 401 Unauthorized {"error":{"message":"Incorrect API key provided","type":"invalid_request_error","param":null,"code":"invalid_api_key"}}`)
+		se := &StatusError{StatusCode: 401, Err: inner}
+		assert.Equal(t,
+			"HTTP 401: invalid_request_error: Incorrect API key provided (code=invalid_api_key)",
+			se.Error())
+	})
+
+	t.Run("falls back to underlying message when no JSON body", func(t *testing.T) {
+		t.Parallel()
+		// No JSON, no URL — keep the existing simple format.
+		se := &StatusError{StatusCode: 429, Err: errors.New("rate limit exceeded")}
+		assert.Equal(t, "HTTP 429: rate limit exceeded", se.Error())
+	})
+
+	t.Run("falls back to underlying message when JSON has no useful fields", func(t *testing.T) {
+		t.Parallel()
+		se := &StatusError{StatusCode: 500, Err: errors.New(`POST "/v1/x": 500 Internal Server Error {"foo":"bar"}`)}
+		assert.Equal(t, `HTTP 500: POST "/v1/x": 500 Internal Server Error {"foo":"bar"}`, se.Error())
+	})
+
+	t.Run("handles braces inside string values", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/x": 400 Bad Request {"error":{"type":"invalid_request_error","message":"unexpected token '}' in payload"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: invalid_request_error: unexpected token '}' in payload",
+			se.Error())
+	})
+
+	t.Run("context overflow detection still works on cleaned message", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/messages": 400 Bad Request {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 226360 tokens > 200000 maximum"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.True(t, IsContextOverflowError(se),
+			"context-overflow phrasing must remain detectable in StatusError.Error()")
+	})
 }
 
 func TestParseRetryAfterHeader(t *testing.T) {

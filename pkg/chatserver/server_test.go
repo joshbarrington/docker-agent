@@ -188,6 +188,67 @@ func TestNewRouter_RejectsOversizedBody(t *testing.T) {
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 }
 
+func TestValidateSamplingParams(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	i := func(v int64) *int64 { return &v }
+
+	cases := []struct {
+		name    string
+		req     ChatCompletionRequest
+		wantErr string
+	}{
+		{name: "all empty"},
+		{name: "valid", req: ChatCompletionRequest{
+			Temperature: f(0.7), TopP: f(0.95), MaxTokens: i(256),
+			Stop: StopSequences{"\n\n", "END"},
+		}},
+		{name: "temp negative", req: ChatCompletionRequest{Temperature: f(-0.1)}, wantErr: "temperature"},
+		{name: "temp too high", req: ChatCompletionRequest{Temperature: f(2.5)}, wantErr: "temperature"},
+		{name: "topp zero", req: ChatCompletionRequest{TopP: f(0)}, wantErr: "top_p"},
+		{name: "topp too high", req: ChatCompletionRequest{TopP: f(1.5)}, wantErr: "top_p"},
+		{name: "max_tokens zero", req: ChatCompletionRequest{MaxTokens: i(0)}, wantErr: "max_tokens"},
+		{name: "empty stop", req: ChatCompletionRequest{Stop: StopSequences{""}}, wantErr: "stop"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSamplingParams(&tc.req)
+			if tc.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
+}
+
+func TestStopSequences_UnmarshalJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want []string
+		err  bool
+	}{
+		{"null", `null`, nil, false},
+		{"single string", `"END"`, []string{"END"}, false},
+		{"array", `["a", "b"]`, []string{"a", "b"}, false},
+		{"empty array", `[]`, []string{}, false},
+		{"number invalid", `42`, nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got StopSequences
+			err := got.UnmarshalJSON([]byte(tc.json))
+			if tc.err {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, []string(got))
+		})
+	}
+}
+
 func TestSSEStream_SendError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s := newSSEStream(rec, "chatcmpl-x", "root")

@@ -21,8 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -194,6 +196,9 @@ func (s *server) handleChatCompletions(c echo.Context) error {
 	if len(req.Messages) == 0 {
 		return writeError(c, http.StatusBadRequest, "at least one message is required")
 	}
+	if err := validateSamplingParams(&req); err != nil {
+		return writeError(c, http.StatusBadRequest, err.Error())
+	}
 
 	sess := buildSession(req.Messages)
 	if sess == nil {
@@ -355,4 +360,30 @@ func errTypeFor(status int) string {
 		return "internal_error"
 	}
 	return "invalid_request_error"
+}
+
+// validateSamplingParams range-checks the OpenAI sampling fields. Even when
+// we don't yet plumb them all the way through to the model, validating up
+// front lets clients learn about typos / out-of-range values immediately
+// instead of getting an opaque provider error several seconds later.
+func validateSamplingParams(req *ChatCompletionRequest) error {
+	if req.Temperature != nil {
+		t := *req.Temperature
+		if math.IsNaN(t) || t < 0 || t > 2 {
+			return fmt.Errorf("temperature must be in [0, 2], got %g", t)
+		}
+	}
+	if req.TopP != nil {
+		p := *req.TopP
+		if math.IsNaN(p) || p <= 0 || p > 1 {
+			return fmt.Errorf("top_p must be in (0, 1], got %g", p)
+		}
+	}
+	if req.MaxTokens != nil && *req.MaxTokens <= 0 {
+		return fmt.Errorf("max_tokens must be > 0, got %d", *req.MaxTokens)
+	}
+	if slices.Contains(req.Stop, "") {
+		return errors.New("stop sequences must not be empty strings")
+	}
+	return nil
 }

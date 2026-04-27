@@ -1,6 +1,11 @@
 package chatserver
 
-import "github.com/openai/openai-go/v3"
+import (
+	"encoding/json"
+	"errors"
+
+	"github.com/openai/openai-go/v3"
+)
 
 // This file declares the OpenAI-compatible request/response types used by
 // /v1/chat/completions and /v1/models. We hand-roll most of them instead of
@@ -14,11 +19,57 @@ import "github.com/openai/openai-go/v3"
 // --- Request --------------------------------------------------------------
 
 // ChatCompletionRequest is the body of a /v1/chat/completions call. We
-// only declare the fields we act on; any extras are silently ignored.
+// declare every field commonly sent by OpenAI clients so they are accepted
+// without surprise. Whether each field is *acted on* is documented inline.
 type ChatCompletionRequest struct {
 	Model    string                  `json:"model"`
 	Messages []ChatCompletionMessage `json:"messages"`
 	Stream   bool                    `json:"stream,omitempty"`
+
+	// Temperature is parsed and range-checked but not yet plumbed through
+	// to the runtime/model layer (no per-request override exists today).
+	// Set on the agent's YAML configuration to control sampling.
+	Temperature *float64 `json:"temperature,omitempty"`
+	// TopP is parsed and range-checked but not yet plumbed through.
+	TopP *float64 `json:"top_p,omitempty"`
+	// MaxTokens is the maximum number of tokens the model may generate in
+	// the response. Parsed and validated; runtime plumbing is tracked for
+	// a follow-up.
+	MaxTokens *int64 `json:"max_tokens,omitempty"`
+	// Stop is one or more substrings that, if produced, end generation.
+	// Accepted as either a single string or an array of strings, matching
+	// the OpenAI schema. Validated; not yet enforced.
+	Stop StopSequences `json:"stop,omitempty"`
+}
+
+// StopSequences is a JSON-flexible field that accepts either a single
+// string or an array of strings. OpenAI's API uses both shapes
+// interchangeably; clients in the wild send both.
+type StopSequences []string
+
+func (s *StopSequences) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*s = nil
+		return nil
+	}
+	switch data[0] {
+	case '"':
+		var one string
+		if err := json.Unmarshal(data, &one); err != nil {
+			return err
+		}
+		*s = []string{one}
+		return nil
+	case '[':
+		var many []string
+		if err := json.Unmarshal(data, &many); err != nil {
+			return err
+		}
+		*s = many
+		return nil
+	default:
+		return errors.New("stop must be a string or array of strings")
+	}
 }
 
 // ChatCompletionMessage is a single message in the conversation. Multi-modal

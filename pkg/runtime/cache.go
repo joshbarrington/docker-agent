@@ -8,61 +8,90 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
+// BuiltinCacheResponse is the name of the builtin stop hook that persists
+// an agent's response into its configured response cache. It is
+// auto-injected by [LocalRuntime.getHooksExecutor] when the agent has a
+// cache configured, mirroring the way [BuiltinAddDate] et al. are
+// auto-injected from agent flags.
+const BuiltinCacheResponse = "cache_response"
+
 // tryReplayCachedResponse looks up the latest user message in the agent's
 // response cache. On a hit it replays the cached answer as the assistant
-// message, fires stop hooks, and returns replayed=true so the caller can
-// short-circuit the run. On a miss it returns the question text so the
-// caller can later store the freshly produced response under that key.
+// message, fires stop hooks (which lets user-defined stop hooks run as
+// they would for a real response), and returns true so the caller can
+// short-circuit the run.
 //
-// It returns ("", false) when caching is disabled or the session has no
-// user message to key on.
+// The storage half of the cache is implemented as a builtin stop hook
+// (see [LocalRuntime.cacheResponseBuiltin]); the lookup half stays here
+// because no hook event currently supports short-circuiting the run with
+// a synthetic response.
 func (r *LocalRuntime) tryReplayCachedResponse(
 	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
 	events chan Event,
-) (question string, replayed bool) {
+) bool {
 	c := a.Cache()
 	if c == nil {
-		return "", false
+		return false
 	}
-	question = sess.GetLastUserMessageContent()
+	question := sess.GetLastUserMessageContent()
 	if question == "" {
-		return "", false
+		return false
 	}
 	cached, ok := c.Lookup(question)
 	if !ok || cached == "" {
-		return question, false
+		return false
 	}
 
 	slog.Debug("Response cache hit; replaying cached answer",
 		"agent", a.Name(), "session_id", sess.ID)
 	modelID := a.Model().ID()
 	events <- AgentInfo(a.Name(), modelID, a.Description(), a.WelcomeMessage())
-	msg := chat.Message{
+	addAgentMessage(sess, a, &chat.Message{
 		Role:      chat.MessageRoleAssistant,
 		Content:   cached,
 		CreatedAt: time.Now().Format(time.RFC3339),
 		Model:     modelID,
-	}
-	addAgentMessage(sess, a, &msg, events)
+	}, events)
 	r.executeStopHooks(ctx, sess, a, cached, events)
-	return question, true
+	return true
 }
 
-// cacheTurnResponse stores the assistant's response in the agent's cache
-// under question, then clears *question so subsequent stops in the same
-// RunStream (e.g. after a follow-up) are not also cached. It is a no-op
-// when caching is disabled, the question is empty, or the response has
-// no visible content.
-func (r *LocalRuntime) cacheTurnResponse(a *agent.Agent, question *string, response string) {
-	c := a.Cache()
-	if c == nil || *question == "" || strings.TrimSpace(response) == "" {
-		return
+// cacheResponseBuiltin is the stop-hook builtin that stores the
+// assistant's response in the agent's response cache. It is registered
+// as a closure on the runtime's hooks registry so it can resolve the
+// agent (and therefore its cache instance) by name from
+// [hooks.Input.AgentName].
+//
+// The hook is a no-op when the agent has no cache configured, when the
+// dispatched input lacks a user message to key on, or when the response
+// has no visible content.
+//
+// As a tiny optimization (and to make replays of cached answers idempotent
+// at the file level), we skip the Store when the cache already holds the
+// exact same response under the same key — that's exactly what
+// [LocalRuntime.tryReplayCachedResponse] re-emits on a hit.
+func (r *LocalRuntime) cacheResponseBuiltin(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+	if in == nil || in.AgentName == "" || in.LastUserMessage == "" ||
+		strings.TrimSpace(in.StopResponse) == "" {
+		return nil, nil
 	}
-	c.Store(*question, response)
-	*question = ""
+	a, err := r.team.Agent(in.AgentName)
+	if err != nil || a == nil {
+		return nil, nil
+	}
+	c := a.Cache()
+	if c == nil {
+		return nil, nil
+	}
+	if existing, ok := c.Lookup(in.LastUserMessage); ok && existing == in.StopResponse {
+		return nil, nil
+	}
+	c.Store(in.LastUserMessage, in.StopResponse)
+	return nil, nil
 }

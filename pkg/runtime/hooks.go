@@ -14,10 +14,11 @@ import (
 )
 
 // buildHooksExecutors builds a [hooks.Executor] for every agent in the
-// team that has user-configured hooks or an agent-flag that maps to a
-// builtin (AddDate / AddEnvironmentInfo / AddPromptFiles). Agents with
-// no hooks have no entry; lookups fall through to nil so callers can
-// short-circuit cheaply.
+// team that has user-configured hooks, an agent-flag that maps to a
+// builtin (AddDate / AddEnvironmentInfo / AddPromptFiles), or a
+// configured response cache (which auto-injects a cache_response stop
+// hook). Agents with no hooks have no entry; lookups fall through to
+// nil so callers can short-circuit cheaply.
 //
 // Called once from [NewLocalRuntime] after r.workingDir, r.env and
 // r.hooksRegistry are finalized; the resulting map is read-only for
@@ -35,6 +36,20 @@ func (r *LocalRuntime) buildHooksExecutors() {
 			AddEnvironmentInfo: a.AddEnvironmentInfo(),
 			AddPromptFiles:     a.AddPromptFiles(),
 		})
+
+		// Auto-inject the cache_response stop-hook for cache-enabled agents.
+		// The builtin lives in this package (it's a closure over r so it can
+		// reach a.Cache() through Input.AgentName) and isn't part of the
+		// stateless ApplyAgentDefaults set in pkg/hooks/builtins.
+		if a.Cache() != nil {
+			if cfg == nil {
+				cfg = &hooks.Config{}
+			}
+			cfg.Stop = append(cfg.Stop, hooks.Hook{
+				Type:    hooks.HookTypeBuiltin,
+				Command: BuiltinCacheResponse,
+			})
+		}
 		if cfg == nil {
 			continue
 		}
@@ -149,11 +164,15 @@ func (r *LocalRuntime) executeSessionEndHooks(ctx context.Context, sess *session
 
 // executeStopHooks fires stop hooks when the model finishes responding,
 // passing the final response content as stop_response. SystemMessage is
-// surfaced as a Warning by [dispatchHook].
+// surfaced as a Warning by [dispatchHook]. AgentName + LastUserMessage
+// are populated so builtins like cache_response can key on the user's
+// question and resolve the agent through the runtime closure.
 func (r *LocalRuntime) executeStopHooks(ctx context.Context, sess *session.Session, a *agent.Agent, responseContent string, events chan Event) {
 	r.dispatchHook(ctx, a, hooks.EventStop, &hooks.Input{
-		SessionID:    sess.ID,
-		StopResponse: responseContent,
+		SessionID:       sess.ID,
+		AgentName:       a.Name(),
+		StopResponse:    responseContent,
+		LastUserMessage: sess.GetLastUserMessageContent(),
 	}, events)
 }
 
@@ -287,8 +306,10 @@ func (r *LocalRuntime) executeBeforeLLMCallHooks(ctx context.Context, sess *sess
 // skip this event.
 func (r *LocalRuntime) executeAfterLLMCallHooks(ctx context.Context, sess *session.Session, a *agent.Agent, responseContent string) {
 	r.dispatchHook(ctx, a, hooks.EventAfterLLMCall, &hooks.Input{
-		SessionID:    sess.ID,
-		StopResponse: responseContent,
+		SessionID:       sess.ID,
+		AgentName:       a.Name(),
+		StopResponse:    responseContent,
+		LastUserMessage: sess.GetLastUserMessageContent(),
 	}, nil)
 }
 

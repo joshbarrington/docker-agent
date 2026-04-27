@@ -367,6 +367,14 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	}
 	r.bgAgents = agenttool.NewHandler(r)
 
+	// cache_response is registered here (not in pkg/hooks/builtins) because
+	// it needs to capture the runtime to resolve the agent referenced by
+	// Input.AgentName. The other builtins are stateless and can stay as
+	// package-level functions registered via builtins.Register above.
+	if err := hooksRegistry.RegisterBuiltin(BuiltinCacheResponse, r.cacheResponseBuiltin); err != nil {
+		return nil, fmt.Errorf("register %q builtin: %w", BuiltinCacheResponse, err)
+	}
+
 	for _, opt := range opts {
 		opt(r)
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/cache"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 )
@@ -146,6 +147,37 @@ func TestCache_TrimSpaces(t *testing.T) {
 
 // TestCache_DisabledHasNoEffect verifies that when the agent has no cache
 // attached, every call goes through to the model.
+// TestCache_StorageIsAStopHookBuiltin asserts the architectural contract
+// that the cache_response storage is wired through the new hook system as
+// a stop-hook builtin (not as a hard-coded runtime call). It is the
+// regression test for the migration to the hooks mechanism.
+func TestCache_StorageIsAStopHookBuiltin(t *testing.T) {
+	c, err := cache.New(cache.Config{Enabled: true})
+	require.NoError(t, err)
+
+	root := agent.New("root", "You are a test agent",
+		agent.WithModel(&messageRecordingProvider{id: "test/mock"}),
+		agent.WithCache(c),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	// The runtime should have auto-injected a stop hook of type=builtin
+	// pointing at BuiltinCacheResponse for an agent that has a cache.
+	exec := rt.hooksExec(root)
+	require.NotNil(t, exec, "a cache-enabled agent must have a hooks executor")
+	require.True(t, exec.Has(hooks.EventStop), "cache-enabled agent must have a stop hook")
+
+	// The cache_response builtin must be registered on the runtime's
+	// private hooks registry; that's the seam that lets the closure
+	// reach back to a.Cache() through Input.AgentName.
+	fn, ok := rt.hooksRegistry.LookupBuiltin(BuiltinCacheResponse)
+	require.True(t, ok, "cache_response builtin must be registered")
+	require.NotNil(t, fn)
+}
+
 func TestCache_DisabledHasNoEffect(t *testing.T) {
 	stream1 := newStreamBuilder().AddContent("first").AddStopWithUsage(5, 3).Build()
 	stream2 := newStreamBuilder().AddContent("second").AddStopWithUsage(5, 3).Build()

@@ -73,6 +73,17 @@ type Input struct {
 	Cwd           string    `json:"cwd"`
 	HookEventName EventType `json:"hook_event_name"`
 
+	// AgentName identifies the agent dispatching the event. Useful for
+	// builtin hooks that need to look up per-agent state via a runtime
+	// closure (e.g. response cache).
+	AgentName string `json:"agent_name,omitempty"`
+
+	// LastUserMessage is the text content of the latest user message in
+	// the session at dispatch time. Populated for events that respond to
+	// a user turn (stop, after_llm_call). Empty for events that aren't
+	// turn-scoped (session_start, session_end, notification, ...).
+	LastUserMessage string `json:"last_user_message,omitempty"`
+
 	// Tool-related fields (PreToolUse and PostToolUse).
 	ToolName  string         `json:"tool_name,omitempty"`
 	ToolUseID string         `json:"tool_use_id,omitempty"`

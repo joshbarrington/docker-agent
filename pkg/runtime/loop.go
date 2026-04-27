@@ -211,29 +211,12 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	defer r.finalizeEventChannel(ctx, sess, prevElicitationCh, events)
 
-	// Response cache lookup. When the agent has a cache configured and
-	// the latest user message is already in the cache, replay the
-	// stored response and skip the model entirely.
-	var cacheQuestion string
-	if c := a.Cache(); c != nil {
-		if q := sess.GetLastUserMessageContent(); q != "" {
-			cacheQuestion = q
-			if cached, ok := c.Lookup(q); ok && cached != "" {
-				slog.Debug("Response cache hit; replaying cached answer",
-					"agent", a.Name(), "session_id", sess.ID)
-				modelID := a.Model().ID()
-				events <- AgentInfo(a.Name(), modelID, a.Description(), a.WelcomeMessage())
-				assistantMessage := chat.Message{
-					Role:      chat.MessageRoleAssistant,
-					Content:   cached,
-					CreatedAt: time.Now().Format(time.RFC3339),
-					Model:     modelID,
-				}
-				addAgentMessage(sess, a, &assistantMessage, events)
-				r.executeStopHooks(ctx, sess, a, cached, events)
-				return
-			}
-		}
+	// Response cache lookup. On a hit, replay the stored answer and
+	// skip the model entirely. The matching storage half is
+	// implemented as the cache_response stop-hook builtin (see
+	// runtime/cache.go and getHooksExecutor).
+	if r.tryReplayCachedResponse(ctx, sess, a, events) {
+		return
 	}
 
 	iteration := 0
@@ -490,11 +473,6 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		if res.Stopped {
 			slog.Debug("Conversation stopped", "agent", a.Name())
 			r.executeStopHooks(ctx, sess, a, res.Content, events)
-
-			// Persist this turn's response under the user's original
-			// question. Only the first stop is cached: follow-ups in
-			// the same RunStream answer different questions.
-			r.cacheTurnResponse(a, &cacheQuestion, res.Content)
 
 			// Re-check steer queue: closes the race between the mid-loop drain and this stop.
 			if drained, _ := r.drainAndEmitSteered(ctx, sess, events); drained {

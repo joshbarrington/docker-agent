@@ -365,7 +365,10 @@ func (s *InMemorySessionStore) Close() error {
 	return nil
 }
 
-// NewSQLiteSessionStore creates a new SQLite session store
+// NewSQLiteSessionStore creates a new SQLite session store backed by a file
+// at path. If migrations fail (other than a version mismatch or a filesystem
+// open failure) the existing database is moved aside to <path>.bak and a
+// fresh one is created.
 func NewSQLiteSessionStore(path string) (Store, error) {
 	store, err := openAndMigrateSQLiteStore(path)
 	if err != nil {
@@ -406,6 +409,24 @@ func NewSQLiteSessionStore(path string) (Store, error) {
 	return store, nil
 }
 
+// NewSQLiteSessionStoreFromDB wraps an already-open *sql.DB in a session store,
+// running the bootstrap schema and migrations against it. The caller retains
+// ownership of db: it is not closed on error, and Store.Close() will close it
+// when the store is closed.
+//
+// This is intended primarily for tests that want to use an in-memory database
+// (sql.Open("sqlite", ":memory:")) or pre-seed a database with non-default
+// state. Production callers should use NewSQLiteSessionStore.
+func NewSQLiteSessionStoreFromDB(db *sql.DB) (*SQLiteSessionStore, error) {
+	if db == nil {
+		return nil, errors.New("db is nil")
+	}
+	if err := setupAndMigrate(db); err != nil {
+		return nil, err
+	}
+	return &SQLiteSessionStore{db: db}, nil
+}
+
 // openAndMigrateSQLiteStore opens the database and runs migrations
 func openAndMigrateSQLiteStore(path string) (*SQLiteSessionStore, error) {
 	db, err := sqliteutil.OpenDB(path)
@@ -413,14 +434,7 @@ func openAndMigrateSQLiteStore(path string) (*SQLiteSessionStore, error) {
 		return nil, err
 	}
 
-	_, err = db.ExecContext(context.Background(), `
-		CREATE TABLE IF NOT EXISTS sessions (
-			id TEXT PRIMARY KEY,
-			messages TEXT,
-			created_at TEXT
-		)
-	`)
-	if err != nil {
+	if err := setupAndMigrate(db); err != nil {
 		db.Close()
 		if sqliteutil.IsCantOpenError(err) {
 			return nil, sqliteutil.DiagnoseDBOpenError(path, err)
@@ -428,15 +442,27 @@ func openAndMigrateSQLiteStore(path string) (*SQLiteSessionStore, error) {
 		return nil, err
 	}
 
-	// Initialize and run migrations
-	migrationManager := NewMigrationManager(db)
-	err = migrationManager.InitializeMigrations(context.Background())
+	return &SQLiteSessionStore{db: db}, nil
+}
+
+// setupAndMigrate creates the bootstrap sessions table (if missing) and runs
+// all pending schema migrations. The bootstrap schema only declares the
+// columns the very first migration expects to find; later columns are added
+// by subsequent ALTER TABLE migrations.
+func setupAndMigrate(db *sql.DB) error {
+	_, err := db.ExecContext(context.Background(), `
+		CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			messages TEXT,
+			created_at TEXT
+		)
+	`)
 	if err != nil {
-		db.Close()
-		return nil, err
+		return err
 	}
 
-	return &SQLiteSessionStore{db: db}, nil
+	migrationManager := NewMigrationManager(db)
+	return migrationManager.InitializeMigrations(context.Background())
 }
 
 // backupDatabase moves the database file (and related WAL files) to a backup

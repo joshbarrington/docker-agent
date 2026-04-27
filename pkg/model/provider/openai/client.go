@@ -574,9 +574,6 @@ func convertMessagesToResponseInput(messages []chat.Message) []responses.Respons
 				for _, part := range msg.MultiContent {
 					switch part.Type {
 					case chat.MessagePartTypeText:
-						if strings.TrimSpace(part.Text) == "" {
-							continue
-						}
 						contentParts = append(contentParts, responses.ResponseInputContentUnionParam{
 							OfInputText: &responses.ResponseInputTextParam{
 								Text: part.Text,

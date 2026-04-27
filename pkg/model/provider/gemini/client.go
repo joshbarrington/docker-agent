@@ -261,7 +261,7 @@ func convertMessagesToGemini(messages []chat.Message) []*genai.Content {
 			if len(parts) > 0 {
 				contents = append(contents, genai.NewContentFromParts(parts, role))
 			}
-		} else if strings.TrimSpace(msg.Content) != "" {
+		} else if msg.Content != "" {
 			part := newTextPartWithSignature(msg.Content, msg.ThoughtSignature)
 			contents = append(contents, genai.NewContentFromParts([]*genai.Part{part}, role))
 		}
@@ -292,9 +292,6 @@ func convertMultiContent(multiContent []chat.MessagePart, thoughtSignature []byt
 	for _, part := range multiContent {
 		switch part.Type {
 		case chat.MessagePartTypeText:
-			if strings.TrimSpace(part.Text) == "" {
-				continue
-			}
 			parts = append(parts, newTextPartWithSignature(part.Text, thoughtSignature))
 		case chat.MessagePartTypeImageURL:
 			if imgPart := convertImageURLToPart(part.ImageURL); imgPart != nil {

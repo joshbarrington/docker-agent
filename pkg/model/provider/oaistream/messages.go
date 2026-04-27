@@ -29,9 +29,6 @@ func ConvertMultiContent(multiContent []chat.MessagePart) []openai.ChatCompletio
 	for _, part := range multiContent {
 		switch part.Type {
 		case chat.MessagePartTypeText:
-			if strings.TrimSpace(part.Text) == "" {
-				continue
-			}
 			parts = append(parts, openai.TextContentPart(part.Text))
 		case chat.MessagePartTypeImageURL:
 			if part.ImageURL != nil {
@@ -142,9 +139,6 @@ func ConvertMessages(messages []chat.Message) []openai.ChatCompletionMessagePara
 				textParts := make([]openai.ChatCompletionContentPartTextParam, 0)
 				for _, part := range msg.MultiContent {
 					if part.Type == chat.MessagePartTypeText {
-						if strings.TrimSpace(part.Text) == "" {
-							continue
-						}
 						textParts = append(textParts, openai.ChatCompletionContentPartTextParam{
 							Text: part.Text,
 						})

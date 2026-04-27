@@ -48,12 +48,14 @@ func TestConvertMultiContent(t *testing.T) {
 			wantCount: 0,
 		},
 		{
-			name: "whitespace-only text part skipped",
+			// The converter forwards all parts as-is; normalizeMessageContent in the
+			// session layer strips whitespace-only text parts before real usage.
+			name: "whitespace-only text part forwarded as-is",
 			multiContent: []chat.MessagePart{
 				{Type: chat.MessagePartTypeText, Text: "   "},
 				{Type: chat.MessagePartTypeText, Text: "hello"},
 			},
-			wantCount: 1,
+			wantCount: 2,
 		},
 	}
 

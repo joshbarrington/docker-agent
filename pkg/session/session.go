@@ -916,6 +916,7 @@ func (s *Session) GetMessages(a *agent.Agent) []chat.Message {
 		messages = truncateOldToolContent(messages, maxOldToolCallTokens)
 	}
 
+	messages = normalizeMessageContent(messages)
 	messages = sanitizeToolCalls(messages)
 
 	systemCount := 0
@@ -1011,6 +1012,58 @@ func trimMessages(messages []chat.Message, maxItems int) []chat.Message {
 	}
 
 	return result
+}
+
+// normalizeMessageContent strips purely-whitespace content from messages before
+// they reach any provider converter. Specifically:
+//
+//   - Non-tool messages whose Content is whitespace-only and have no MultiContent
+//     are dropped entirely. Tool-result messages are exempt: every tool_use must
+//     have a corresponding tool_result, so we cannot skip them even when empty.
+//   - Text parts inside MultiContent whose Text is whitespace-only are removed.
+//     A non-tool message that becomes part-less after this pruning is also dropped.
+//
+// This is the single authoritative guard; individual provider converters do not
+// need their own whitespace-skip guards for user/system/assistant messages.
+func normalizeMessageContent(messages []chat.Message) []chat.Message {
+	out := messages[:0:0] // reuse underlying array, length 0
+	for _, msg := range messages {		// Tool results must always be forwarded — even empty — because the API
+		// requires a tool_result for every preceding tool_use block.
+		if msg.Role == chat.MessageRoleTool {
+			out = append(out, msg)
+			continue
+		}
+
+		if len(msg.MultiContent) > 0 {
+			// Filter whitespace-only text parts; preserve image/file parts as-is.
+			filtered := msg.MultiContent[:0:0]
+			for _, part := range msg.MultiContent {
+				if part.Type == chat.MessagePartTypeText && strings.TrimSpace(part.Text) == "" {
+					continue
+				}
+				filtered = append(filtered, part)
+			}
+			if len(filtered) == 0 {
+				// All parts were whitespace-only text — drop the whole message.
+				continue
+			}
+			msg.MultiContent = filtered
+			out = append(out, msg)
+			continue
+		}
+
+		// Single-part: drop messages with whitespace-only Content, but only when
+		// there are no tool calls or function calls attached. An assistant message
+		// with an empty text body but tool_use blocks is valid and must be kept.
+		if strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0 && msg.FunctionCall == nil {
+			continue
+		}
+		out = append(out, msg)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // sanitizeToolCalls ensures every tool call in assistant messages has a

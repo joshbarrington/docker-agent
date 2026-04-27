@@ -43,7 +43,7 @@ func (c *Client) convertBetaMessages(ctx context.Context, messages []chat.Messag
 						Content: contentBlocks,
 					})
 				}
-			} else if strings.TrimSpace(msg.Content) != "" {
+			} else {
 				betaMessages = append(betaMessages, anthropic.BetaMessageParam{
 					Role: anthropic.BetaMessageParamRoleUser,
 					Content: []anthropic.BetaContentBlockParamUnion{
@@ -68,9 +68,9 @@ func (c *Client) convertBetaMessages(ctx context.Context, messages []chat.Messag
 			}
 
 			// Add text content if present
-			if txt := strings.TrimSpace(msg.Content); txt != "" {
+			if msg.Content != "" {
 				contentBlocks = append(contentBlocks, anthropic.BetaContentBlockParamUnion{
-					OfText: &anthropic.BetaTextBlockParam{Text: txt},
+					OfText: &anthropic.BetaTextBlockParam{Text: msg.Content},
 				})
 			}
 
@@ -158,11 +158,9 @@ func convertBetaToolResultBlock(msg *chat.Message) anthropic.BetaContentBlockPar
 	for _, part := range msg.MultiContent {
 		switch part.Type {
 		case chat.MessagePartTypeText:
-			if strings.TrimSpace(part.Text) != "" {
-				content = append(content, anthropic.BetaToolResultBlockParamContentUnion{
-					OfText: &anthropic.BetaTextBlockParam{Text: part.Text},
-				})
-			}
+			content = append(content, anthropic.BetaToolResultBlockParamContentUnion{
+				OfText: &anthropic.BetaTextBlockParam{Text: part.Text},
+			})
 		case chat.MessagePartTypeImageURL:
 			if part.ImageURL == nil {
 				continue
@@ -200,11 +198,9 @@ func (c *Client) convertBetaUserMultiContent(ctx context.Context, parts []chat.M
 	for _, part := range parts {
 		switch part.Type {
 		case chat.MessagePartTypeText:
-			if strings.TrimSpace(part.Text) != "" {
-				contentBlocks = append(contentBlocks, anthropic.BetaContentBlockParamUnion{
-					OfText: &anthropic.BetaTextBlockParam{Text: part.Text},
-				})
-			}
+			contentBlocks = append(contentBlocks, anthropic.BetaContentBlockParamUnion{
+				OfText: &anthropic.BetaTextBlockParam{Text: part.Text},
+			})
 
 		case chat.MessagePartTypeImageURL:
 			if part.ImageURL == nil {

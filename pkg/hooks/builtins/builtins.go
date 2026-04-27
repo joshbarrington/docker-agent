@@ -1,6 +1,8 @@
 // Package builtins contains the stock in-process hook implementations
 // shipped with docker-agent: add_date, add_environment_info, and
-// add_prompt_files.
+// add_prompt_files. Each lives in its own file along with its
+// registered-name constant; this file holds the shared registration
+// and agent-defaults plumbing.
 //
 // They can be referenced explicitly from a hook YAML entry using
 // `{type: builtin, command: "<name>"}`. The runtime also auto-injects
@@ -10,10 +12,6 @@
 // AddDate and AddPromptFiles target turn_start so they recompute every
 // turn. AddEnvironmentInfo targets session_start because cwd / OS / arch
 // don't change during a session.
-//
-// Each builtin lives in its own file (add_date.go, add_environment_info.go,
-// add_prompt_files.go) along with its registered-name constant; this file
-// holds the shared registration plumbing.
 package builtins
 
 import (
@@ -37,11 +35,6 @@ type AgentDefaults struct {
 	AddDate            bool
 	AddEnvironmentInfo bool
 	AddPromptFiles     []string
-}
-
-// IsZero reports whether no agent default would inject any builtin.
-func (d AgentDefaults) IsZero() bool {
-	return !d.AddDate && !d.AddEnvironmentInfo && len(d.AddPromptFiles) == 0
 }
 
 // ApplyAgentDefaults appends the stock builtin hook entries implied by
@@ -71,11 +64,4 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 // builtinHook returns a hook entry that dispatches to the named builtin.
 func builtinHook(name string, args ...string) hooks.Hook {
 	return hooks.Hook{Type: hooks.HookTypeBuiltin, Command: name, Args: args}
-}
-
-// turnStartContext wraps additional context as a turn_start output.
-// Shared by builtins that contribute per-turn context (add_date,
-// add_prompt_files).
-func turnStartContext(content string) *hooks.Output {
-	return hooks.NewAdditionalContextOutput(hooks.EventTurnStart, content)
 }

@@ -31,5 +31,5 @@ func addPromptFiles(_ context.Context, in *hooks.Input, args []string) (*hooks.O
 	if len(parts) == 0 {
 		return nil, nil
 	}
-	return turnStartContext(strings.Join(parts, "\n\n")), nil
+	return hooks.NewAdditionalContextOutput(hooks.EventTurnStart, strings.Join(parts, "\n\n")), nil
 }

@@ -1,11 +1,13 @@
-package session
+package builtins
 
 import (
 	"os"
 	"path/filepath"
 )
 
-// isGitRepo checks if the given directory or one of its parents is a git repository
+// isGitRepo checks if the given directory or one of its parents is a git
+// repository. Used by the add_environment_info builtin to surface git
+// awareness to the model.
 func isGitRepo(dir string) bool {
 	if dir == "" {
 		return false

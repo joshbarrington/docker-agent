@@ -181,7 +181,6 @@ func lookup(t *testing.T, name string) hooks.BuiltinFunc {
 func TestApplyAgentDefaultsNilOnAllZero(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, builtins.AgentDefaults{}.IsZero())
 	assert.Nil(t, builtins.ApplyAgentDefaults(nil, builtins.AgentDefaults{}))
 	assert.Nil(t, builtins.ApplyAgentDefaults(&hooks.Config{}, builtins.AgentDefaults{}))
 }

@@ -24,7 +24,6 @@ import (
 	"github.com/docker/docker-agent/pkg/profiling"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tui"
@@ -571,10 +570,8 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 
 		// Create the app
 		var appOpts []app.Opt
-		if pr, ok := localRt.(*runtime.PersistentRuntime); ok {
-			if model := pr.CurrentAgent().Model(); model != nil {
-				appOpts = append(appOpts, app.WithTitleGenerator(sessiontitle.New(model)))
-			}
+		if gen := localRt.TitleGenerator(); gen != nil {
+			appOpts = append(appOpts, app.WithTitleGenerator(gen))
 		}
 
 		a := app.New(spawnCtx, localRt, newSess, appOpts...)

@@ -163,6 +163,13 @@ type LocalRuntime struct {
 
 	fallback *fallbackExecutor
 
+	// observers receive every event the runtime produces, in
+	// registration order. Built up via [WithEventObserver] during
+	// construction; read-only afterwards. Always contains at least one
+	// entry: the auto-registered [PersistenceObserver] for the
+	// configured session store. See [EventObserver] for the contract.
+	observers []EventObserver
+
 	// fallback owns the model-fallback chain (primary + configured
 	// fallbacks), per-attempt retry/backoff for transient errors, and
 	// the per-agent "sticky" cooldown after a fallback succeeds. It
@@ -331,6 +338,17 @@ func WithRetryOnRateLimit() Opt {
 	}
 }
 
+// New creates a runtime ready to drive an agent loop. It is a thin
+// alias for [NewLocalRuntime] returning the [Runtime] interface, kept
+// for source compatibility with callers written before persistence
+// became an [EventObserver]. Persistence is auto-registered against
+// the configured (or default in-memory) session store; pass
+// [WithSessionStore] to override and [WithEventObserver] to layer
+// additional observers (telemetry, audit, ...).
+func New(agents *team.Team, opts ...Opt) (Runtime, error) {
+	return NewLocalRuntime(agents, opts...)
+}
+
 // NewLocalRuntime creates a new LocalRuntime without the persistence wrapper.
 // This is useful for testing or when persistence is handled externally.
 func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
@@ -408,6 +426,14 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	// Pre-build per-agent hook executors now that workingDir, env and
 	// the team are finalized. Read-only afterwards.
 	r.buildHooksExecutors()
+
+	// Auto-register the stock persistence observer against the
+	// (possibly user-supplied) session store. It runs first in the
+	// observer chain so any user-supplied observers see the same view
+	// of the session that future RunStream calls and store reads will.
+	if obs := newPersistenceObserver(r.sessionStore); obs != nil {
+		r.observers = append([]EventObserver{obs}, r.observers...)
+	}
 
 	slog.Debug("Creating new runtime", "agent", r.agents.Name(), "available_agents", agents.Size())
 

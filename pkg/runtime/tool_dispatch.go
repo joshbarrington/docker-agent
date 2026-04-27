@@ -294,7 +294,7 @@ func (r *LocalRuntime) executeToolWithHandler(
 	a *agent.Agent,
 	spanName string,
 	execute func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error),
-) {
+) *tools.ToolCallResult {
 	ctx, span := r.startSpan(ctx, spanName, trace.WithAttributes(
 		attribute.String("tool.name", toolCall.Function.Name),
 		attribute.String("agent", a.Name()),
@@ -362,6 +362,7 @@ func (r *LocalRuntime) executeToolWithHandler(
 	}
 
 	addAgentMessage(sess, a, &toolResponseMsg, events)
+	return res
 }
 
 // runTool executes a user tool from a toolset (MCP, filesystem, ...).
@@ -374,13 +375,13 @@ func (r *LocalRuntime) runTool(ctx context.Context, tool tools.Tool, toolCall to
 		return toolApprovalOutcome{}
 	}
 
-	r.executeToolWithHandler(ctx, toolCall, tool, events, sess, a, "runtime.tool.handler",
+	res := r.executeToolWithHandler(ctx, toolCall, tool, events, sess, a, "runtime.tool.handler",
 		func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
 			res, err := tool.Handler(ctx, toolCall)
 			return res, 0, err
 		})
 
-	stop, msg := r.executePostToolHook(ctx, sess, toolCall, a, events)
+	stop, msg := r.executePostToolHook(ctx, sess, toolCall, res, a, events)
 	return toolApprovalOutcome{stopRun: stop, stopMessage: msg}
 }
 
@@ -394,6 +395,15 @@ func newHooksInput(sess *session.Session, toolCall tools.ToolCall) *hooks.Input 
 		ToolUseID: toolCall.ID,
 		ToolInput: parseToolInput(toolCall.Function.Arguments),
 	}
+}
+
+func newPostToolHookInput(sess *session.Session, toolCall tools.ToolCall, res *tools.ToolCallResult) *hooks.Input {
+	input := newHooksInput(sess, toolCall)
+	if res != nil {
+		input.ToolResponse = res.Output
+		input.ToolError = res.IsError
+	}
+	return input
 }
 
 // executePreToolHook runs the pre-tool-use hook and returns whether the tool
@@ -440,10 +450,11 @@ func (r *LocalRuntime) executePostToolHook(
 	ctx context.Context,
 	sess *session.Session,
 	toolCall tools.ToolCall,
+	res *tools.ToolCallResult,
 	a *agent.Agent,
 	events chan Event,
 ) (stop bool, message string) {
-	result := r.dispatchHook(ctx, a, hooks.EventPostToolUse, newHooksInput(sess, toolCall), events)
+	result := r.dispatchHook(ctx, a, hooks.EventPostToolUse, newPostToolHookInput(sess, toolCall, res), events)
 	if result == nil || result.Allowed {
 		return false, ""
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -2838,4 +2839,59 @@ func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
 	secondParts := items[1].Message.Message.MultiContent
 	require.Len(t, secondParts, 1)
 	assert.Equal(t, "second", secondParts[0].Text, "last message must not be modified")
+}
+
+func TestPostToolHookReceivesToolResult(t *testing.T) {
+	var got *hooks.Input
+	registry := hooks.NewRegistry()
+	require.NoError(t, registry.RegisterBuiltin("capture_post_tool", func(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+		inputCopy := *in
+		got = &inputCopy
+		return nil, nil
+	}))
+
+	agentTools := []tools.Tool{{
+		Name:       "echo_tool",
+		Parameters: map[string]any{},
+		Handler: func(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("actual tool output"), nil
+		},
+	}}
+
+	root := agent.New("root", "You are a test agent",
+		agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}),
+		agent.WithToolSets(newStubToolSet(nil, agentTools, nil)),
+		agent.WithHooks(&latest.HooksConfig{
+			PostToolUse: []latest.HookMatcherConfig{{
+				Matcher: "echo_tool",
+				Hooks: []latest.HookDefinition{{
+					Type:    "builtin",
+					Command: "capture_post_tool",
+				}},
+			}},
+		}),
+	)
+	tm := team.New(team.WithAgents(root))
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.hooksRegistry = registry
+	rt.buildHooksExecutors()
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	calls := []tools.ToolCall{{
+		ID:       "call_1",
+		Type:     "function",
+		Function: tools.FunctionCall{Name: "echo_tool", Arguments: `{"message":"hello"}`},
+	}}
+
+	events := make(chan Event, 10)
+	rt.processToolCalls(t.Context(), sess, calls, agentTools, events)
+
+	require.NotNil(t, got)
+	assert.Equal(t, hooks.EventPostToolUse, got.HookEventName)
+	assert.Equal(t, "echo_tool", got.ToolName)
+	assert.Equal(t, "call_1", got.ToolUseID)
+	assert.Equal(t, "actual tool output", got.ToolResponse)
+	assert.False(t, got.ToolError)
+	assert.Equal(t, "hello", got.ToolInput["message"])
 }

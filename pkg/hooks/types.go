@@ -72,7 +72,8 @@ type Input struct {
 	ToolInput map[string]any `json:"tool_input,omitempty"`
 
 	// PostToolUse specific.
-	ToolResponse any `json:"tool_response,omitempty"`
+	ToolResponse any  `json:"tool_response,omitempty"`
+	ToolError    bool `json:"tool_error,omitempty"`
 
 	// SessionStart specific: "startup", "resume", "clear", "compact".
 	Source string `json:"source,omitempty"`

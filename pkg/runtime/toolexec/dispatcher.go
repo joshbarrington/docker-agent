@@ -78,10 +78,9 @@ type Emitter interface {
 // "user is being prompted" notification.
 type HookDispatcher interface {
 	// Dispatch fires a tool-related hook (typically [hooks.EventPreToolUse]
-	// or [hooks.EventPostToolUse]).  Return nil when no hook is configured
-	// or dispatch failed: the dispatcher treats nil uniformly as
-	// "carry on with the original call". SystemMessage emission is the
-	// implementation's responsibility.
+	// or [hooks.EventPostToolUse]). Returning nil is the "carry on with the
+	// original call" signal — used uniformly when no hook is configured,
+	// the agent is missing, or dispatch failed.
 	Dispatch(ctx context.Context, a *agent.Agent, event hooks.EventType, in *hooks.Input) *hooks.Result
 
 	// NotifyUserInput is invoked just before the dispatcher blocks waiting
@@ -99,14 +98,10 @@ type HookDispatcher interface {
 }
 
 // ToolHandler is the signature for runtime-managed tool handlers
-// (e.g. transfer_task, handoff, change_model). Handlers receive the
-// parsed call and return the result.
-//
-// The dispatcher wraps every handler in the same tracing/telemetry/event-
-// emission pipeline used for ordinary toolset tools, so handlers MUST NOT
-// emit ToolCall/ToolCallResponse themselves. Handlers that need to emit
-// additional runtime-specific events (e.g. an agent-info event after a
-// model change) should be wired by the caller to capture the relevant
+// (e.g. transfer_task, handoff, change_model). The dispatcher wraps every
+// handler in tracing/telemetry/event-emission, so handlers MUST NOT emit
+// ToolCall/ToolCallResponse themselves. Handlers that need to emit other
+// event types should be wired by the caller to capture the relevant
 // channel via closure when registering the handler.
 type ToolHandler func(ctx context.Context, sess *session.Session, tc tools.ToolCall) (*tools.ToolCallResult, error)
 
@@ -130,8 +125,8 @@ const (
 )
 
 // Dispatcher executes batches of tool calls. Construct one per runtime
-// and call [Dispatcher.Process] for each LLM response. The dispatcher is
-// goroutine-safe only insofar as its dependencies are.
+// (or per RunStream) and call [Dispatcher.Process] for each LLM response.
+// The dispatcher is goroutine-safe only insofar as its dependencies are.
 type Dispatcher struct {
 	// Tracer records per-call spans. May be nil (no-op tracing).
 	Tracer trace.Tracer
@@ -148,7 +143,8 @@ type Dispatcher struct {
 	AgentFor func(*session.Session) *agent.Agent
 
 	// Permissions returns the ordered list of permission checkers for a
-	// session (typically session-level first, then team-level).
+	// session (typically session-level first, then team-level). May be
+	// nil; treated the same as returning an empty slice.
 	Permissions func(*session.Session) []NamedChecker
 
 	// Handlers maps tool names to runtime-managed handlers (transfer_task,
@@ -170,9 +166,9 @@ func (d *Dispatcher) Process(ctx context.Context, sess *session.Session, calls [
 	a := d.AgentFor(sess)
 	slog.Debug("Processing tool calls", "agent", a.Name(), "call_count", len(calls))
 
-	agentToolMap := make(map[string]tools.Tool, len(agentTools))
+	toolByName := make(map[string]tools.Tool, len(agentTools))
 	for _, t := range agentTools {
-		agentToolMap[t.Name] = t
+		toolByName[t.Name] = t
 	}
 
 	// synthesizeRemaining adds error responses for tool calls we won't
@@ -181,61 +177,15 @@ func (d *Dispatcher) Process(ctx context.Context, sess *session.Session, calls [
 	// rejected by the Responses API, so we surface them as errors
 	// rather than dropping them.
 	synthesizeRemaining := func(remaining []tools.ToolCall, reason string) {
-		for _, tc := range remaining {
-			d.addToolErrorResponse(sess, tc, agentToolMap[tc.Function.Name], em, a, reason)
+		for _, rc := range remaining {
+			c := d.newCall(sess, em, a, rc, toolByName)
+			c.errorResponse(reason)
 		}
 	}
 
-	for i, toolCall := range calls {
-		callCtx, callSpan := d.startSpan(ctx, "runtime.tool.call", trace.WithAttributes(
-			attribute.String("tool.name", toolCall.Function.Name),
-			attribute.String("tool.type", string(toolCall.Type)),
-			attribute.String("agent", a.Name()),
-			attribute.String("session.id", sess.ID),
-			attribute.String("tool.call_id", toolCall.ID),
-		))
-
-		slog.Debug("Processing tool call", "agent", a.Name(), "tool", toolCall.Function.Name, "session_id", sess.ID)
-
-		// Resolve the tool: it must be in the agent's tool set to be callable.
-		// After a handoff the model may hallucinate tools it saw in the
-		// conversation history from a previous agent; rejecting unknown
-		// tools with an error response lets it self-correct.
-		tool, available := agentToolMap[toolCall.Function.Name]
-		if !available {
-			slog.Warn("Tool call for unavailable tool", "agent", a.Name(), "tool", toolCall.Function.Name, "session_id", sess.ID)
-			errTool := tools.Tool{Name: toolCall.Function.Name}
-			d.addToolErrorResponse(sess, toolCall, errTool, em, a, fmt.Sprintf("Tool '%s' is not available. You can only use the tools provided to you.", toolCall.Function.Name))
-			callSpan.SetStatus(codes.Error, "tool not available")
-			callSpan.End()
-			continue
-		}
-
-		// Pick the handler: runtime-managed tools (transfer_task, handoff)
-		// have dedicated handlers; everything else goes through the toolset.
-		// Runtime-managed handlers skip pre/post hooks; toolset tools go
-		// through the hook-aware path and may produce a stopRun outcome.
-		var runTool func() CallOutcome
-		if handler, exists := d.Handlers[toolCall.Function.Name]; exists {
-			runTool = func() CallOutcome {
-				d.runHandlerTool(callCtx, handler, sess, toolCall, tool, em, a)
-				return CallOutcome{}
-			}
-		} else {
-			runTool = func() CallOutcome {
-				return d.runToolsetTool(callCtx, tool, toolCall, em, sess, a)
-			}
-		}
-
-		outcome := d.executeWithApproval(callCtx, sess, toolCall, tool, em, a, runTool)
-
-		if outcome.Canceled {
-			callSpan.SetStatus(codes.Ok, "tool call canceled by user")
-		} else {
-			callSpan.SetStatus(codes.Ok, "tool call processed")
-		}
-		callSpan.End()
-
+	for i, tc := range calls {
+		c := d.newCall(sess, em, a, tc, toolByName)
+		outcome := c.run(ctx)
 		switch {
 		case outcome.Canceled:
 			synthesizeRemaining(calls[i+1:],
@@ -250,67 +200,153 @@ func (d *Dispatcher) Process(ctx context.Context, sess *session.Session, calls [
 	return false, ""
 }
 
-// executeWithApproval handles the tool approval flow and executes the tool.
+// newCall assembles a [call] for a single tool invocation, looking up the
+// referenced tool in the agent's toolset. When the tool isn't found, the
+// call is marked unavailable and tool.Name is set to the requested name
+// so error events still carry a meaningful label.
+func (d *Dispatcher) newCall(sess *session.Session, em Emitter, a *agent.Agent, tc tools.ToolCall, toolByName map[string]tools.Tool) *call {
+	tool, available := toolByName[tc.Function.Name]
+	if !available {
+		tool = tools.Tool{Name: tc.Function.Name}
+	}
+	return &call{
+		d:         d,
+		sess:      sess,
+		em:        em,
+		a:         a,
+		tc:        tc,
+		tool:      tool,
+		available: available,
+	}
+}
+
+// call bundles the per-tool-call state used by the dispatcher's helpers.
+// Carrying it as a single value cuts the helpers' parameter lists from
+// 7-8 arguments down to a method receiver, and groups the mutable state
+// (pre-hook may rewrite tc.Function.Arguments) in one place.
 //
-// The approval flow is fully resolved by [Decide]; this function only
-// translates the resulting decision into runtime side effects (run,
-// deny-with-error-response, ask-and-wait) and forwards the decision to
-// [HookDispatcher.NotifyApprovalDecision] for hook tracking.
-func (d *Dispatcher) executeWithApproval(
-	ctx context.Context,
-	sess *session.Session,
-	toolCall tools.ToolCall,
-	tool tools.Tool,
-	em Emitter,
-	a *agent.Agent,
-	runTool func() CallOutcome,
-) CallOutcome {
-	toolName := toolCall.Function.Name
+// ctx is intentionally NOT a field: storing context.Context in a struct
+// is a documented Go anti-pattern (it hides cancellation flow). Methods
+// that need ctx accept it explicitly as the first argument.
+type call struct {
+	d    *Dispatcher
+	sess *session.Session
+	em   Emitter
+	a    *agent.Agent
+
+	tc        tools.ToolCall // mutable: preHook may rewrite arguments
+	tool      tools.Tool     // tool.Name is always set; other fields zero when !available
+	available bool           // false when the tool wasn't in the agent's toolset
+}
+
+// run processes a single tool call and returns its outcome. All span
+// and approval bookkeeping lives here so the call lifecycle is visible
+// at a glance.
+func (c *call) run(ctx context.Context) CallOutcome {
+	ctx, span := c.d.startSpan(ctx, "runtime.tool.call", trace.WithAttributes(
+		attribute.String("tool.name", c.tc.Function.Name),
+		attribute.String("tool.type", string(c.tc.Type)),
+		attribute.String("agent", c.a.Name()),
+		attribute.String("session.id", c.sess.ID),
+		attribute.String("tool.call_id", c.tc.ID),
+	))
+	defer span.End()
+
+	slog.Debug("Processing tool call", "agent", c.a.Name(), "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+
+	// After a handoff the model may hallucinate tools it saw earlier in
+	// the conversation. Reject unknown tools with an error response so it
+	// can self-correct.
+	if !c.available {
+		slog.Warn("Tool call for unavailable tool", "agent", c.a.Name(), "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+		c.errorResponse(fmt.Sprintf("Tool '%s' is not available. You can only use the tools provided to you.", c.tc.Function.Name))
+		span.SetStatus(codes.Error, "tool not available")
+		return CallOutcome{}
+	}
+
+	// Pick the deferred work that runs once approval clears: runtime-managed
+	// tools (transfer_task, handoff) have dedicated handlers; everything
+	// else goes through the toolset.
+	var runTool func() CallOutcome
+	if handler, ok := c.d.Handlers[c.tc.Function.Name]; ok {
+		runTool = func() CallOutcome {
+			c.runHandler(ctx, handler)
+			return CallOutcome{}
+		}
+	} else {
+		runTool = func() CallOutcome {
+			return c.runToolset(ctx)
+		}
+	}
+
+	outcome := c.approveAndRun(ctx, runTool)
+	if outcome.Canceled {
+		span.SetStatus(codes.Ok, "tool call canceled by user")
+	} else {
+		span.SetStatus(codes.Ok, "tool call processed")
+	}
+	return outcome
+}
+
+// approveAndRun runs runTool if the configured approval pipeline allows
+// it, otherwise records an error or asks the user.
+//
+// The policy decision is delegated to the pure [Decide] function; this
+// method only applies the resulting outcome and notifies the
+// [HookDispatcher] of the verdict.
+func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) CallOutcome {
+	var checkers []NamedChecker
+	if c.d.Permissions != nil {
+		checkers = c.d.Permissions(c.sess)
+	}
 
 	decision := Decide(
-		sess.ToolsApproved,
-		d.permissionsFor(sess),
-		toolName,
-		ParseToolInput(toolCall.Function.Arguments),
-		tool.Annotations.ReadOnlyHint,
+		c.sess.ToolsApproved,
+		checkers,
+		c.tc.Function.Name,
+		ParseToolInput(c.tc.Function.Arguments),
+		c.tool.Annotations.ReadOnlyHint,
 	)
 
 	switch decision.Outcome {
 	case OutcomeAllow:
-		logAllow(decision, toolName, sess.ID)
-		d.notifyApproval(ctx, sess, a, toolCall, ApprovalDecisionAllow, allowSourceForDecision(decision))
+		c.logAllow(decision)
+		c.notifyApproval(ctx, ApprovalDecisionAllow, allowSourceForDecision(decision))
 		return runTool()
 	case OutcomeDeny:
-		slog.Debug("Tool denied by permissions", "tool", toolName, "source", decision.Source, "session_id", sess.ID)
-		d.notifyApproval(ctx, sess, a, toolCall, ApprovalDecisionDeny, denySourceForChecker(decision.Source))
-		d.addToolErrorResponse(sess, toolCall, tool, em, a, fmt.Sprintf("Tool '%s' is denied by %s.", toolName, decision.Source))
+		slog.Debug("Tool denied by permissions", "tool", c.tc.Function.Name, "source", decision.Source, "session_id", c.sess.ID)
+		c.notifyApproval(ctx, ApprovalDecisionDeny, denySourceForChecker(decision.Source))
+		c.errorResponse(fmt.Sprintf("Tool '%s' is denied by %s.", c.tc.Function.Name, decision.Source))
 		return CallOutcome{}
 	case OutcomeAsk:
 		if decision.Reason == ReasonChecker {
-			slog.Debug("Tool requires confirmation (ask pattern)", "tool", toolName, "source", decision.Source, "session_id", sess.ID)
+			slog.Debug("Tool requires confirmation (ask pattern)", "tool", c.tc.Function.Name, "source", decision.Source, "session_id", c.sess.ID)
 		}
-		return d.askUserForConfirmation(ctx, sess, toolCall, tool, em, a, runTool)
+		return c.askUser(ctx, runTool)
 	}
 	return CallOutcome{}
-}
-
-// permissionsFor returns the ordered checkers for sess, or nil when none
-// are configured. Centralizing the nil-guard keeps callers terse.
-func (d *Dispatcher) permissionsFor(sess *session.Session) []NamedChecker {
-	if d.Permissions == nil {
-		return nil
-	}
-	return d.Permissions(sess)
 }
 
 // notifyApproval forwards the resolved approval decision to the
 // HookDispatcher, when one is configured. Centralised so the nil-guard
 // stays in one place.
-func (d *Dispatcher) notifyApproval(ctx context.Context, sess *session.Session, a *agent.Agent, tc tools.ToolCall, decision, source string) {
-	if d.Hooks == nil {
+func (c *call) notifyApproval(ctx context.Context, decision, source string) {
+	if c.d.Hooks == nil {
 		return
 	}
-	d.Hooks.NotifyApprovalDecision(ctx, sess, a, tc, decision, source)
+	c.d.Hooks.NotifyApprovalDecision(ctx, c.sess, c.a, c.tc, decision, source)
+}
+
+// logAllow emits the auto-approval debug log appropriate to the reason
+// that produced the [OutcomeAllow] decision.
+func (c *call) logAllow(d PermissionDecision) {
+	switch d.Reason {
+	case ReasonYolo:
+		slog.Debug("Tool auto-approved by --yolo flag", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+	case ReasonChecker:
+		slog.Debug("Tool auto-approved by permissions", "tool", c.tc.Function.Name, "source", d.Source, "session_id", c.sess.ID)
+		// ReasonReadOnlyHint is intentionally silent (matches prior behaviour).
+	}
 }
 
 // allowSourceForDecision maps a [PermissionDecision] with [OutcomeAllow]
@@ -345,274 +381,251 @@ func denySourceForChecker(checkerSource string) string {
 	return ApprovalSourceTeamPermissionsDeny
 }
 
-// logAllow emits the auto-approval debug log appropriate to the reason
-// (--yolo, an explicit checker rule, or the read-only hint).
-func logAllow(decision PermissionDecision, toolName, sessionID string) {
-	switch decision.Reason {
-	case ReasonYolo:
-		slog.Debug("Tool auto-approved by --yolo flag", "tool", toolName, "session_id", sessionID)
-	case ReasonChecker:
-		slog.Debug("Tool auto-approved by permissions", "tool", toolName, "source", decision.Source, "session_id", sessionID)
-		// ReasonReadOnlyHint is intentionally silent (matches prior behaviour).
-	}
-}
+// askUser sends a confirmation event and waits for the user's response
+// on the resume channel or for ctx cancellation. Only called when no
+// permission rule auto-approved the tool.
+func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutcome {
+	slog.Debug("Tools not approved, waiting for resume", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+	c.em.EmitToolCallConfirmation(c.tc, c.tool, c.a.Name())
 
-// askUserForConfirmation sends a confirmation event and waits for user
-// response. Only called when no permission rule auto-approved the tool.
-func (d *Dispatcher) askUserForConfirmation(
-	ctx context.Context,
-	sess *session.Session,
-	toolCall tools.ToolCall,
-	tool tools.Tool,
-	em Emitter,
-	a *agent.Agent,
-	runTool func() CallOutcome,
-) CallOutcome {
-	toolName := toolCall.Function.Name
-	slog.Debug("Tools not approved, waiting for resume", "tool", toolName, "session_id", sess.ID)
-	em.EmitToolCallConfirmation(toolCall, tool, a.Name())
-
-	if d.Hooks != nil {
-		d.Hooks.NotifyUserInput(ctx, sess.ID, "tool confirmation")
+	if c.d.Hooks != nil {
+		c.d.Hooks.NotifyUserInput(ctx, c.sess.ID, "tool confirmation")
 	}
 
 	select {
-	case req := <-d.Resume:
-		switch req.Type {
-		case ResumeTypeApprove:
-			slog.Debug("Resume signal received, approving tool", "tool", toolName, "session_id", sess.ID)
-			d.notifyApproval(ctx, sess, a, toolCall, ApprovalDecisionAllow, ApprovalSourceUserApproved)
-			return runTool()
-		case ResumeTypeApproveSession:
-			slog.Debug("Resume signal received, approving session", "tool", toolName, "session_id", sess.ID)
-			sess.ToolsApproved = true
-			d.notifyApproval(ctx, sess, a, toolCall, ApprovalDecisionAllow, ApprovalSourceUserApprovedSession)
-			return runTool()
-		case ResumeTypeApproveTool:
-			// Add the tool to session's allow list for future auto-approval.
-			approvedTool := req.ToolName
-			if approvedTool == "" {
-				approvedTool = toolName
-			}
-			if sess.Permissions == nil {
-				sess.Permissions = &session.PermissionsConfig{}
-			}
-			if !slices.Contains(sess.Permissions.Allow, approvedTool) {
-				sess.Permissions.Allow = append(sess.Permissions.Allow, approvedTool)
-			}
-			slog.Debug("Resume signal received, approving tool permanently", "tool", approvedTool, "session_id", sess.ID)
-			d.notifyApproval(ctx, sess, a, toolCall, ApprovalDecisionAllow, ApprovalSourceUserApprovedTool)
-			return runTool()
-		case ResumeTypeReject:
-			slog.Debug("Resume signal received, rejecting tool", "tool", toolName, "session_id", sess.ID, "reason", req.Reason)
-			d.notifyApproval(ctx, sess, a, toolCall, ApprovalDecisionDeny, ApprovalSourceUserRejected)
-			rejectMsg := "The user rejected the tool call."
-			if strings.TrimSpace(req.Reason) != "" {
-				rejectMsg += " Reason: " + strings.TrimSpace(req.Reason)
-			}
-			d.addToolErrorResponse(sess, toolCall, tool, em, a, rejectMsg)
-		}
-		return CallOutcome{}
+	case req := <-c.d.Resume:
+		return c.handleResume(ctx, req, runTool)
 	case <-ctx.Done():
-		slog.Debug("Context cancelled while waiting for resume", "tool", toolName, "session_id", sess.ID)
-		d.notifyApproval(ctx, sess, a, toolCall, ApprovalDecisionCanceled, ApprovalSourceContextCanceled)
-		d.addToolErrorResponse(sess, toolCall, tool, em, a, "The tool call was canceled by the user.")
+		slog.Debug("Context cancelled while waiting for resume", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+		c.notifyApproval(ctx, ApprovalDecisionCanceled, ApprovalSourceContextCanceled)
+		c.errorResponse("The tool call was canceled by the user.")
 		return CallOutcome{Canceled: true}
 	}
 }
 
-// executeToolWithHandler is the common pipeline shared by toolset tools and
-// runtime-managed handlers: tracing, event emission, telemetry, error
-// translation, and session message persistence.
-func (d *Dispatcher) executeToolWithHandler(
-	ctx context.Context,
-	toolCall tools.ToolCall,
-	tool tools.Tool,
-	em Emitter,
-	sess *session.Session,
-	a *agent.Agent,
-	spanName string,
-	execute func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error),
-) *tools.ToolCallResult {
-	ctx, span := d.startSpan(ctx, spanName, trace.WithAttributes(
-		attribute.String("tool.name", toolCall.Function.Name),
-		attribute.String("agent", a.Name()),
-		attribute.String("session.id", sess.ID),
-		attribute.String("tool.call_id", toolCall.ID),
+// handleResume applies the user's confirmation decision: run the tool
+// (with optional session/tool-wide approval persistence) or emit a
+// rejection error response.
+func (c *call) handleResume(ctx context.Context, req ResumeRequest, runTool func() CallOutcome) CallOutcome {
+	switch req.Type {
+	case ResumeTypeApprove:
+		slog.Debug("Resume signal received, approving tool", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApproved)
+		return runTool()
+	case ResumeTypeApproveSession:
+		slog.Debug("Resume signal received, approving session", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+		c.sess.ToolsApproved = true
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApprovedSession)
+		return runTool()
+	case ResumeTypeApproveTool:
+		approvedTool := req.ToolName
+		if approvedTool == "" {
+			approvedTool = c.tc.Function.Name
+		}
+		if c.sess.Permissions == nil {
+			c.sess.Permissions = &session.PermissionsConfig{}
+		}
+		if !slices.Contains(c.sess.Permissions.Allow, approvedTool) {
+			c.sess.Permissions.Allow = append(c.sess.Permissions.Allow, approvedTool)
+		}
+		slog.Debug("Resume signal received, approving tool permanently", "tool", approvedTool, "session_id", c.sess.ID)
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApprovedTool)
+		return runTool()
+	case ResumeTypeReject:
+		slog.Debug("Resume signal received, rejecting tool", "tool", c.tc.Function.Name, "session_id", c.sess.ID, "reason", req.Reason)
+		c.notifyApproval(ctx, ApprovalDecisionDeny, ApprovalSourceUserRejected)
+		msg := "The user rejected the tool call."
+		if reason := strings.TrimSpace(req.Reason); reason != "" {
+			msg += " Reason: " + reason
+		}
+		c.errorResponse(msg)
+	}
+	return CallOutcome{}
+}
+
+// runToolset executes a tool from an agent's toolset (MCP, filesystem, ...),
+// surrounding the call with pre/post hooks. The pre-hook may block the
+// call or rewrite its arguments; the post-hook may signal run
+// termination via its returned [CallOutcome].
+func (c *call) runToolset(ctx context.Context) CallOutcome {
+	if blocked := c.preHook(ctx); blocked {
+		return CallOutcome{}
+	}
+
+	res := c.invoke(ctx, "runtime.tool.handler", func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
+		res, err := c.tool.Handler(ctx, c.tc)
+		return res, 0, err
+	})
+
+	stop, msg := c.postHook(ctx, res)
+	return CallOutcome{StopRun: stop, StopMessage: msg}
+}
+
+// runHandler executes a runtime-managed tool handler. Hooks do not fire
+// for runtime-managed handlers — they're internal plumbing, not user-
+// configurable tools.
+func (c *call) runHandler(ctx context.Context, handler ToolHandler) {
+	c.invoke(ctx, "runtime.tool.handler.runtime", func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
+		start := time.Now()
+		res, err := handler(ctx, c.sess, c.tc)
+		return res, time.Since(start), err
+	})
+}
+
+// invoke is the common pipeline shared by toolset tools and runtime-
+// managed handlers: tracing, event emission, telemetry, error
+// translation, and session message persistence. It is the only place
+// where a tool actually runs.
+func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error)) *tools.ToolCallResult {
+	ctx, span := c.d.startSpan(ctx, spanName, trace.WithAttributes(
+		attribute.String("tool.name", c.tc.Function.Name),
+		attribute.String("agent", c.a.Name()),
+		attribute.String("session.id", c.sess.ID),
+		attribute.String("tool.call_id", c.tc.ID),
 	))
 	defer span.End()
 
-	em.EmitToolCall(toolCall, tool, a.Name())
+	c.em.EmitToolCall(c.tc, c.tool, c.a.Name())
 
-	res, duration, err := execute(ctx)
-
-	telemetry.RecordToolCall(ctx, toolCall.Function.Name, sess.ID, a.Name(), duration, err)
+	res, duration, err := exec(ctx)
+	telemetry.RecordToolCall(ctx, c.tc.Function.Name, c.sess.ID, c.a.Name(), duration, err)
 
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-			slog.Debug("Tool handler canceled by context", "tool", toolCall.Function.Name, "agent", a.Name(), "session_id", sess.ID)
-			res = tools.ResultError("The tool call was canceled by the user.")
-			span.SetStatus(codes.Ok, "tool handler canceled by user")
-		} else {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "tool handler error")
-			slog.Error("Error calling tool", "tool", toolCall.Function.Name, "error", err)
-			res = tools.ResultError(fmt.Sprintf("Error calling tool: %v", err))
-		}
+		res = c.translateError(ctx, span, err)
 	} else {
 		span.SetStatus(codes.Ok, "tool handler completed")
-		slog.Debug("Tool call completed", "tool", toolCall.Function.Name, "output_length", len(res.Output))
+		slog.Debug("Tool call completed", "tool", c.tc.Function.Name, "output_length", len(res.Output))
 	}
 
-	em.EmitToolCallResponse(toolCall.ID, tool, res, res.Output, a.Name())
+	c.em.EmitToolCallResponse(c.tc.ID, c.tool, res, res.Output, c.a.Name())
+	c.recordToolResponse(res)
+	return res
+}
 
-	// Ensure tool response content is not empty for API compatibility.
+// translateError converts a tool-handler error into a [tools.ToolCallResult]
+// suitable for the conversation, while annotating the span. Context-cancel
+// errors are reported as user cancellation (Ok status); everything else is
+// recorded as an error.
+func (c *call) translateError(ctx context.Context, span trace.Span, err error) *tools.ToolCallResult {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		slog.Debug("Tool handler canceled by context", "tool", c.tc.Function.Name, "agent", c.a.Name(), "session_id", c.sess.ID)
+		span.SetStatus(codes.Ok, "tool handler canceled by user")
+		return tools.ResultError("The tool call was canceled by the user.")
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, "tool handler error")
+	slog.Error("Error calling tool", "tool", c.tc.Function.Name, "error", err)
+	return tools.ResultError(fmt.Sprintf("Error calling tool: %v", err))
+}
+
+// recordToolResponse builds the chat message for a successful (or
+// error-translated) tool result and adds it to the session.
+func (c *call) recordToolResponse(res *tools.ToolCallResult) {
+	// Tool response content must not be empty for API compatibility.
 	content := res.Output
 	if strings.TrimSpace(content) == "" {
 		content = "(no output)"
 	}
 
-	toolResponseMsg := chat.Message{
+	msg := chat.Message{
 		Role:       chat.MessageRoleTool,
 		Content:    content,
-		ToolCallID: toolCall.ID,
+		ToolCallID: c.tc.ID,
 		IsError:    res.IsError,
 		CreatedAt:  time.Now().Format(time.RFC3339),
 	}
 
-	// If the tool result contains images, attach them as MultiContent.
 	if len(res.Images) > 0 {
-		multiContent := []chat.MessagePart{
-			{Type: chat.MessagePartTypeText, Text: content},
-		}
-		for _, img := range res.Images {
-			multiContent = append(multiContent, chat.MessagePart{
-				Type: chat.MessagePartTypeImageURL,
-				ImageURL: &chat.MessageImageURL{
-					URL:    "data:" + img.MimeType + ";base64," + img.Data,
-					Detail: chat.ImageURLDetailAuto,
-				},
-			})
-		}
-		toolResponseMsg.MultiContent = multiContent
+		msg.MultiContent = buildMultiContent(content, res.Images)
 	}
 
-	addAgentMessage(sess, a, &toolResponseMsg, em)
-	return res
+	c.addMessage(&msg)
 }
 
-// runToolsetTool executes a tool from an agent's toolset (MCP, filesystem, ...).
-// Returns a [CallOutcome] whose StopRun/StopMessage fields reflect any
-// post_tool_use deny verdict; Canceled stays false (user cancellation
-// only happens during the approval flow, before this).
-func (d *Dispatcher) runToolsetTool(ctx context.Context, tool tools.Tool, toolCall tools.ToolCall, em Emitter, sess *session.Session, a *agent.Agent) CallOutcome {
-	// Pre-tool hook: may block the call or rewrite its arguments.
-	blocked, toolCall := d.preHook(ctx, sess, toolCall, tool, em, a)
-	if blocked {
-		return CallOutcome{}
-	}
-
-	res := d.executeToolWithHandler(ctx, toolCall, tool, em, sess, a, "runtime.tool.handler",
-		func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
-			res, err := tool.Handler(ctx, toolCall)
-			return res, 0, err
+// buildMultiContent attaches inline images to a tool response as a
+// MultiContent payload, following the data-URL convention expected by
+// chat clients.
+func buildMultiContent(text string, images []tools.MediaContent) []chat.MessagePart {
+	parts := make([]chat.MessagePart, 0, 1+len(images))
+	parts = append(parts, chat.MessagePart{Type: chat.MessagePartTypeText, Text: text})
+	for _, img := range images {
+		parts = append(parts, chat.MessagePart{
+			Type: chat.MessagePartTypeImageURL,
+			ImageURL: &chat.MessageImageURL{
+				URL:    "data:" + img.MimeType + ";base64," + img.Data,
+				Detail: chat.ImageURLDetailAuto,
+			},
 		})
-
-	// Post-tool hook: SystemMessage is surfaced by the HookDispatcher
-	// implementation; a terminating verdict (decision="block" /
-	// continue=false / exit 2) is propagated to the run loop via
-	// CallOutcome.
-	stop, msg := d.postHook(ctx, sess, toolCall, res, a)
-	return CallOutcome{StopRun: stop, StopMessage: msg}
+	}
+	return parts
 }
 
-// runHandlerTool executes a runtime-managed tool handler.
-func (d *Dispatcher) runHandlerTool(ctx context.Context, handler ToolHandler, sess *session.Session, toolCall tools.ToolCall, tool tools.Tool, em Emitter, a *agent.Agent) {
-	d.executeToolWithHandler(ctx, toolCall, tool, em, sess, a, "runtime.tool.handler.runtime",
-		func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
-			start := time.Now()
-			res, err := handler(ctx, sess, toolCall)
-			return res, time.Since(start), err
-		})
-}
-
-// preHook fires the pre-tool-use hook and reports whether the tool call
-// was blocked (along with the possibly modified call when allowed).
-func (d *Dispatcher) preHook(
-	ctx context.Context,
-	sess *session.Session,
-	toolCall tools.ToolCall,
-	tool tools.Tool,
-	em Emitter,
-	a *agent.Agent,
-) (blocked bool, modifiedTC tools.ToolCall) {
-	if d.Hooks == nil {
-		return false, toolCall
+// preHook fires the pre-tool-use hook and returns whether the tool call
+// was blocked. When the hook rewrites arguments, [c.tc] is mutated in
+// place so the downstream invoke() sees the new arguments.
+func (c *call) preHook(ctx context.Context) (blocked bool) {
+	if c.d.Hooks == nil {
+		return false
 	}
 
-	// Dispatch returns nil when no hook is configured, the agent is
-	// missing, or dispatch failed — in every case the right move is to
-	// run the tool unchanged.
-	result := d.Hooks.Dispatch(ctx, a, hooks.EventPreToolUse, NewHooksInput(sess, toolCall))
+	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPreToolUse, NewHooksInput(c.sess, c.tc))
 	if result == nil {
-		return false, toolCall
+		return false
 	}
 
 	if !result.Allowed {
-		slog.Debug("Pre-tool hook blocked tool call", "tool", toolCall.Function.Name, "message", result.Message)
-		em.EmitHookBlocked(toolCall, tool, result.Message, a.Name())
-		d.addToolErrorResponse(sess, toolCall, tool, em, a, "Tool call blocked by hook: "+result.Message)
-		return true, toolCall
+		slog.Debug("Pre-tool hook blocked tool call", "tool", c.tc.Function.Name, "message", result.Message)
+		c.em.EmitHookBlocked(c.tc, c.tool, result.Message, c.a.Name())
+		c.errorResponse("Tool call blocked by hook: " + result.Message)
+		return true
 	}
 
 	if result.ModifiedInput != nil {
-		if updated, merr := json.Marshal(result.ModifiedInput); merr != nil {
-			slog.Warn("Failed to marshal modified tool input from hook", "tool", toolCall.Function.Name, "error", merr)
+		if updated, err := json.Marshal(result.ModifiedInput); err != nil {
+			slog.Warn("Failed to marshal modified tool input from hook", "tool", c.tc.Function.Name, "error", err)
 		} else {
-			slog.Debug("Pre-tool hook modified tool input", "tool", toolCall.Function.Name)
-			toolCall.Function.Arguments = string(updated)
+			slog.Debug("Pre-tool hook modified tool input", "tool", c.tc.Function.Name)
+			c.tc.Function.Arguments = string(updated)
 		}
 	}
-	return false, toolCall
+	return false
 }
 
 // postHook fires the post-tool-use hook. SystemMessage emission is the
 // [HookDispatcher]'s responsibility. A terminating verdict
 // (decision="block" / continue=false / exit 2) is propagated via the
-// (stop, message) return.
-func (d *Dispatcher) postHook(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, res *tools.ToolCallResult, a *agent.Agent) (stop bool, message string) {
-	if d.Hooks == nil {
+// (stop, message) return. The tool result is forwarded to the hook so
+// post_tool_use handlers can inspect ToolResponse / ToolError.
+func (c *call) postHook(ctx context.Context, res *tools.ToolCallResult) (stop bool, message string) {
+	if c.d.Hooks == nil {
 		return false, ""
 	}
-	result := d.Hooks.Dispatch(ctx, a, hooks.EventPostToolUse, NewPostToolHooksInput(sess, toolCall, res))
+	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPostToolUse, NewPostToolHooksInput(c.sess, c.tc, res))
 	if result == nil || result.Allowed {
 		return false, ""
 	}
 	return true, result.Message
 }
 
-// addToolErrorResponse appends an error tool-response to the session and
-// emits the corresponding events. Consolidates the pattern shared by
-// validation, rejection, and cancellation responses.
-func (d *Dispatcher) addToolErrorResponse(sess *session.Session, toolCall tools.ToolCall, tool tools.Tool, em Emitter, a *agent.Agent, errorMsg string) {
-	em.EmitToolCallResponse(toolCall.ID, tool, tools.ResultError(errorMsg), errorMsg, a.Name())
-
-	toolResponseMsg := chat.Message{
+// errorResponse appends an error tool-response to the session and emits
+// the corresponding events. Used by validation, rejection, hook-block,
+// and cancellation paths.
+func (c *call) errorResponse(errorMsg string) {
+	c.em.EmitToolCallResponse(c.tc.ID, c.tool, tools.ResultError(errorMsg), errorMsg, c.a.Name())
+	c.addMessage(&chat.Message{
 		Role:       chat.MessageRoleTool,
 		Content:    errorMsg,
-		ToolCallID: toolCall.ID,
+		ToolCallID: c.tc.ID,
 		IsError:    true,
 		CreatedAt:  time.Now().Format(time.RFC3339),
-	}
-	addAgentMessage(sess, a, &toolResponseMsg, em)
+	})
 }
 
-// addAgentMessage records a chat message to the session and emits the
-// resulting [*session.Message] via the [Emitter].
-func addAgentMessage(sess *session.Session, a *agent.Agent, msg *chat.Message, em Emitter) {
-	agentMsg := session.NewAgentMessage(a.Name(), msg)
-	sess.AddMessage(agentMsg)
-	em.EmitMessageAdded(sess.ID, agentMsg, a.Name())
+// addMessage records msg in the session and emits MessageAdded.
+func (c *call) addMessage(msg *chat.Message) {
+	agentMsg := session.NewAgentMessage(c.a.Name(), msg)
+	c.sess.AddMessage(agentMsg)
+	c.em.EmitMessageAdded(c.sess.ID, agentMsg, c.a.Name())
 }
 
 // startSpan wraps Tracer.Start; a nil tracer is a no-op so callers don't

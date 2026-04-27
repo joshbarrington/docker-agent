@@ -13,14 +13,15 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// processToolCalls builds a [toolexec.Dispatcher] for the current event
-// channel and delegates the per-call orchestration to it. The dispatcher
-// owns the approval flow, hook dispatch, tracing, telemetry, and event
-// emission; this method only assembles the runtime-side adapters.
+// processToolCalls builds a per-stream [toolexec.Dispatcher] and delegates
+// the per-call orchestration to it. The dispatcher owns the approval flow,
+// hook dispatch, tracing, telemetry, and event emission; this file only
+// supplies the runtime-side adapters that bridge them to the runtime's
+// chan Event.
 //
-// A new dispatcher is constructed per call (cheap: a struct literal plus
-// a small handler-binding map) so its handlers and emitter capture the
-// current RunStream's events channel.
+// The dispatcher is constructed per call (cheap: a struct literal plus a
+// small handler-binding map) so its handlers and emitter capture this
+// RunStream's events channel.
 //
 // Returns (stopRun, message) when a post_tool_use hook signalled a
 // terminating verdict during this batch; the run loop then fans out the
@@ -29,33 +30,29 @@ import (
 // halts the *batch* but keeps the loop alive so the synthesised tool
 // error responses can be sent back to the model on the next turn.
 func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Session, calls []tools.ToolCall, agentTools []tools.Tool, events chan Event) (stopRun bool, stopMessage string) {
-	d := &toolexec.Dispatcher{
-		Tracer:      r.tracer,
-		Hooks:       newHookDispatcher(r, events),
-		Resume:      r.resumeChan,
-		AgentFor:    r.resolveSessionAgent,
-		Permissions: r.permissionCheckers,
-		Handlers:    r.bindRuntimeHandlers(events),
-	}
-	return d.Process(ctx, sess, calls, agentTools, &chanEmitter{events: events})
-}
-
-// bindRuntimeHandlers wraps every entry in [r.toolMap] (which receives
-// chan Event) into a [toolexec.ToolHandler] (which doesn't), capturing
-// the current events channel via closure. Doing this once per dispatch
-// keeps the toolexec interface clean of runtime-specific event types.
-func (r *LocalRuntime) bindRuntimeHandlers(events chan Event) map[string]toolexec.ToolHandler {
+	// Bind runtime-managed handlers (transfer_task, handoff, change_model, ...)
+	// to the current events channel: r.toolMap entries take chan Event,
+	// toolexec.ToolHandler doesn't.
 	handlers := make(map[string]toolexec.ToolHandler, len(r.toolMap))
 	for name, h := range r.toolMap {
 		handlers[name] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall) (*tools.ToolCallResult, error) {
 			return h(ctx, sess, tc, events)
 		}
 	}
-	return handlers
+
+	d := &toolexec.Dispatcher{
+		Tracer:      r.tracer,
+		Hooks:       &hookDispatcher{r: r, events: events},
+		Resume:      r.resumeChan,
+		AgentFor:    r.resolveSessionAgent,
+		Permissions: r.permissionCheckers,
+		Handlers:    handlers,
+	}
+	return d.Process(ctx, sess, calls, agentTools, &chanEmitter{events: events})
 }
 
-// permissionCheckers returns the ordered list of permission checkers to evaluate
-// (session-level first, then team-level).
+// permissionCheckers returns the ordered list of permission checkers to
+// evaluate (session-level first, then team-level).
 func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.NamedChecker {
 	var checkers []toolexec.NamedChecker
 	if sess.Permissions != nil {
@@ -77,10 +74,10 @@ func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.Name
 	return checkers
 }
 
-// chanEmitter adapts a chan Event into a [toolexec.Emitter]. It is the
+// chanEmitter adapts a chan Event into a [toolexec.Emitter]. It's the
 // only place where the dispatcher's typed event surface meets the
-// runtime's event channel; new dispatcher events should grow this type
-// in lockstep with the [toolexec.Emitter] interface.
+// runtime's event channel; new dispatcher events grow this type in
+// lockstep with the [toolexec.Emitter] interface.
 type chanEmitter struct {
 	events chan Event
 }
@@ -107,15 +104,11 @@ func (e *chanEmitter) EmitMessageAdded(sessionID string, msg *session.Message, a
 
 // hookDispatcher adapts the runtime's per-agent [hooks.Executor] machinery
 // into the small [toolexec.HookDispatcher] interface. The events channel
-// is captured here so [LocalRuntime.dispatchHook] can surface
-// SystemMessage as a Warning event during dispatch.
+// is captured here so [LocalRuntime.dispatchHook] can surface SystemMessage
+// as a Warning event during dispatch.
 type hookDispatcher struct {
 	r      *LocalRuntime
 	events chan Event
-}
-
-func newHookDispatcher(r *LocalRuntime, events chan Event) toolexec.HookDispatcher {
-	return &hookDispatcher{r: r, events: events}
 }
 
 func (h *hookDispatcher) Dispatch(ctx context.Context, a *agent.Agent, event hooks.EventType, in *hooks.Input) *hooks.Result {
@@ -149,7 +142,7 @@ func denySourceFor(checkerSource string) string {
 	return ApprovalSourceTeamPermissionsDeny
 }
 
-// addAgentMessage records a chat message to the session and emits the
+// addAgentMessage records a chat message in the session and emits the
 // resulting MessageAdded event. Used by the loop for assistant messages
 // and max-iteration stop messages. The dispatcher emits its own variant
 // directly via the [toolexec.Emitter] interface.

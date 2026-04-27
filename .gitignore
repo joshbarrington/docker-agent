@@ -12,6 +12,8 @@ evals
 
 # agents
 agent.yaml
+docker-agent.yaml
+docker-agent.yml
 vendor
 
 # Local environment files

@@ -311,6 +311,7 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 
 	// Emit agent switching start event
 	evts <- AgentSwitching(true, a.Name(), params.Agent)
+	r.executeOnAgentSwitchHooks(ctx, a, sess.ID, a.Name(), params.Agent, agentSwitchKindTransferTask)
 
 	r.setCurrentAgent(params.Agent)
 	defer func() {
@@ -318,6 +319,7 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 
 		// Emit agent switching end event
 		evts <- AgentSwitching(false, params.Agent, a.Name())
+		r.executeOnAgentSwitchHooks(ctx, a, sess.ID, params.Agent, a.Name(), agentSwitchKindTransferTaskReturn)
 
 		// Restore original agent info in sidebar
 		evts <- AgentInfo(a.Name(), getAgentModelID(a), a.Description(), a.WelcomeMessage())
@@ -345,7 +347,7 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	return r.runSubSessionForwarding(ctx, sess, s, span, evts, a.Name())
 }
 
-func (r *LocalRuntime) handleHandoff(_ context.Context, _ *session.Session, toolCall tools.ToolCall, _ chan Event) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ chan Event) (*tools.ToolCallResult, error) {
 	var params builtin.HandoffArgs
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -367,6 +369,7 @@ func (r *LocalRuntime) handleHandoff(_ context.Context, _ *session.Session, tool
 		return nil, err
 	}
 
+	r.executeOnAgentSwitchHooks(ctx, currentAgent, sess.ID, ca, next.Name(), agentSwitchKindHandoff)
 	r.setCurrentAgent(next.Name())
 	handoffMessage := "The agent " + ca + " handed off the conversation to you. " +
 		"Your available handoff agents and tools are specified in the system messages that follow. " +

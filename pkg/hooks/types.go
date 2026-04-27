@@ -45,6 +45,14 @@ const (
 	EventOnError EventType = "on_error"
 	// EventOnMaxIterations fires when the runtime reaches its max_iterations limit.
 	EventOnMaxIterations EventType = "on_max_iterations"
+	// EventOnAgentSwitch fires whenever the runtime moves the active
+	// agent to a new one — either delegating a task (transfer_task),
+	// handing off the conversation (handoff), or returning to the
+	// caller after a transferred task completes. Observational; useful
+	// for audit, transcript, and metrics pipelines that track which
+	// agent ran which tools without subscribing to the runtime event
+	// channel.
+	EventOnAgentSwitch EventType = "on_agent_switch"
 )
 
 // consumesContext reports whether the runtime emit site for e routes
@@ -83,6 +91,15 @@ type Input struct {
 	// Notification specific.
 	NotificationLevel   string `json:"notification_level,omitempty"`
 	NotificationMessage string `json:"notification_message,omitempty"`
+
+	// OnAgentSwitch specific: the agent the runtime is moving away
+	// from (FromAgent) and the one it's switching to (ToAgent), plus
+	// the cause of the transition ("transfer_task", "handoff",
+	// "transfer_task_return"). Empty FromAgent is valid for the
+	// initial switch into the team's default agent.
+	FromAgent       string `json:"from_agent,omitempty"`
+	ToAgent         string `json:"to_agent,omitempty"`
+	AgentSwitchKind string `json:"agent_switch_kind,omitempty"`
 }
 
 // ToJSON serializes the input.

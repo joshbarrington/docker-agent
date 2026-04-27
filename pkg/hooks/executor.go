@@ -85,6 +85,7 @@ func compileEvents(c *Config) map[EventType][]matcher {
 		EventNotification:    flat(c.Notification),
 		EventOnError:         flat(c.OnError),
 		EventOnMaxIterations: flat(c.OnMaxIterations),
+		EventOnAgentSwitch:   flat(c.OnAgentSwitch),
 	}
 }
 

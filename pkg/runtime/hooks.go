@@ -177,6 +177,30 @@ func (r *LocalRuntime) notify(ctx context.Context, a *agent.Agent, event hooks.E
 	}, nil)
 }
 
+// Agent-switch kinds passed via [hooks.Input.AgentSwitchKind] to
+// describe what kind of transition triggered the on_agent_switch
+// event. Constants instead of literals so the hook contract is
+// discoverable from the runtime side and a typo trips a compile
+// error.
+const (
+	agentSwitchKindTransferTask       = "transfer_task"
+	agentSwitchKindTransferTaskReturn = "transfer_task_return"
+	agentSwitchKindHandoff            = "handoff"
+)
+
+// executeOnAgentSwitchHooks fires on_agent_switch when the runtime
+// changes the active agent. Observational; failures are logged. The
+// hook runs alongside the existing [AgentSwitching] event, so users
+// who already consume that event see no behaviour change.
+func (r *LocalRuntime) executeOnAgentSwitchHooks(ctx context.Context, a *agent.Agent, sessionID, fromAgent, toAgent, kind string) {
+	r.dispatchHook(ctx, a, hooks.EventOnAgentSwitch, &hooks.Input{
+		SessionID:       sessionID,
+		FromAgent:       fromAgent,
+		ToAgent:         toAgent,
+		AgentSwitchKind: kind,
+	}, nil)
+}
+
 // executeBeforeLLMCallHooks fires before_llm_call just before each
 // model call. A terminating verdict (decision="block" / continue=false
 // / exit 2) stops the run loop — see [hooks.EventBeforeLLMCall] for

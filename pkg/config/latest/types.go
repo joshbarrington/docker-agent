@@ -1670,6 +1670,12 @@ type HooksConfig struct {
 	// max_iterations limit. Fires alongside Notification with
 	// level="warning".
 	OnMaxIterations []HookDefinition `json:"on_max_iterations,omitempty" yaml:"on_max_iterations,omitempty"`
+
+	// OnAgentSwitch hooks run whenever the runtime moves the active
+	// agent to a new one — transfer_task, handoff, or the return
+	// after a transferred task completes. Observational; useful for
+	// audit, transcript, and metrics pipelines.
+	OnAgentSwitch []HookDefinition `json:"on_agent_switch,omitempty" yaml:"on_agent_switch,omitempty"`
 }
 
 // IsEmpty returns true if no hooks are configured
@@ -1688,7 +1694,8 @@ func (h *HooksConfig) IsEmpty() bool {
 		len(h.Stop) == 0 &&
 		len(h.Notification) == 0 &&
 		len(h.OnError) == 0 &&
-		len(h.OnMaxIterations) == 0
+		len(h.OnMaxIterations) == 0 &&
+		len(h.OnAgentSwitch) == 0
 }
 
 // HookMatcherConfig represents a hook matcher with its hooks.
@@ -1818,6 +1825,13 @@ func (h *HooksConfig) validate() error {
 	// Validate OnMaxIterations hooks
 	for i, hook := range h.OnMaxIterations {
 		if err := hook.validate("on_max_iterations", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate OnAgentSwitch hooks
+	for i, hook := range h.OnAgentSwitch {
+		if err := hook.validate("on_agent_switch", i); err != nil {
 			return err
 		}
 	}

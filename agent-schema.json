@@ -567,6 +567,13 @@
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
+        },
+        "on_agent_switch": {
+          "type": "array",
+          "description": "Hooks that run whenever the runtime moves the active agent to a new one (transfer_task, handoff, or the return after a transferred task completes). Receives from_agent, to_agent, and agent_switch_kind in the input. Observational; useful for audit, transcript, and metrics pipelines that track which agent ran which tools.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
         }
       },
       "additionalProperties": false

@@ -139,13 +139,11 @@ func (r *LocalRuntime) toolInvoker(
 }
 
 // executeWithApproval handles the approval flow and runs the tool when
-// approved. The approval flow considers (in order):
+// approved.
 //
-//  1. sess.ToolsApproved (--yolo flag) — auto-approve everything.
-//  2. Session-level permissions (if configured) — Allow/Ask/Deny rules.
-//  3. Team-level permissions config.
-//  4. Read-only hint — auto-approve.
-//  5. Default: ask the user for confirmation.
+// The approval flow is fully resolved by [toolexec.Decide]; this function
+// only translates the resulting decision into the runtime side effects
+// (run, deny-with-error-response, ask-and-wait).
 //
 // The returned [toolApprovalOutcome] captures user cancellation and
 // any post_tool_use stopRun verdict propagated from invoke.
@@ -160,51 +158,64 @@ func (r *LocalRuntime) executeWithApproval(
 ) toolApprovalOutcome {
 	toolName := toolCall.Function.Name
 
-	if sess.ToolsApproved {
-		slog.Debug("Tool auto-approved by --yolo flag", "tool", toolName, "session_id", sess.ID)
-		r.executeOnToolApprovalDecisionHooks(ctx, sess, a, toolCall, ApprovalDecisionAllow, ApprovalSourceYolo)
+	decision := toolexec.Decide(
+		sess.ToolsApproved,
+		r.permissionCheckers(sess),
+		toolName,
+		toolexec.ParseToolInput(toolCall.Function.Arguments),
+		tool.Annotations.ReadOnlyHint,
+	)
+
+	switch decision.Outcome {
+	case toolexec.OutcomeAllow:
+		logAllow(decision, toolName, sess.ID)
+		r.executeOnToolApprovalDecisionHooks(ctx, sess, a, toolCall, ApprovalDecisionAllow, allowSourceForDecision(decision))
 		return invoke()
-	}
-
-	// Parse tool arguments once for permission matching.
-	var toolArgs map[string]any
-	if toolCall.Function.Arguments != "" {
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &toolArgs); err != nil {
-			slog.Debug("Failed to parse tool arguments for permission check", "tool", toolName, "error", err)
-			// Fall through with nil args — only tool name patterns can match.
+	case toolexec.OutcomeDeny:
+		slog.Debug("Tool denied by permissions", "tool", toolName, "source", decision.Source, "session_id", sess.ID)
+		r.executeOnToolApprovalDecisionHooks(ctx, sess, a, toolCall, ApprovalDecisionDeny, denySourceFor(decision.Source))
+		r.addToolErrorResponse(ctx, sess, toolCall, tool, events, a,
+			fmt.Sprintf("Tool '%s' is denied by %s.", toolName, decision.Source))
+		return toolApprovalOutcome{}
+	case toolexec.OutcomeAsk:
+		if decision.Reason == toolexec.ReasonChecker {
+			slog.Debug("Tool requires confirmation (ask pattern)", "tool", toolName, "source", decision.Source, "session_id", sess.ID)
 		}
+		return r.askUserForConfirmation(ctx, sess, toolCall, tool, events, a, invoke)
 	}
+	return toolApprovalOutcome{}
+}
 
-	for _, pc := range r.permissionCheckers(sess) {
-		switch pc.checker.CheckWithArgs(toolName, toolArgs) {
-		case permissions.Deny:
-			slog.Debug("Tool denied by permissions", "tool", toolName, "source", pc.source, "session_id", sess.ID)
-			r.executeOnToolApprovalDecisionHooks(ctx, sess, a, toolCall, ApprovalDecisionDeny, denySourceFor(pc.source))
-			r.addToolErrorResponse(ctx, sess, toolCall, tool, events, a,
-				fmt.Sprintf("Tool '%s' is denied by %s.", toolName, pc.source))
-			return toolApprovalOutcome{}
-		case permissions.Allow:
-			slog.Debug("Tool auto-approved by permissions", "tool", toolName, "source", pc.source, "session_id", sess.ID)
-			r.executeOnToolApprovalDecisionHooks(ctx, sess, a, toolCall, ApprovalDecisionAllow, allowSourceFor(pc.source))
-			return invoke()
-		case permissions.ForceAsk:
-			slog.Debug("Tool requires confirmation (ask pattern)", "tool", toolName, "source", pc.source, "session_id", sess.ID)
-			return r.askUserForConfirmation(ctx, sess, toolCall, tool, events, a, invoke)
-		case permissions.Ask:
-			// No explicit match at this level; fall through.
-		}
+// logAllow emits the auto-approval debug log appropriate to the reason
+// (--yolo, an explicit checker rule, or the read-only hint).
+func logAllow(d toolexec.PermissionDecision, toolName, sessionID string) {
+	switch d.Reason {
+	case toolexec.ReasonYolo:
+		slog.Debug("Tool auto-approved by --yolo flag", "tool", toolName, "session_id", sessionID)
+	case toolexec.ReasonChecker:
+		slog.Debug("Tool auto-approved by permissions", "tool", toolName, "source", d.Source, "session_id", sessionID)
+		// ReasonReadOnlyHint is intentionally silent (matches prior behaviour).
 	}
+}
 
-	if tool.Annotations.ReadOnlyHint {
-		r.executeOnToolApprovalDecisionHooks(ctx, sess, a, toolCall, ApprovalDecisionAllow, ApprovalSourceReadOnlyHint)
-		return invoke()
+// allowSourceForDecision maps a [toolexec.PermissionDecision] with
+// [toolexec.OutcomeAllow] onto the corresponding ApprovalSource* string
+// emitted by [executeOnToolApprovalDecisionHooks].
+func allowSourceForDecision(d toolexec.PermissionDecision) string {
+	switch d.Reason {
+	case toolexec.ReasonYolo:
+		return ApprovalSourceYolo
+	case toolexec.ReasonReadOnlyHint:
+		return ApprovalSourceReadOnlyHint
+	case toolexec.ReasonChecker:
+		return allowSourceFor(d.Source)
 	}
-	return r.askUserForConfirmation(ctx, sess, toolCall, tool, events, a, invoke)
+	return allowSourceFor(d.Source)
 }
 
 // allowSourceFor maps a permission-checker source label to the
 // corresponding approval-decision source classifier. Centralised so
-// the strings stay aligned with [permissionChecker.source].
+// the strings stay aligned with [toolexec.NamedChecker.Source].
 func allowSourceFor(checkerSource string) string {
 	if checkerSource == "session permissions" {
 		return ApprovalSourceSessionPermissionsAllow
@@ -220,29 +231,24 @@ func denySourceFor(checkerSource string) string {
 	return ApprovalSourceTeamPermissionsDeny
 }
 
-// permissionChecker pairs a checker with a human-readable source label.
-type permissionChecker struct {
-	checker *permissions.Checker
-	source  string
-}
-
-// permissionCheckers returns the ordered list of permission checkers to evaluate.
-func (r *LocalRuntime) permissionCheckers(sess *session.Session) []permissionChecker {
-	var checkers []permissionChecker
+// permissionCheckers returns the ordered list of permission checkers to evaluate
+// (session-level first, then team-level).
+func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.NamedChecker {
+	var checkers []toolexec.NamedChecker
 	if sess.Permissions != nil {
-		checkers = append(checkers, permissionChecker{
-			checker: permissions.NewChecker(&latest.PermissionsConfig{
+		checkers = append(checkers, toolexec.NamedChecker{
+			Checker: permissions.NewChecker(&latest.PermissionsConfig{
 				Allow: sess.Permissions.Allow,
 				Ask:   sess.Permissions.Ask,
 				Deny:  sess.Permissions.Deny,
 			}),
-			source: "session permissions",
+			Source: "session permissions",
 		})
 	}
 	if tc := r.team.Permissions(); tc != nil {
-		checkers = append(checkers, permissionChecker{
-			checker: tc,
-			source:  "permissions configuration",
+		checkers = append(checkers, toolexec.NamedChecker{
+			Checker: tc,
+			Source:  "permissions configuration",
 		})
 	}
 	return checkers

@@ -36,20 +36,7 @@ func (r *LocalRuntime) buildHooksExecutors() {
 			AddEnvironmentInfo: a.AddEnvironmentInfo(),
 			AddPromptFiles:     a.AddPromptFiles(),
 		})
-
-		// Auto-inject the cache_response stop-hook for cache-enabled agents.
-		// The builtin lives in this package (it's a closure over r so it can
-		// reach a.Cache() through Input.AgentName) and isn't part of the
-		// stateless ApplyAgentDefaults set in pkg/hooks/builtins.
-		if a.Cache() != nil {
-			if cfg == nil {
-				cfg = &hooks.Config{}
-			}
-			cfg.Stop = append(cfg.Stop, hooks.Hook{
-				Type:    hooks.HookTypeBuiltin,
-				Command: BuiltinCacheResponse,
-			})
-		}
+		cfg = applyCacheDefault(cfg, a)
 		if cfg == nil {
 			continue
 		}

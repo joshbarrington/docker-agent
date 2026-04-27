@@ -19,6 +19,26 @@ import (
 // auto-injected from agent flags via [builtins.ApplyAgentDefaults].
 const BuiltinCacheResponse = "cache_response"
 
+// applyCacheDefault appends the cache_response stop hook to cfg when a
+// has a configured response cache, mirroring the role of
+// [builtins.ApplyAgentDefaults] for the runtime-private cache builtin.
+//
+// The helper accepts (and may return) a nil cfg so callers can chain
+// it after [builtins.ApplyAgentDefaults] without an extra branch.
+func applyCacheDefault(cfg *hooks.Config, a *agent.Agent) *hooks.Config {
+	if a.Cache() == nil {
+		return cfg
+	}
+	if cfg == nil {
+		cfg = &hooks.Config{}
+	}
+	cfg.Stop = append(cfg.Stop, hooks.Hook{
+		Type:    hooks.HookTypeBuiltin,
+		Command: BuiltinCacheResponse,
+	})
+	return cfg
+}
+
 // tryReplayCachedResponse looks up the latest user message in the agent's
 // response cache. On a hit it replays the cached answer as the assistant
 // message, fires stop hooks (which lets user-defined stop hooks run as

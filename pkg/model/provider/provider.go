@@ -195,34 +195,39 @@ func NewWithModels(ctx context.Context, cfg *latest.ModelConfig, models map[stri
 
 // createRuleBasedRouter creates a rule-based routing provider.
 func createRuleBasedRouter(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	// Create a provider factory that can resolve model references
-	factory := func(ctx context.Context, modelSpec string, models map[string]latest.ModelConfig, env environment.Provider, factoryOpts ...options.Opt) (rulebased.Provider, error) {
-		// Check if modelSpec is a reference to a model in the models map
-		if modelCfg, exists := models[modelSpec]; exists {
-			// Prevent infinite recursion - referenced models cannot have routing rules
-			if len(modelCfg.Routing) > 0 {
-				return nil, fmt.Errorf("model %q has routing rules and cannot be used as a routing target", modelSpec)
-			}
-			p, err := createDirectProvider(ctx, &modelCfg, env, factoryOpts...)
-			if err != nil {
-				return nil, err
-			}
-			return p, nil
-		}
+	return rulebased.NewClient(ctx, cfg, models, env, resolveRoutedModel, opts...)
+}
 
-		// Otherwise, treat as an inline model spec (e.g., "openai/gpt-4o")
-		inlineCfg, parseErr := latest.ParseModelRef(modelSpec)
-		if parseErr != nil {
-			return nil, fmt.Errorf("invalid model spec %q: expected 'provider/model' format or a model reference", modelSpec)
+// resolveRoutedModel is the rulebased.ProviderFactory used by
+// createRuleBasedRouter. It resolves a routing target — which is either a name
+// from the models map or an inline "provider/model" spec — and returns the
+// provider for it. Routing targets cannot themselves have routing rules.
+//
+// Defined as a package-level function (rather than an inline closure) so the
+// recursion-prevention, parse-error and factory-error paths can be unit-tested
+// directly without going through rulebased.NewClient.
+func resolveRoutedModel(
+	ctx context.Context,
+	modelSpec string,
+	models map[string]latest.ModelConfig,
+	env environment.Provider,
+	factoryOpts ...options.Opt,
+) (rulebased.Provider, error) {
+	// Check if modelSpec is a reference to a model in the models map.
+	if modelCfg, exists := models[modelSpec]; exists {
+		// Prevent infinite recursion - referenced models cannot have routing rules.
+		if len(modelCfg.Routing) > 0 {
+			return nil, fmt.Errorf("model %q has routing rules and cannot be used as a routing target", modelSpec)
 		}
-		p, err := createDirectProvider(ctx, &inlineCfg, env, factoryOpts...)
-		if err != nil {
-			return nil, err
-		}
-		return p, nil
+		return createDirectProvider(ctx, &modelCfg, env, factoryOpts...)
 	}
 
-	return rulebased.NewClient(ctx, cfg, models, env, factory, opts...)
+	// Otherwise, treat as an inline model spec (e.g., "openai/gpt-4o").
+	inlineCfg, parseErr := latest.ParseModelRef(modelSpec)
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid model spec %q: expected 'provider/model' format or a model reference", modelSpec)
+	}
+	return createDirectProvider(ctx, &inlineCfg, env, factoryOpts...)
 }
 
 // createDirectProvider creates a provider without routing (direct model access).

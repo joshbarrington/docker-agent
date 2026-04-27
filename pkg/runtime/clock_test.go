@@ -75,14 +75,14 @@ func TestFallbackCooldown_UsesInjectedClock(t *testing.T) {
 	require.NoError(t, err)
 
 	// Activate cooldown for 1 minute against a fallback at index 0.
-	rt.setCooldownState("root", 0, time.Minute)
-	require.NotNil(t, rt.getCooldownState("root"), "cooldown should be active")
+	rt.cooldowns.Set("root", 0, time.Minute)
+	require.NotNil(t, rt.cooldowns.Get("root"), "cooldown should be active")
 
 	// Advance just under the window: still active.
 	clock.Advance(59 * time.Second)
-	assert.NotNil(t, rt.getCooldownState("root"), "cooldown expired prematurely")
+	assert.NotNil(t, rt.cooldowns.Get("root"), "cooldown expired prematurely")
 
-	// Advance past expiry: getCooldownState evicts and returns nil.
+	// Advance past expiry: cooldowns.Get evicts and returns nil.
 	clock.Advance(2 * time.Second)
-	assert.Nil(t, rt.getCooldownState("root"), "expired cooldown not evicted")
+	assert.Nil(t, rt.cooldowns.Get("root"), "expired cooldown not evicted")
 }

@@ -421,15 +421,15 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		telemetry:              defaultTelemetry{},
 		maxOverflowCompactions: defaultMaxOverflowCompactions,
 	}
-	r.cooldowns = newCooldownManager(r.now)
 	r.bgAgents = agenttool.NewHandler(r)
 
 	for _, opt := range opts {
 		opt(r)
 	}
 
-	// If WithClock changed the runtime's clock, the cooldown manager must
-	// see it too — rebuild it now that opts have run.
+	// Build the cooldown manager after opts so it picks up the final clock
+	// (WithClock may have replaced r.now). Doing this once after opts also
+	// avoids the previous "build, then rebuild" dance.
 	r.cooldowns = newCooldownManager(r.now)
 
 	// Default the runtime's working directory to the process CWD when no
@@ -664,7 +664,7 @@ func getAgentModelID(a *agent.Agent) string {
 // for any active fallback cooldown. During a cooldown period, this returns the fallback
 // model ID instead of the configured primary model, so the UI reflects the actual model in use.
 func (r *LocalRuntime) getEffectiveModelID(a *agent.Agent) string {
-	cooldownState := r.getCooldownState(a.Name())
+	cooldownState := r.cooldowns.Get(a.Name())
 	if cooldownState != nil {
 		fallbacks := a.FallbackModels()
 		if cooldownState.fallbackIndex >= 0 && cooldownState.fallbackIndex < len(fallbacks) {
@@ -685,7 +685,7 @@ func (r *LocalRuntime) agentDetailsFromTeam() []AgentDetails {
 		modelName := info.Model
 
 		// Check if this agent has an active fallback cooldown
-		cooldownState := r.getCooldownState(info.Name)
+		cooldownState := r.cooldowns.Get(info.Name)
 		if cooldownState != nil {
 			// Get the agent to access fallback models
 			if a, err := r.team.Agent(info.Name); err == nil && a != nil {
@@ -1038,17 +1038,6 @@ func (r *LocalRuntime) Summarize(ctx context.Context, sess *session.Session, add
 		contextLimit = int64(m.Limit.Context)
 	}
 	events <- NewTokenUsageEvent(sess.ID, a.Name(), SessionUsage(sess, contextLimit))
-}
-
-// swapElicitationEventsChannel atomically replaces the current elicitation
-// events channel and returns the previous one. Each RunStream call swaps in
-// its own channel on entry and swaps the previous one back on exit, so nested
-// streams (sub-sessions, background agents) don't lose the parent's channel.
-//
-// Delegates to elicitationBridge; kept on LocalRuntime for the existing
-// callsites in loop.go.
-func (r *LocalRuntime) swapElicitationEventsChannel(ch chan Event) chan Event {
-	return r.elicitation.swap(ch)
 }
 
 // elicitationHandler creates an elicitation handler that can be used by MCP clients

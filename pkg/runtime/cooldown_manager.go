@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// fallbackCooldownState tracks when we should stick with a fallback model
+// instead of retrying the primary after a non-retryable error (e.g., 429).
+type fallbackCooldownState struct {
+	// fallbackIndex is the index in the fallback chain to start from
+	// (0 = first fallback, -1 = primary).
+	fallbackIndex int
+	// until is when the cooldown expires and we should retry the primary.
+	until time.Time
+}
+
 // cooldownManager owns the per-agent fallback-cooldown map. The runtime
 // activates a cooldown when the primary model fails with a non-retryable
 // error and a fallback succeeds; subsequent calls for that agent skip the

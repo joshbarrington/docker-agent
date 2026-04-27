@@ -130,7 +130,7 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 	// Swap back the parent's elicitation channel before closing this
 	// stream's channel. This prevents a send-on-closed-channel panic
 	// and restores elicitation for the parent session.
-	r.swapElicitationEventsChannel(prevElicitationCh)
+	r.elicitation.swap(prevElicitationCh)
 
 	defer close(events)
 
@@ -169,7 +169,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 		// previous one so it can be restored on teardown. This allows nested
 		// RunStream calls to temporarily own elicitation without losing the
 		// parent's channel.
-		prevElicitationCh := r.swapElicitationEventsChannel(events)
+		prevElicitationCh := r.elicitation.swap(events)
 
 		a := r.resolveSessionAgent(sess)
 

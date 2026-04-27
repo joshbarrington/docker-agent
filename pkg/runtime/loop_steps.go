@@ -74,16 +74,19 @@ func (r *LocalRuntime) enforceMaxIterations(
 		"Execution stopped after reaching the configured max_iterations limit (%d).",
 		runtimeMaxIterations,
 	)
-
-	// In non-interactive mode (e.g. MCP server), auto-stop instead of
-	// blocking forever waiting for user input.
-	if sess.NonInteractive {
-		slog.Debug("Auto-stopping after max iterations (non-interactive)", "agent", a.Name())
+	appendStopMsg := func() {
 		addAgentMessage(sess, a, &chat.Message{
 			Role:      chat.MessageRoleAssistant,
 			Content:   stopMsg,
 			CreatedAt: r.now().Format(time.RFC3339),
 		}, events)
+	}
+
+	// In non-interactive mode (e.g. MCP server), auto-stop instead of
+	// blocking forever waiting for user input.
+	if sess.NonInteractive {
+		slog.Debug("Auto-stopping after max iterations (non-interactive)", "agent", a.Name())
+		appendStopMsg()
 		return runtimeMaxIterations, iterationStop
 	}
 
@@ -97,11 +100,7 @@ func (r *LocalRuntime) enforceMaxIterations(
 			return newMax, iterationContinue
 		}
 		slog.Debug("User rejected continuation", "agent", a.Name())
-		addAgentMessage(sess, a, &chat.Message{
-			Role:      chat.MessageRoleAssistant,
-			Content:   stopMsg,
-			CreatedAt: r.now().Format(time.RFC3339),
-		}, events)
+		appendStopMsg()
 		return runtimeMaxIterations, iterationStop
 
 	case <-ctx.Done():

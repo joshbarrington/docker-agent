@@ -17,15 +17,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// fallbackCooldownState tracks when we should stick with a fallback model
-// instead of retrying the primary after a non-retryable error (e.g., 429).
-type fallbackCooldownState struct {
-	// fallbackIndex is the index in the fallback chain to start from (0 = first fallback, -1 = primary)
-	fallbackIndex int
-	// until is when the cooldown expires and we should retry the primary
-	until time.Time
-}
-
 // modelWithFallback holds a provider and its identification for logging
 type modelWithFallback struct {
 	provider   provider.Provider
@@ -76,23 +67,6 @@ func logRetryBackoff(agentName, modelID string, attempt int, backoffDelay time.D
 		"model", modelID,
 		"attempt", attempt+1,
 		"backoff", backoffDelay)
-}
-
-// getCooldownState returns the active cooldown for an agent, or nil when
-// no cooldown is active or it has expired. Expired entries are evicted
-// inside the cooldown manager.
-func (r *LocalRuntime) getCooldownState(agentName string) *fallbackCooldownState {
-	return r.cooldowns.Get(agentName)
-}
-
-// setCooldownState activates a cooldown for an agent.
-func (r *LocalRuntime) setCooldownState(agentName string, fallbackIndex int, cooldownDuration time.Duration) {
-	r.cooldowns.Set(agentName, fallbackIndex, cooldownDuration)
-}
-
-// clearCooldownState removes any active cooldown for an agent.
-func (r *LocalRuntime) clearCooldownState(agentName string) {
-	r.cooldowns.Clear(agentName)
 }
 
 // getEffectiveCooldown returns the cooldown duration to use for an agent.
@@ -160,7 +134,7 @@ func (r *LocalRuntime) tryModelWithFallback(
 	// Check if we're in a cooldown period and should skip the primary
 	startIndex := 0
 	inCooldown := false
-	cooldownState := r.getCooldownState(a.Name())
+	cooldownState := r.cooldowns.Get(a.Name())
 	if cooldownState != nil && len(fallbackModels) > cooldownState.fallbackIndex {
 		// We're in cooldown - start from the pinned fallback (skip primary)
 		startIndex = cooldownState.fallbackIndex + 1 // +1 because index 0 is primary
@@ -277,11 +251,11 @@ func (r *LocalRuntime) tryModelWithFallback(
 			case modelEntry.isFallback && primaryFailedWithNonRetryable:
 				// Primary failed with non-retryable error, fallback succeeded.
 				// Set cooldown to stick with this fallback.
-				r.setCooldownState(a.Name(), modelEntry.index, getEffectiveCooldown(a))
+				r.cooldowns.Set(a.Name(), modelEntry.index, getEffectiveCooldown(a))
 			case !modelEntry.isFallback:
 				// Primary succeeded - clear any existing cooldown.
 				// This handles both normal success and recovery after cooldown expires.
-				r.clearCooldownState(a.Name())
+				r.cooldowns.Clear(a.Name())
 			}
 
 			return res, modelEntry.provider, nil

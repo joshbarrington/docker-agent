@@ -3,6 +3,34 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.51.0] - 2026-04-27
+
+This release improves Anthropic model support on Vertex AI, enhances the model picker interface, and includes several bug fixes.
+
+## What's New
+- Adds pricing and capabilities information to the /model picker interface with a detailed comparison table
+
+## Improvements
+- Routes Anthropic models on Vertex AI through the native endpoint instead of OpenAI-compatible endpoint to fix compatibility issues
+
+## Bug Fixes
+- Fixes race condition in session cleanup that could cause spurious "session busy" errors
+- Fixes OTLP endpoint URL handling to properly support http/https schemes
+
+## Technical Changes
+- Enables noctx linter and adds context threading through HTTP, SQL, exec and net APIs
+
+### Pull Requests
+
+- [#2476](https://github.com/docker/docker-agent/pull/2476) - Route Anthropic models on Vertex AI through the native endpoint
+- [#2489](https://github.com/docker/docker-agent/pull/2489) - ci: bump golangci-lint from v2.9 to v2.11
+- [#2499](https://github.com/docker/docker-agent/pull/2499) - docs: update CHANGELOG.md for v1.50.0
+- [#2503](https://github.com/docker/docker-agent/pull/2503) - fix(session): prevent race condition in session cleanup
+- [#2504](https://github.com/docker/docker-agent/pull/2504) - fix(otel): support http/https scheme in OTLP endpoint URL
+- [#2508](https://github.com/docker/docker-agent/pull/2508) - lint: enable noctx and deduplicate touched code
+- [#2511](https://github.com/docker/docker-agent/pull/2511) - feat(tui): show pricing & capabilities in /model picker
+
+
 ## [v1.50.0] - 2026-04-23
 
 This release fixes several runtime issues with message steering and sandbox argument handling, along with TUI improvements for user prompts and speech commands.
@@ -2176,3 +2204,5 @@ This release improves the terminal user interface with better error handling and
 [v1.49.2]: https://github.com/docker/docker-agent/releases/tag/v1.49.2
 
 [v1.50.0]: https://github.com/docker/docker-agent/releases/tag/v1.50.0
+
+[v1.51.0]: https://github.com/docker/docker-agent/releases/tag/v1.51.0

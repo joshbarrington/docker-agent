@@ -191,20 +191,20 @@ func TestToolLoopDetector_Reset(t *testing.T) {
 		Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"a.txt"}`},
 	}}
 
-	d := newToolLoopDetector(3)
-	d.record(calls)
-	d.record(calls)
-	if d.consecutive != 2 {
-		t.Fatalf("consecutive = %d, want 2 before reset", d.consecutive)
+	d := NewLoopDetector(3)
+	d.Record(calls)
+	d.Record(calls)
+	if d.Consecutive() != 2 {
+		t.Fatalf("consecutive = %d, want 2 before reset", d.Consecutive())
 	}
 	if d.lastSignature == "" {
 		t.Fatalf("lastSignature should be populated before reset")
 	}
 
-	d.reset()
+	d.Reset()
 
-	if d.consecutive != 0 {
-		t.Errorf("consecutive = %d, want 0 after reset", d.consecutive)
+	if d.Consecutive() != 0 {
+		t.Errorf("consecutive = %d, want 0 after reset", d.Consecutive())
 	}
 	if d.lastSignature != "" {
 		t.Errorf("lastSignature = %q, want empty after reset", d.lastSignature)
@@ -212,10 +212,10 @@ func TestToolLoopDetector_Reset(t *testing.T) {
 
 	// After reset, identical calls should restart counting from 1, not
 	// continue from the pre-reset count.
-	if tripped := d.record(calls); tripped {
+	if tripped := d.Record(calls); tripped {
 		t.Errorf("detector tripped on first call after reset; counter not cleared")
 	}
-	if d.consecutive != 1 {
-		t.Errorf("consecutive = %d, want 1 after first record post-reset", d.consecutive)
+	if d.Consecutive() != 1 {
+		t.Errorf("consecutive = %d, want 1 after first record post-reset", d.Consecutive())
 	}
 }

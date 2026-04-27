@@ -1,32 +1,36 @@
 package runtime
 
+import "github.com/docker/docker-agent/pkg/runtime/toolexec"
+
 // ResumeType identifies the user's response to a confirmation request.
 //
 // The runtime emits a TOOL_PERMISSION_REQUEST event whenever a tool call
 // requires user approval, then blocks until the embedder calls Resume(...)
 // with one of the values below.
-type ResumeType string
+//
+// ResumeType, ResumeRequest, and the ResumeType* constants are aliased
+// from [toolexec] so the dispatcher and the runtime share one definition
+// without circular imports.
+type ResumeType = toolexec.ResumeType
 
 const (
 	// ResumeTypeApprove approves the single pending tool call.
-	ResumeTypeApprove ResumeType = "approve"
+	ResumeTypeApprove = toolexec.ResumeTypeApprove
 	// ResumeTypeApproveSession approves the pending tool call and every
 	// subsequent permission-gated call for the rest of the session.
-	ResumeTypeApproveSession ResumeType = "approve-session"
+	ResumeTypeApproveSession = toolexec.ResumeTypeApproveSession
 	// ResumeTypeApproveTool approves the pending call and every future
 	// call to the same tool name within the session.
-	ResumeTypeApproveTool ResumeType = "approve-tool"
+	ResumeTypeApproveTool = toolexec.ResumeTypeApproveTool
 	// ResumeTypeReject rejects the pending tool call.
-	ResumeTypeReject ResumeType = "reject"
+	ResumeTypeReject = toolexec.ResumeTypeReject
 )
 
 // ResumeRequest carries the user's confirmation decision along with an optional
 // reason (used when rejecting a tool call to help the model understand why).
-type ResumeRequest struct {
-	Type     ResumeType
-	Reason   string // Optional; primarily used with ResumeTypeReject
-	ToolName string // Optional; used with ResumeTypeApproveTool to specify which tool to always allow
-}
+// The struct fields live in [toolexec.ResumeRequest]; this alias is kept
+// for readers who land here from the runtime API.
+type ResumeRequest = toolexec.ResumeRequest
 
 // ResumeApprove creates a ResumeRequest to approve a single tool call.
 func ResumeApprove() ResumeRequest {

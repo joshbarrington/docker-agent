@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.52.0] - 2026-04-27
+
+This release adds file picker hotkeys, improves message handling consistency, and introduces an extensible hooks system with new lifecycle events.
+
+## What's New
+
+- Adds Alt+H and Alt+I hotkeys in file picker to toggle hidden and ignored file visibility
+- Adds extensible hooks system with 5 new lifecycle events and 3 builtin hooks
+
+## Improvements
+
+- Makes user prompt elicitation dialog scrollable to prevent content overflow in terminal
+
+## Bug Fixes
+
+- Fixes message trimming behavior to be consistent across all model providers
+- Fixes steer message handling by appending newlines between queued messages to prevent word fragments from being concatenated
+
+## Technical Changes
+
+- Refactors hooks architecture for better extensibility with pluggable registry system
+- Centralizes whitespace-only message filtering in session.GetMessages
+
+### Pull Requests
+
+- [#2501](https://github.com/docker/docker-agent/pull/2501) - hotkeys to toggle filepicker hidden/ignored files
+- [#2509](https://github.com/docker/docker-agent/pull/2509) - fix(tui): make user_prompt elicitation dialog scrollable
+- [#2514](https://github.com/docker/docker-agent/pull/2514) - docs: update CHANGELOG.md for v1.51.0
+- [#2516](https://github.com/docker/docker-agent/pull/2516) - fix: normalize message trimming behavior across all model providers
+- [#2518](https://github.com/docker/docker-agent/pull/2518) - runtime: append newline to non-last steer messages on multi-drain
+- [#2519](https://github.com/docker/docker-agent/pull/2519) - feat(hooks): refactor for extensibility, add 5 events and 3 builtins
+
+
 ## [v1.51.0] - 2026-04-27
 
 This release improves Anthropic model support on Vertex AI, enhances the model picker interface, and includes several bug fixes.
@@ -2206,3 +2239,5 @@ This release improves the terminal user interface with better error handling and
 [v1.50.0]: https://github.com/docker/docker-agent/releases/tag/v1.50.0
 
 [v1.51.0]: https://github.com/docker/docker-agent/releases/tag/v1.51.0
+
+[v1.52.0]: https://github.com/docker/docker-agent/releases/tag/v1.52.0

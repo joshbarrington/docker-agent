@@ -32,17 +32,11 @@ type StatusError struct {
 
 func (e *StatusError) Error() string {
 	underlying := e.Err.Error()
-	// Try to lift structured details out of the SDK error message (URL +
-	// JSON body envelope produced by anthropic-sdk-go / openai-go / etc.).
-	// When successful, this strips the URL noise and surfaces the actual
-	// fields the provider sent (error.type, error.message, error.code,
-	// error.param, status, request id) instead of just "400 Bad Request".
-	if details, requestID := parseProviderErrorDetails(underlying); details != "" {
-		msg := fmt.Sprintf("HTTP %d: %s", e.StatusCode, details)
-		if requestID != "" {
-			msg += fmt.Sprintf(" (Request-ID: %s)", requestID)
-		}
-		return msg
+	// Lift structured details out of the SDK error envelope (URL + status +
+	// JSON body) when possible, so the user sees what the provider actually
+	// said instead of a generic "400 Bad Request".
+	if details := parseProviderError(underlying); details != "" {
+		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, details)
 	}
 	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, underlying)
 }
@@ -409,8 +403,8 @@ func ClassifyModelError(err error) (retryable, rateLimited bool, retryAfter time
 
 // FormatError returns a user-friendly error message for model errors.
 // Context overflow gets a dedicated actionable message; other errors fall
-// through to err.Error() — for HTTP errors that comes from *StatusError,
-// which itself extracts structured provider details (see parseProviderErrorDetails).
+// through to err.Error(). For HTTP errors that text comes from *StatusError,
+// which itself extracts structured provider details (see parseProviderError).
 func FormatError(err error) string {
 	if err == nil {
 		return ""
@@ -429,8 +423,8 @@ func FormatError(err error) string {
 // and openai-go append between the status text and the response body.
 var requestIDRegex = regexp.MustCompile(`\(Request-ID:\s*([^)\s]+)\)`)
 
-// providerErrorBody is the union of the JSON shapes returned by major LLM
-// providers in non-2xx responses:
+// providerErrorBody is the union of JSON shapes returned by major LLM
+// providers in non-2xx response bodies:
 //
 //	Anthropic   {"type":"error","error":{"type":"...","message":"..."}}
 //	OpenAI      {"error":{"message":"...","type":"...","code":"...","param":"..."}}
@@ -438,123 +432,100 @@ var requestIDRegex = regexp.MustCompile(`\(Request-ID:\s*([^)\s]+)\)`)
 //	Proxies     {"message":"Bad Request"}
 type providerErrorBody struct {
 	Error *struct {
-		Type    string          `json:"type"`
-		Message string          `json:"message"`
-		Code    json.RawMessage `json:"code"`  // string (OpenAI) or int (Gemini)
-		Param   json.RawMessage `json:"param"` // string or null
-		Status  string          `json:"status"`
+		Type    string `json:"type"`
+		Message string `json:"message"`
+		Code    any    `json:"code"`  // string (OpenAI) or number (Gemini)
+		Param   any    `json:"param"` // string or null
+		Status  string `json:"status"`
 	} `json:"error"`
 	Message string `json:"message"`
 }
 
-// parseProviderErrorDetails extracts a focused, human-readable details line
-// and the request id (if present) from a provider SDK error message.
+// parseProviderError returns a focused details line lifted from an SDK error
+// message of the form
 //
-// Input is the full err.Error() string of the underlying SDK error, which
-// for anthropic-sdk-go / openai-go has the shape:
+//	<METHOD> "<URL>": <code> <statusText>[ (Request-ID: <id>)] <jsonBody>
 //
-//	POST "<URL>": <code> <statusText> [(Request-ID: <id>)] <jsonBody>
-//
-// Output is the structured details from the JSON body (provider error type,
-// message, code, param, status). Returns ("", "") when no JSON body is
-// present or it parses to nothing useful.
-func parseProviderErrorDetails(s string) (details, requestID string) {
-	if m := requestIDRegex.FindStringSubmatch(s); len(m) >= 2 {
-		requestID = m[1]
-	}
-	body := extractFirstJSONObject(s)
-	if body == "" {
-		return "", requestID
+// Returns "" when no JSON body is present or it has no recognised fields.
+func parseProviderError(s string) string {
+	body := firstJSONObject(s)
+	if body == nil {
+		return ""
 	}
 	var parsed providerErrorBody
-	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
-		return "", requestID
+	if json.Unmarshal(body, &parsed) != nil {
+		return ""
 	}
-
-	switch {
-	case parsed.Error != nil && parsed.Error.Message != "":
-		var b strings.Builder
-		if parsed.Error.Type != "" {
-			b.WriteString(parsed.Error.Type)
-			b.WriteString(": ")
-		}
-		b.WriteString(parsed.Error.Message)
-
-		var meta []string
-		if code := unquoteJSONScalar(parsed.Error.Code); code != "" {
-			meta = append(meta, "code="+code)
-		}
-		if param := unquoteJSONScalar(parsed.Error.Param); param != "" {
-			meta = append(meta, "param="+param)
-		}
-		if parsed.Error.Status != "" && !strings.EqualFold(parsed.Error.Status, parsed.Error.Type) {
-			meta = append(meta, "status="+parsed.Error.Status)
-		}
-		if len(meta) > 0 {
-			b.WriteString(" (")
-			b.WriteString(strings.Join(meta, ", "))
-			b.WriteString(")")
-		}
-		return b.String(), requestID
-	case parsed.Message != "":
-		return parsed.Message, requestID
+	details := formatProviderError(&parsed)
+	if details == "" {
+		return ""
 	}
-	return "", requestID
+	if m := requestIDRegex.FindStringSubmatch(s); len(m) >= 2 {
+		details += " (Request-ID: " + m[1] + ")"
+	}
+	return details
 }
 
-// extractFirstJSONObject returns the first balanced top-level JSON object
-// substring of s (from the first '{' through its matching '}'), correctly
-// skipping braces that appear inside JSON string literals. Returns "" if
-// no balanced object is found.
-func extractFirstJSONObject(s string) string {
+// formatProviderError renders a parsed body as
+//
+//	<error.type>: <error.message> (code=..., param=..., status=...)
+//
+// Falls back to the top-level `message` field for minimal/proxy bodies.
+// Returns "" when the body has nothing useful.
+func formatProviderError(p *providerErrorBody) string {
+	if p.Error == nil || p.Error.Message == "" {
+		return p.Message
+	}
+	msg := p.Error.Message
+	if p.Error.Type != "" {
+		msg = p.Error.Type + ": " + msg
+	}
+
+	var meta []string
+	if code := scalarString(p.Error.Code); code != "" {
+		meta = append(meta, "code="+code)
+	}
+	if param := scalarString(p.Error.Param); param != "" {
+		meta = append(meta, "param="+param)
+	}
+	if p.Error.Status != "" && !strings.EqualFold(p.Error.Status, p.Error.Type) {
+		meta = append(meta, "status="+p.Error.Status)
+	}
+	if len(meta) > 0 {
+		msg += " (" + strings.Join(meta, ", ") + ")"
+	}
+	return msg
+}
+
+// firstJSONObject returns the first complete JSON object found in s, or nil.
+// encoding/json handles escaped quotes and braces inside string values.
+func firstJSONObject(s string) []byte {
 	start := strings.IndexByte(s, '{')
 	if start < 0 {
-		return ""
+		return nil
 	}
-	depth := 0
-	inString := false
-	escaped := false
-	for i := start; i < len(s); i++ {
-		c := s[i]
-		if escaped {
-			escaped = false
-			continue
-		}
-		if inString {
-			switch c {
-			case '\\':
-				escaped = true
-			case '"':
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
-		}
+	var raw json.RawMessage
+	if err := json.NewDecoder(strings.NewReader(s[start:])).Decode(&raw); err != nil {
+		return nil
 	}
-	return ""
+	return raw
 }
 
-// unquoteJSONScalar returns the textual representation of a JSON scalar
-// (string or number). Returns "" for null / empty / non-scalar values.
-func unquoteJSONScalar(raw json.RawMessage) string {
-	s := strings.TrimSpace(string(raw))
-	if s == "" || s == "null" {
+// scalarString renders a JSON scalar as text. JSON numbers decode to float64;
+// whole numbers are rendered without a trailing ".0" so a code of 400 prints
+// as "400". Returns "" for nil and empty strings.
+func scalarString(v any) string {
+	switch x := v.(type) {
+	case nil:
 		return ""
+	case string:
+		return x
+	case float64:
+		if x == float64(int64(x)) {
+			return strconv.FormatInt(int64(x), 10)
+		}
+		return strconv.FormatFloat(x, 'g', -1, 64)
+	default:
+		return fmt.Sprint(v)
 	}
-	var str string
-	if err := json.Unmarshal(raw, &str); err == nil {
-		return str
-	}
-	// Numeric or other scalar — return as-is.
-	return s
 }

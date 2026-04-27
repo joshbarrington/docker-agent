@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -411,27 +412,6 @@ func (r *LocalRuntime) runTool(ctx context.Context, tool tools.Tool, toolCall to
 	return toolApprovalOutcome{stopRun: stop, stopMessage: msg}
 }
 
-// newHooksInput builds a hooks.Input from the common tool-call fields.
-// [hooks.Executor.Dispatch] auto-fills Cwd from the executor's working
-// directory, so callers don't set it here.
-func newHooksInput(sess *session.Session, toolCall tools.ToolCall) *hooks.Input {
-	return &hooks.Input{
-		SessionID: sess.ID,
-		ToolName:  toolCall.Function.Name,
-		ToolUseID: toolCall.ID,
-		ToolInput: parseToolInput(toolCall.Function.Arguments),
-	}
-}
-
-func newPostToolHookInput(sess *session.Session, toolCall tools.ToolCall, res *tools.ToolCallResult) *hooks.Input {
-	input := newHooksInput(sess, toolCall)
-	if res != nil {
-		input.ToolResponse = res.Output
-		input.ToolError = res.IsError
-	}
-	return input
-}
-
 // executePreToolHook runs the pre-tool-use hook and returns whether the tool
 // call was blocked and the (possibly modified) tool call.
 func (r *LocalRuntime) executePreToolHook(
@@ -445,7 +425,7 @@ func (r *LocalRuntime) executePreToolHook(
 	// dispatchHook returns nil when no hook is configured, the agent is
 	// missing, or dispatch failed — in every case the right move is to
 	// run the tool unchanged.
-	result := r.dispatchHook(ctx, a, hooks.EventPreToolUse, newHooksInput(sess, toolCall), events)
+	result := r.dispatchHook(ctx, a, hooks.EventPreToolUse, toolexec.NewHooksInput(sess, toolCall), events)
 	if result == nil {
 		return false, toolCall
 	}
@@ -480,20 +460,11 @@ func (r *LocalRuntime) executePostToolHook(
 	a *agent.Agent,
 	events chan Event,
 ) (stop bool, message string) {
-	result := r.dispatchHook(ctx, a, hooks.EventPostToolUse, newPostToolHookInput(sess, toolCall, res), events)
+	result := r.dispatchHook(ctx, a, hooks.EventPostToolUse, toolexec.NewPostToolHooksInput(sess, toolCall, res), events)
 	if result == nil || result.Allowed {
 		return false, ""
 	}
 	return true, result.Message
-}
-
-// parseToolInput parses tool arguments JSON into a map
-func parseToolInput(arguments string) map[string]any {
-	var result map[string]any
-	if err := json.Unmarshal([]byte(arguments), &result); err != nil {
-		return nil
-	}
-	return result
 }
 
 func (r *LocalRuntime) runAgentTool(ctx context.Context, handler ToolHandlerFunc, sess *session.Session, toolCall tools.ToolCall, tool tools.Tool, events chan Event, a *agent.Agent) {

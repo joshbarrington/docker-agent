@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -258,7 +259,7 @@ func (r *LocalRuntime) executeOnToolApprovalDecisionHooks(
 	toolCall tools.ToolCall,
 	decision, source string,
 ) {
-	input := newHooksInput(sess, toolCall)
+	input := toolexec.NewHooksInput(sess, toolCall)
 	input.ApprovalDecision = decision
 	input.ApprovalSource = source
 	r.dispatchHook(ctx, a, hooks.EventOnToolApprovalDecision, input, nil)

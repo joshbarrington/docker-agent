@@ -152,7 +152,13 @@ func (a *Agent) Model() provider.Provider {
 // The override(s) take precedence over the configured models.
 // For alloy models, multiple providers can be passed and one will be randomly selected.
 // Pass no arguments or nil providers to clear the override.
-func (a *Agent) SetModelOverride(models ...provider.Provider) {
+//
+// SetModelOverride returns a snapshot of the value that was just stored.
+// Callers performing a scoped override (apply now, restore later) should
+// keep this snapshot and pass it as `current` to RestoreModelOverride so
+// the deferred restore can detect concurrent changes via CAS. Callers
+// that only need the side-effect can ignore the return value.
+func (a *Agent) SetModelOverride(models ...provider.Provider) ModelOverrideSnapshot {
 	// Filter out nil providers
 	var validModels []provider.Provider
 	for _, m := range models {
@@ -161,17 +167,20 @@ func (a *Agent) SetModelOverride(models ...provider.Provider) {
 		}
 	}
 
+	var ptr *[]provider.Provider
 	if len(validModels) == 0 {
 		a.modelOverrides.Store(nil)
 		slog.Debug("Cleared model override", "agent", a.name)
 	} else {
-		a.modelOverrides.Store(&validModels)
+		ptr = &validModels
+		a.modelOverrides.Store(ptr)
 		ids := make([]string, len(validModels))
 		for i, m := range validModels {
 			ids[i] = m.ID()
 		}
 		slog.Debug("Set model override", "agent", a.name, "models", ids)
 	}
+	return ModelOverrideSnapshot{ptr: ptr}
 }
 
 // HasModelOverride returns true if a model override is currently set.

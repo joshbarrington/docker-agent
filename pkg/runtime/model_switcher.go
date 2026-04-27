@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
@@ -93,20 +94,34 @@ type ModelSwitcherConfig struct {
 
 // SetAgentModel implements ModelSwitcher for LocalRuntime.
 func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef string) error {
+	_, err := r.setAgentModelInternal(ctx, agentName, modelRef)
+	return err
+}
+
+// setAgentModelInternal applies modelRef as the agent's model override and
+// returns a snapshot of the value that was just stored. The snapshot is
+// captured atomically with the store (it is the pointer returned by
+// SetModelOverride itself), so there is no window where another caller
+// could intervene and the snapshot would refer to a different value.
+//
+// SetAgentModel is a thin wrapper that discards the snapshot; callers that
+// want to do a CAS-based restore (see WithAgentModel) use this method
+// directly to keep the snapshot.
+func (r *LocalRuntime) setAgentModelInternal(ctx context.Context, agentName, modelRef string) (agent.ModelOverrideSnapshot, error) {
 	if r.modelSwitcherCfg == nil {
-		return errors.New("model switching not configured for this runtime")
+		return agent.ModelOverrideSnapshot{}, errors.New("model switching not configured for this runtime")
 	}
 
 	a, err := r.team.Agent(agentName)
 	if err != nil {
-		return fmt.Errorf("agent not found: %w", err)
+		return agent.ModelOverrideSnapshot{}, fmt.Errorf("agent not found: %w", err)
 	}
 
 	// Empty modelRef means clear the override (use agent's default)
 	if modelRef == "" {
-		a.SetModelOverride()
+		snap := a.SetModelOverride()
 		slog.Info("Cleared agent model override (using default)", "agent", agentName)
-		return nil
+		return snap, nil
 	}
 
 	// Check if modelRef is a named model from config
@@ -116,20 +131,20 @@ func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef st
 		if isAlloyModelConfig(modelConfig) {
 			providers, err := r.resolveModelRefs(ctx, modelConfig.Model)
 			if err != nil {
-				return fmt.Errorf("failed to create alloy model from config: %w", err)
+				return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create alloy model from config: %w", err)
 			}
-			a.SetModelOverride(providers...)
+			snap := a.SetModelOverride(providers...)
 			slog.Info("Set agent model override (alloy)", "agent", agentName, "config_name", modelRef, "model_count", len(providers))
-			return nil
+			return snap, nil
 		}
 
 		prov, err := r.createProviderFromConfig(ctx, &modelConfig)
 		if err != nil {
-			return fmt.Errorf("failed to create model from config: %w", err)
+			return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create model from config: %w", err)
 		}
-		a.SetModelOverride(prov)
+		snap := a.SetModelOverride(prov)
 		slog.Info("Set agent model override", "agent", agentName, "model", prov.ID(), "config_name", modelRef)
-		return nil
+		return snap, nil
 	}
 
 	// Check if this is an inline alloy spec (comma-separated provider/model specs)
@@ -137,21 +152,21 @@ func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef st
 	if isInlineAlloySpec(modelRef) {
 		providers, err := r.resolveModelRefs(ctx, modelRef)
 		if err != nil {
-			return fmt.Errorf("failed to create inline alloy model: %w", err)
+			return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create inline alloy model: %w", err)
 		}
-		a.SetModelOverride(providers...)
+		snap := a.SetModelOverride(providers...)
 		slog.Info("Set agent model override (inline alloy)", "agent", agentName, "model_count", len(providers))
-		return nil
+		return snap, nil
 	}
 
 	// Try single inline spec (provider/model)
 	prov, err := r.resolveModelRef(ctx, modelRef)
 	if err != nil {
-		return fmt.Errorf("failed to resolve model %q: %w", modelRef, err)
+		return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to resolve model %q: %w", modelRef, err)
 	}
-	a.SetModelOverride(prov)
+	snap := a.SetModelOverride(prov)
 	slog.Info("Set agent model override (inline)", "agent", agentName, "model", prov.ID())
-	return nil
+	return snap, nil
 }
 
 // WithAgentModel applies modelRef as a model override on the named agent
@@ -160,9 +175,12 @@ func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef st
 // The returned restore func is always non-nil. On success it uses
 // pointer-identity compare-and-swap on the agent's override, so a
 // concurrent change made between the apply and the restore (e.g. by the
-// TUI model picker) is preserved instead of being clobbered. On error
-// the agent is left untouched and restore is a no-op, so callers can
-// always defer it without nil-checking.
+// TUI model picker) is preserved instead of being clobbered. The post-
+// apply snapshot is captured atomically with the store inside
+// SetModelOverride, so there is no window where a concurrent change
+// could be misattributed to this scope. On error the agent is left
+// untouched and restore is a no-op, so callers can always defer it
+// without nil-checking.
 func (r *LocalRuntime) WithAgentModel(ctx context.Context, agentName, modelRef string) (restore func(), err error) {
 	noop := func() {}
 	a, err := r.team.Agent(agentName)
@@ -170,10 +188,10 @@ func (r *LocalRuntime) WithAgentModel(ctx context.Context, agentName, modelRef s
 		return noop, fmt.Errorf("agent not found: %w", err)
 	}
 	prev := a.SnapshotModelOverride()
-	if err := r.SetAgentModel(ctx, agentName, modelRef); err != nil {
+	ours, err := r.setAgentModelInternal(ctx, agentName, modelRef)
+	if err != nil {
 		return noop, err
 	}
-	ours := a.SnapshotModelOverride()
 	return func() { a.RestoreModelOverride(prev, ours) }, nil
 }
 

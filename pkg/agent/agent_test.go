@@ -164,6 +164,56 @@ func TestModelOverride(t *testing.T) {
 	assert.Equal(t, "openai/gpt-4o", a.Model().ID())
 }
 
+func TestSetModelOverride_ReturnsSnapshotOfStoredValue(t *testing.T) {
+	// SetModelOverride must return a snapshot of the value it just stored,
+	// not what a subsequent SnapshotModelOverride() would load. This is the
+	// guarantee that closes the race window for scoped overrides: if a
+	// concurrent caller stores a different override after our store but
+	// before we capture our snapshot, our snapshot must still refer to
+	// what we stored, so the deferred CAS-restore will fail (concurrent
+	// change wins) instead of incorrectly succeeding.
+	t.Parallel()
+
+	defaultModel := &mockProvider{id: "default"}
+	oursModel := &mockProvider{id: "ours"}
+	othersModel := &mockProvider{id: "others"}
+
+	a := New("root", "test", WithModel(defaultModel))
+
+	// Capture the snapshot returned by SetModelOverride.
+	prev := a.SnapshotModelOverride()
+	oursSnap := a.SetModelOverride(oursModel)
+
+	// Simulate a concurrent caller storing a different override _after_ we
+	// stored ours but _before_ a hypothetical post-store SnapshotModelOverride.
+	a.SetModelOverride(othersModel)
+	require.Equal(t, "others", a.Model().ID())
+
+	// The deferred restore must be a no-op because oursSnap holds the
+	// pointer we stored, not the current pointer.
+	a.RestoreModelOverride(prev, oursSnap)
+	assert.Equal(t, "others", a.Model().ID(),
+		"concurrent override must be preserved; the snapshot returned by SetModelOverride captures the stored pointer")
+}
+
+func TestSetModelOverride_ClearReturnsZeroSnapshot(t *testing.T) {
+	t.Parallel()
+
+	a := New("root", "test", WithModel(&mockProvider{id: "default"}))
+
+	// Calling SetModelOverride with no providers (or nil) clears the override.
+	// The returned snapshot should round-trip cleanly through RestoreModelOverride.
+	cleared := a.SetModelOverride()
+	assert.False(t, a.HasModelOverride())
+
+	// Now set an override and restore using `cleared` as `prev`.
+	oursSnap := a.SetModelOverride(&mockProvider{id: "ours"})
+	require.True(t, a.HasModelOverride())
+
+	a.RestoreModelOverride(cleared, oursSnap)
+	assert.False(t, a.HasModelOverride(), "restoring a cleared snapshot must clear the override")
+}
+
 func TestSnapshotAndRestoreModelOverride(t *testing.T) {
 	t.Parallel()
 

@@ -329,7 +329,7 @@ func (r *LocalRuntime) runTool(ctx context.Context, tool tools.Tool, toolCall to
 	hooksExec := r.getHooksExecutor(a)
 
 	// Execute pre-tool hooks if configured.
-	if hooksExec != nil && hooksExec.HasPreToolUseHooks() {
+	if hooksExec != nil && hooksExec.Has(hooks.EventPreToolUse) {
 		blocked, modifiedTC := r.executePreToolHook(ctx, hooksExec, sess, toolCall, tool, events, a)
 		if blocked {
 			return
@@ -344,7 +344,7 @@ func (r *LocalRuntime) runTool(ctx context.Context, tool tools.Tool, toolCall to
 		})
 
 	// Execute post-tool hooks if configured.
-	if hooksExec != nil && hooksExec.HasPostToolUseHooks() {
+	if hooksExec != nil && hooksExec.Has(hooks.EventPostToolUse) {
 		r.executePostToolHook(ctx, hooksExec, sess, toolCall, events, a)
 	}
 }
@@ -371,7 +371,7 @@ func (r *LocalRuntime) executePreToolHook(
 	events chan Event,
 	a *agent.Agent,
 ) (blocked bool, modifiedTC tools.ToolCall) {
-	result, err := hooksExec.ExecutePreToolUse(ctx, r.newHooksInput(sess, toolCall))
+	result, err := hooksExec.Dispatch(ctx, hooks.EventPreToolUse, r.newHooksInput(sess, toolCall))
 	switch {
 	case err != nil:
 		slog.Warn("Pre-tool hook execution failed", "tool", toolCall.Function.Name, "error", err)
@@ -405,7 +405,7 @@ func (r *LocalRuntime) executePostToolHook(
 	events chan Event,
 	a *agent.Agent,
 ) {
-	result, err := hooksExec.ExecutePostToolUse(ctx, r.newHooksInput(sess, toolCall))
+	result, err := hooksExec.Dispatch(ctx, hooks.EventPostToolUse, r.newHooksInput(sess, toolCall))
 	if err != nil {
 		slog.Warn("Post-tool hook execution failed", "tool", toolCall.Function.Name, "error", err)
 	} else if result.SystemMessage != "" {

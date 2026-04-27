@@ -1630,6 +1630,25 @@ type HooksConfig struct {
 	// SessionStart hooks run when a session begins
 	SessionStart []HookDefinition `json:"session_start,omitempty" yaml:"session_start,omitempty"`
 
+	// TurnStart hooks run at the start of every agent turn (each model
+	// call). Their AdditionalContext is appended as transient system
+	// messages for that turn only — it is NOT persisted to the session,
+	// so per-turn signals (date, prompt files, ...) are recomputed every
+	// turn instead of bloating the message history on every resume.
+	TurnStart []HookDefinition `json:"turn_start,omitempty" yaml:"turn_start,omitempty"`
+
+	// BeforeLLMCall hooks run just before each model call (after
+	// turn_start). Use this for observability, cost guardrails, or
+	// auditing without contributing system messages — turn_start is the
+	// right event for the latter.
+	BeforeLLMCall []HookDefinition `json:"before_llm_call,omitempty" yaml:"before_llm_call,omitempty"`
+
+	// AfterLLMCall hooks run just after each successful model call,
+	// before the response is recorded into the session and tool calls
+	// are dispatched. Receives the assistant text content in
+	// stop_response.
+	AfterLLMCall []HookDefinition `json:"after_llm_call,omitempty" yaml:"after_llm_call,omitempty"`
+
 	// SessionEnd hooks run when a session ends
 	SessionEnd []HookDefinition `json:"session_end,omitempty" yaml:"session_end,omitempty"`
 
@@ -1641,6 +1660,16 @@ type HooksConfig struct {
 
 	// Notification hooks run when the agent sends a notification (error, warning) to the user
 	Notification []HookDefinition `json:"notification,omitempty" yaml:"notification,omitempty"`
+
+	// OnError hooks run when the runtime hits an error during a turn
+	// (model failures, repetitive tool-call loops). Fires alongside
+	// Notification with level="error".
+	OnError []HookDefinition `json:"on_error,omitempty" yaml:"on_error,omitempty"`
+
+	// OnMaxIterations hooks run when the runtime reaches its configured
+	// max_iterations limit. Fires alongside Notification with
+	// level="warning".
+	OnMaxIterations []HookDefinition `json:"on_max_iterations,omitempty" yaml:"on_max_iterations,omitempty"`
 }
 
 // IsEmpty returns true if no hooks are configured
@@ -1651,10 +1680,15 @@ func (h *HooksConfig) IsEmpty() bool {
 	return len(h.PreToolUse) == 0 &&
 		len(h.PostToolUse) == 0 &&
 		len(h.SessionStart) == 0 &&
+		len(h.TurnStart) == 0 &&
+		len(h.BeforeLLMCall) == 0 &&
+		len(h.AfterLLMCall) == 0 &&
 		len(h.SessionEnd) == 0 &&
 		len(h.OnUserInput) == 0 &&
 		len(h.Stop) == 0 &&
-		len(h.Notification) == 0
+		len(h.Notification) == 0 &&
+		len(h.OnError) == 0 &&
+		len(h.OnMaxIterations) == 0
 }
 
 // HookMatcherConfig represents a hook matcher with its hooks.
@@ -1670,11 +1704,24 @@ type HookMatcherConfig struct {
 
 // HookDefinition represents a single hook configuration
 type HookDefinition struct {
-	// Type specifies the hook type (currently only "command" is supported)
+	// Type specifies the hook type. Supported values:
+	//   - "command":  run a shell command (default)
+	//   - "builtin":  invoke a named, in-process Go function (the name
+	//                 lives in Command). The set of registered builtins
+	//                 is owned by the runtime; the docker-agent runtime
+	//                 ships add_date, add_environment_info, and
+	//                 add_prompt_files.
 	Type string `json:"type" yaml:"type"`
 
-	// Command is the shell command to execute
+	// Command is the shell command (Type==command) or the builtin name
+	// (Type==builtin) to invoke.
 	Command string `json:"command,omitempty" yaml:"command,omitempty"`
+
+	// Args are arbitrary string arguments passed to the hook handler.
+	// Builtin handlers receive them as the args parameter; future handler
+	// kinds (http, mcp, ...) can adopt the same field. Empty for command
+	// hooks today (the shell command stays self-contained).
+	Args []string `json:"args,omitempty" yaml:"args,omitempty"`
 
 	// Timeout is the execution timeout in seconds (default: 60)
 	Timeout int `json:"timeout,omitempty" yaml:"timeout,omitempty"`
@@ -1699,6 +1746,27 @@ func (h *HooksConfig) validate() error {
 	// Validate SessionStart hooks
 	for i, hook := range h.SessionStart {
 		if err := hook.validate("session_start", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate TurnStart hooks
+	for i, hook := range h.TurnStart {
+		if err := hook.validate("turn_start", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate BeforeLLMCall hooks
+	for i, hook := range h.BeforeLLMCall {
+		if err := hook.validate("before_llm_call", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate AfterLLMCall hooks
+	for i, hook := range h.AfterLLMCall {
+		if err := hook.validate("after_llm_call", i); err != nil {
 			return err
 		}
 	}
@@ -1731,6 +1799,20 @@ func (h *HooksConfig) validate() error {
 		}
 	}
 
+	// Validate OnError hooks
+	for i, hook := range h.OnError {
+		if err := hook.validate("on_error", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate OnMaxIterations hooks
+	for i, hook := range h.OnMaxIterations {
+		if err := hook.validate("on_max_iterations", i); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1755,12 +1837,17 @@ func (h *HookDefinition) validate(prefix string, index int) error {
 		return fmt.Errorf("hooks.%s[%d]: type is required", prefix, index)
 	}
 
-	if h.Type != "command" {
-		return fmt.Errorf("hooks.%s[%d]: unsupported hook type '%s' (only 'command' is supported)", prefix, index, h.Type)
-	}
-
-	if h.Command == "" {
-		return fmt.Errorf("hooks.%s[%d]: command is required for command hooks", prefix, index)
+	switch h.Type {
+	case "command":
+		if h.Command == "" {
+			return fmt.Errorf("hooks.%s[%d]: command is required for command hooks", prefix, index)
+		}
+	case "builtin":
+		if h.Command == "" {
+			return fmt.Errorf("hooks.%s[%d]: command must name the builtin to invoke", prefix, index)
+		}
+	default:
+		return fmt.Errorf("hooks.%s[%d]: unsupported hook type '%s' (supported: 'command', 'builtin')", prefix, index, h.Type)
 	}
 
 	return nil

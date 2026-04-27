@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -197,6 +198,13 @@ type LocalRuntime struct {
 	env                         []string // Environment variables for hooks execution
 	modelSwitcherCfg            *ModelSwitcherConfig
 
+	// hooksRegistry is the runtime-private hooks.Registry used to build
+	// every Executor. It carries the runtime-owned builtin hooks
+	// (add_date, add_environment_info) registered once during
+	// NewLocalRuntime, so they're available to every agent without
+	// touching any process-wide state.
+	hooksRegistry *hooks.Registry
+
 	// retryOnRateLimit enables retry-with-backoff for HTTP 429 (rate limit) errors
 	// when no fallback models are configured. When false (default), 429 errors are
 	// treated as non-retryable and immediately fail or skip to the next model.
@@ -317,6 +325,11 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		return nil, err
 	}
 
+	hooksRegistry := hooks.NewRegistry()
+	if err := registerBuiltinHooks(hooksRegistry); err != nil {
+		return nil, fmt.Errorf("register builtin hooks: %w", err)
+	}
+
 	r := &LocalRuntime{
 		toolMap:              make(map[string]ToolHandlerFunc),
 		team:                 agents,
@@ -329,11 +342,22 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		managedOAuth:         true,
 		sessionStore:         session.NewInMemorySessionStore(),
 		fallbackCooldowns:    make(map[string]*fallbackCooldownState),
+		hooksRegistry:        hooksRegistry,
 	}
 	r.bgAgents = agenttool.NewHandler(r)
 
 	for _, opt := range opts {
 		opt(r)
+	}
+
+	// Default the runtime's working directory to the process CWD when no
+	// caller supplied one. This matches the session's default and ensures
+	// builtin hooks that look up files (add_prompt_files) can find them
+	// without the embedder having to remember to call WithWorkingDir.
+	if r.workingDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			r.workingDir = cwd
+		}
 	}
 
 	if r.modelsStore == nil {
@@ -564,20 +588,49 @@ func (r *LocalRuntime) TitleGenerator() *sessiontitle.Generator {
 	return sessiontitle.New(model, a.FallbackModels()...)
 }
 
-// getHooksExecutor creates a hooks executor for the given agent
+// getHooksExecutor creates a hooks executor for the given agent.
+//
+// It also auto-injects implicit session_start hooks driven by agent flags
+// (a.AddDate(), a.AddEnvironmentInfo()). These flags used to inline
+// system messages on every turn from buildContextSpecificSystemMessages;
+// they are now expressed uniformly as builtin session_start hooks so that
+// users can compose / override / disable them through the same surface as
+// any other hook.
 func (r *LocalRuntime) getHooksExecutor(a *agent.Agent) *hooks.Executor {
 	hooksCfg := hooks.FromConfig(a.Hooks())
-	if hooksCfg == nil || hooksCfg.IsEmpty() {
+	if hooksCfg == nil {
+		hooksCfg = &hooks.Config{}
+	}
+	if a.AddDate() {
+		hooksCfg.TurnStart = append(hooksCfg.TurnStart, hooks.Hook{
+			Type:    hooks.HookTypeBuiltin,
+			Command: BuiltinAddDate,
+		})
+	}
+	if files := a.AddPromptFiles(); len(files) > 0 {
+		hooksCfg.TurnStart = append(hooksCfg.TurnStart, hooks.Hook{
+			Type:    hooks.HookTypeBuiltin,
+			Command: BuiltinAddPromptFiles,
+			Args:    files,
+		})
+	}
+	if a.AddEnvironmentInfo() {
+		hooksCfg.SessionStart = append(hooksCfg.SessionStart, hooks.Hook{
+			Type:    hooks.HookTypeBuiltin,
+			Command: BuiltinAddEnvironmentInfo,
+		})
+	}
+	if hooksCfg.IsEmpty() {
 		return nil
 	}
-	return hooks.NewExecutor(hooksCfg, r.workingDir, r.env)
+	return hooks.NewExecutorWithRegistry(hooksCfg, r.workingDir, r.env, r.hooksRegistry)
 }
 
 // executeSessionStartHooks executes session start hooks for the given agent.
 // It logs the hook output as additional context and emits warnings for system messages.
 func (r *LocalRuntime) executeSessionStartHooks(ctx context.Context, sess *session.Session, a *agent.Agent, events chan Event) {
 	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasSessionStartHooks() {
+	if hooksExec == nil || !hooksExec.Has(hooks.EventSessionStart) {
 		return
 	}
 
@@ -588,7 +641,7 @@ func (r *LocalRuntime) executeSessionStartHooks(ctx context.Context, sess *sessi
 		Source:    "startup",
 	}
 
-	result, err := hooksExec.ExecuteSessionStart(ctx, input)
+	result, err := hooksExec.Dispatch(ctx, hooks.EventSessionStart, input)
 	if err != nil {
 		slog.Warn("Session start hook execution failed", "agent", a.Name(), "error", err)
 		return
@@ -603,10 +656,47 @@ func (r *LocalRuntime) executeSessionStartHooks(ctx context.Context, sess *sessi
 	}
 }
 
+// executeTurnStartHooks runs turn_start hooks and returns ephemeral system
+// messages to inject into the model call's messages slice.
+//
+// Unlike session_start, the AdditionalContext from turn_start is NOT
+// persisted to the session — it's recomputed every turn. This is the
+// right semantics for fast-changing context like "Today's date" or the
+// contents of a prompt file the user might be editing during the session.
+func (r *LocalRuntime) executeTurnStartHooks(ctx context.Context, sess *session.Session, a *agent.Agent, events chan Event) []chat.Message {
+	hooksExec := r.getHooksExecutor(a)
+	if hooksExec == nil || !hooksExec.Has(hooks.EventTurnStart) {
+		return nil
+	}
+
+	slog.Debug("Executing turn start hooks", "agent", a.Name(), "session_id", sess.ID)
+	input := &hooks.Input{
+		SessionID: sess.ID,
+		Cwd:       r.workingDir,
+	}
+
+	result, err := hooksExec.Dispatch(ctx, hooks.EventTurnStart, input)
+	if err != nil {
+		slog.Warn("Turn start hook execution failed", "agent", a.Name(), "error", err)
+		return nil
+	}
+
+	if result.SystemMessage != "" {
+		events <- Warning(result.SystemMessage, a.Name())
+	}
+	if result.AdditionalContext == "" {
+		return nil
+	}
+	return []chat.Message{{
+		Role:    chat.MessageRoleSystem,
+		Content: result.AdditionalContext,
+	}}
+}
+
 // executeSessionEndHooks executes session end hooks for the given agent.
 func (r *LocalRuntime) executeSessionEndHooks(ctx context.Context, sess *session.Session, a *agent.Agent) {
 	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasSessionEndHooks() {
+	if hooksExec == nil || !hooksExec.Has(hooks.EventSessionEnd) {
 		return
 	}
 
@@ -617,9 +707,9 @@ func (r *LocalRuntime) executeSessionEndHooks(ctx context.Context, sess *session
 		Reason:    "stream_ended",
 	}
 
-	_, err := hooksExec.ExecuteSessionEnd(ctx, input)
+	_, err := hooksExec.Dispatch(ctx, hooks.EventSessionEnd, input)
 	if err != nil {
-		slog.Error("Session end hook execution failed", "agent", a.Name(), "error", err)
+		slog.Warn("Session end hook execution failed", "agent", a.Name(), "error", err)
 	}
 }
 
@@ -627,7 +717,7 @@ func (r *LocalRuntime) executeSessionEndHooks(ctx context.Context, sess *session
 // The stop hook receives the model's final response content.
 func (r *LocalRuntime) executeStopHooks(ctx context.Context, sess *session.Session, a *agent.Agent, responseContent string, events chan Event) {
 	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasStopHooks() {
+	if hooksExec == nil || !hooksExec.Has(hooks.EventStop) {
 		return
 	}
 
@@ -638,7 +728,7 @@ func (r *LocalRuntime) executeStopHooks(ctx context.Context, sess *session.Sessi
 		StopResponse: responseContent,
 	}
 
-	result, err := hooksExec.ExecuteStop(ctx, input)
+	result, err := hooksExec.Dispatch(ctx, hooks.EventStop, input)
 	if err != nil {
 		slog.Warn("Stop hook execution failed", "agent", a.Name(), "error", err)
 		return
@@ -663,7 +753,7 @@ func (r *LocalRuntime) executeNotificationHooks(ctx context.Context, a *agent.Ag
 	}
 
 	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasNotificationHooks() {
+	if hooksExec == nil || !hooksExec.Has(hooks.EventNotification) {
 		return
 	}
 
@@ -675,9 +765,107 @@ func (r *LocalRuntime) executeNotificationHooks(ctx context.Context, a *agent.Ag
 		NotificationMessage: message,
 	}
 
-	_, err := hooksExec.ExecuteNotification(ctx, input)
+	_, err := hooksExec.Dispatch(ctx, hooks.EventNotification, input)
 	if err != nil {
 		slog.Warn("Notification hook execution failed", "error", err)
+	}
+}
+
+// executeOnErrorHooks executes on_error hooks when the runtime hits an
+// error during a turn (model failures, tool-call loops). Fires alongside
+// the broader notification event; on_error is the structured entry point
+// for users who want to react only to errors.
+func (r *LocalRuntime) executeOnErrorHooks(ctx context.Context, a *agent.Agent, sessionID, message string) {
+	if a == nil {
+		return
+	}
+	hooksExec := r.getHooksExecutor(a)
+	if hooksExec == nil || !hooksExec.Has(hooks.EventOnError) {
+		return
+	}
+
+	slog.Debug("Executing on_error hooks", "session_id", sessionID)
+	input := &hooks.Input{
+		SessionID:           sessionID,
+		Cwd:                 r.workingDir,
+		NotificationLevel:   "error",
+		NotificationMessage: message,
+	}
+
+	if _, err := hooksExec.Dispatch(ctx, hooks.EventOnError, input); err != nil {
+		slog.Warn("On-error hook execution failed", "error", err)
+	}
+}
+
+// executeOnMaxIterationsHooks executes on_max_iterations hooks when the
+// runtime reaches its configured max_iterations limit. Fires alongside
+// the broader notification event; on_max_iterations is the structured
+// entry point for users who want to react only to that condition.
+func (r *LocalRuntime) executeOnMaxIterationsHooks(ctx context.Context, a *agent.Agent, sessionID, message string) {
+	if a == nil {
+		return
+	}
+	hooksExec := r.getHooksExecutor(a)
+	if hooksExec == nil || !hooksExec.Has(hooks.EventOnMaxIterations) {
+		return
+	}
+
+	slog.Debug("Executing on_max_iterations hooks", "session_id", sessionID)
+	input := &hooks.Input{
+		SessionID:           sessionID,
+		Cwd:                 r.workingDir,
+		NotificationLevel:   "warning",
+		NotificationMessage: message,
+	}
+
+	if _, err := hooksExec.Dispatch(ctx, hooks.EventOnMaxIterations, input); err != nil {
+		slog.Warn("On-max-iterations hook execution failed", "error", err)
+	}
+}
+
+// executeBeforeLLMCallHooks runs before_llm_call hooks just before each
+// model call. The output is informational (logged but not honored as a
+// deny verdict yet) so this is the right event for cost guardrails,
+// auditing, and observability — hooks that want to contribute system
+// messages should use turn_start instead.
+func (r *LocalRuntime) executeBeforeLLMCallHooks(ctx context.Context, sess *session.Session, a *agent.Agent) {
+	hooksExec := r.getHooksExecutor(a)
+	if hooksExec == nil || !hooksExec.Has(hooks.EventBeforeLLMCall) {
+		return
+	}
+
+	slog.Debug("Executing before_llm_call hooks", "agent", a.Name(), "session_id", sess.ID)
+	input := &hooks.Input{
+		SessionID: sess.ID,
+		Cwd:       r.workingDir,
+	}
+
+	if _, err := hooksExec.Dispatch(ctx, hooks.EventBeforeLLMCall, input); err != nil {
+		slog.Warn("Before-LLM-call hook execution failed", "agent", a.Name(), "error", err)
+	}
+}
+
+// executeAfterLLMCallHooks runs after_llm_call hooks just after a
+// successful model call, before the response is recorded into the
+// session and tool calls are dispatched. The assistant text content is
+// passed via stop_response (matching the stop event), so handlers can
+// reuse the same parsing logic. Failed model calls fire on_error
+// instead and skip this event.
+func (r *LocalRuntime) executeAfterLLMCallHooks(ctx context.Context, sess *session.Session, a *agent.Agent, responseContent string) {
+	hooksExec := r.getHooksExecutor(a)
+	if hooksExec == nil || !hooksExec.Has(hooks.EventAfterLLMCall) {
+		return
+	}
+
+	slog.Debug("Executing after_llm_call hooks", "agent", a.Name(), "session_id", sess.ID)
+	input := &hooks.Input{
+		SessionID:    sess.ID,
+		Cwd:          r.workingDir,
+		StopResponse: responseContent,
+	}
+
+	if _, err := hooksExec.Dispatch(ctx, hooks.EventAfterLLMCall, input); err != nil {
+		slog.Warn("After-LLM-call hook execution failed", "agent", a.Name(), "error", err)
 	}
 }
 
@@ -689,7 +877,7 @@ func (r *LocalRuntime) executeOnUserInputHooks(ctx context.Context, sessionID, l
 	}
 
 	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasOnUserInputHooks() {
+	if hooksExec == nil || !hooksExec.Has(hooks.EventOnUserInput) {
 		return
 	}
 
@@ -699,7 +887,7 @@ func (r *LocalRuntime) executeOnUserInputHooks(ctx context.Context, sessionID, l
 		Cwd:       r.workingDir,
 	}
 
-	result, err := hooksExec.ExecuteOnUserInput(ctx, input)
+	result, err := hooksExec.Dispatch(ctx, hooks.EventOnUserInput, input)
 	if err != nil {
 		slog.Warn("On-user-input hook execution failed", "error", err)
 	} else {

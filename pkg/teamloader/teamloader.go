@@ -14,7 +14,6 @@ import (
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/agent"
-	"github.com/docker/docker-agent/pkg/cache"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/js"
@@ -171,24 +170,9 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		}
 
 		if agentConfig.Cache != nil && agentConfig.Cache.Enabled {
-			cachePath := agentConfig.Cache.Path
-			if cachePath != "" && !filepath.IsAbs(cachePath) {
-				cachePath = filepath.Join(parentDir, cachePath)
-				cachePath = filepath.Clean(cachePath)
-				// Ensure the resolved path is within parentDir to prevent path traversal
-				cleanParent := filepath.Clean(parentDir) + string(filepath.Separator)
-				if !strings.HasPrefix(cachePath+string(filepath.Separator), cleanParent) {
-					return nil, fmt.Errorf("agent %q: cache path %q escapes parent directory", agentConfig.Name, agentConfig.Cache.Path)
-				}
-			}
-			c, err := cache.New(cache.Config{
-				Enabled:       true,
-				CaseSensitive: agentConfig.Cache.CaseSensitive,
-				TrimSpaces:    agentConfig.Cache.TrimSpaces,
-				Path:          cachePath,
-			})
+			c, err := buildAgentCache(agentConfig.Name, agentConfig.Cache, parentDir)
 			if err != nil {
-				return nil, fmt.Errorf("agent %q: initializing response cache: %w", agentConfig.Name, err)
+				return nil, err
 			}
 			opts = append(opts, agent.WithCache(c))
 		}

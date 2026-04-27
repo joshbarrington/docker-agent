@@ -56,28 +56,29 @@ type Config struct {
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 }
 
-// Cache stores agent responses keyed on the user's question.
+// Cache stores agent responses keyed on the user's question. It is safe
+// for concurrent use by multiple goroutines.
 //
-// Implementations must be safe for concurrent use.
-type Cache interface {
-	// Lookup returns the stored response for the given question and a
-	// boolean indicating whether the question was found.
-	Lookup(question string) (string, bool)
-
-	// Store records the response for the given question, replacing any
-	// existing entry with the same normalized key.
-	Store(question, response string)
+// When the underlying [Config] sets Path, every Store mirrors the
+// in-memory state to a JSON file via an atomic temp-file + rename so
+// concurrent readers (and a process that crashes mid-write) only ever
+// see a fully written file.
+type Cache struct {
+	mu        sync.RWMutex
+	entries   map[string]string
+	normalize func(string) string
+	persist   func(map[string]string)
 }
 
 // New builds a Cache from the given Config. It returns (nil, nil) when
 // caching is disabled, allowing callers to short-circuit with a simple
 // nil check.
-func New(cfg Config) (Cache, error) {
+func New(cfg Config) (*Cache, error) {
 	if !cfg.Enabled {
 		return nil, nil //nolint:nilnil // intentional: nil signals caching disabled
 	}
 
-	c := &cache{
+	c := &Cache{
 		entries:   make(map[string]string),
 		normalize: keyNormalizer(cfg.CaseSensitive, cfg.TrimSpaces),
 	}
@@ -98,18 +99,9 @@ func New(cfg Config) (Cache, error) {
 	return c, nil
 }
 
-// cache is a single in-memory store. When persist is non-nil it is also
-// invoked with a snapshot after every Store to mirror entries to durable
-// storage; that keeps the in-memory and on-disk implementations as one
-// piece of code with one extra optional callback.
-type cache struct {
-	mu        sync.RWMutex
-	entries   map[string]string
-	normalize func(string) string
-	persist   func(map[string]string)
-}
-
-func (c *cache) Lookup(question string) (string, bool) {
+// Lookup returns the stored response for the given question and a
+// boolean indicating whether the question was found.
+func (c *Cache) Lookup(question string) (string, bool) {
 	key := c.normalize(question)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -117,15 +109,23 @@ func (c *cache) Lookup(question string) (string, bool) {
 	return resp, ok
 }
 
-func (c *cache) Store(question, response string) {
+// Store records the response for the given question, replacing any
+// existing entry with the same normalized key. When the cache is
+// file-backed, the snapshot is also flushed to disk before Store
+// returns. Storing the same (question, response) pair twice is a no-op
+// and skips the file rewrite — useful when an agent's stop hook re-fires
+// with the same content (e.g. on a cache-replay turn).
+func (c *Cache) Store(question, response string) {
 	key := c.normalize(question)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if existing, ok := c.entries[key]; ok && existing == response {
+		return
+	}
 	c.entries[key] = response
 	if c.persist != nil {
-		snapshot := maps.Clone(c.entries)
-		c.persist(snapshot)
+		c.persist(maps.Clone(c.entries))
 	}
 }
 

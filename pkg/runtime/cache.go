@@ -70,12 +70,10 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 //
 // The hook is a no-op when the agent has no cache configured, when the
 // dispatched input lacks a user message to key on, or when the response
-// has no visible content.
-//
-// As a tiny optimization (and to make replays of cached answers idempotent
-// at the file level), we skip the Store when the cache already holds the
-// exact same response under the same key — that's exactly what
-// [LocalRuntime.tryReplayCachedResponse] re-emits on a hit.
+// has no visible content. Storing the same answer twice is also a no-op
+// (handled inside [cache.Cache.Store]), which makes the replay path —
+// where [LocalRuntime.tryReplayCachedResponse] fires stop hooks for the
+// cached answer — free of redundant disk writes.
 func (r *LocalRuntime) cacheResponseBuiltin(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
 	if in == nil || in.AgentName == "" || in.LastUserMessage == "" ||
 		strings.TrimSpace(in.StopResponse) == "" {
@@ -85,13 +83,8 @@ func (r *LocalRuntime) cacheResponseBuiltin(_ context.Context, in *hooks.Input, 
 	if err != nil || a == nil {
 		return nil, nil
 	}
-	c := a.Cache()
-	if c == nil {
-		return nil, nil
+	if c := a.Cache(); c != nil {
+		c.Store(in.LastUserMessage, in.StopResponse)
 	}
-	if existing, ok := c.Lookup(in.LastUserMessage); ok && existing == in.StopResponse {
-		return nil, nil
-	}
-	c.Store(in.LastUserMessage, in.StopResponse)
 	return nil, nil
 }

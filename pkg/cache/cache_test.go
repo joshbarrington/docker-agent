@@ -81,6 +81,36 @@ func TestMemoryCache_overwrite(t *testing.T) {
 	assert.Equal(t, "second", got)
 }
 
+// TestFileCache_dedupSkipsRedundantWrite verifies that storing the exact
+// same (question, response) pair twice is treated as a no-op, so the
+// underlying JSON file is rewritten only on the first Store. This is
+// what keeps cache replays free of redundant disk traffic.
+func TestFileCache_dedupSkipsRedundantWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.json")
+
+	c, err := New(Config{Enabled: true, Path: path})
+	require.NoError(t, err)
+
+	c.Store("q", "a")
+	infoBefore, err := os.Stat(path)
+	require.NoError(t, err)
+
+	// Same pair: must not rewrite the file (mtime stays the same).
+	c.Store("q", "a")
+	infoAfter, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, infoBefore.ModTime(), infoAfter.ModTime(),
+		"identical Store must not rewrite the cache file")
+
+	// Different value: must rewrite.
+	c.Store("q", "b")
+	infoChanged, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.True(t, infoChanged.ModTime().After(infoBefore.ModTime()) || infoChanged.Size() != infoBefore.Size(),
+		"different Store must rewrite the cache file")
+}
+
 func TestFileCache_persists(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cache.json")

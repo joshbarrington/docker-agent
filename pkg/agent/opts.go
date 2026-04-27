@@ -175,7 +175,7 @@ func WithHooks(hooks *latest.HooksConfig) Opt {
 }
 
 // WithCache attaches a response cache to the agent. Pass nil to disable.
-func WithCache(c cache.Cache) Opt {
+func WithCache(c *cache.Cache) Opt {
 	return func(a *Agent) {
 		a.cache = c
 	}

@@ -15,7 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 )
 
-func runWithCache(t *testing.T, c cache.Cache, prov *messageRecordingProvider, sess *session.Session) []Event {
+func runWithCache(t *testing.T, c *cache.Cache, prov *messageRecordingProvider, sess *session.Session) []Event {
 	t.Helper()
 
 	root := agent.New("root", "You are a test agent",

@@ -42,7 +42,7 @@ type Agent struct {
 	tools                   []tools.Tool
 	commands                types.Commands
 	hooks                   *latest.HooksConfig
-	cache                   cache.Cache
+	cache                   *cache.Cache
 
 	// warningsMu guards pendingWarnings. addToolWarning and DrainWarnings
 	// may be called concurrently from the runtime loop, the MCP server,
@@ -258,7 +258,7 @@ func (a *Agent) Hooks() *latest.HooksConfig {
 
 // Cache returns the response cache configured for this agent, or nil when
 // caching is disabled.
-func (a *Agent) Cache() cache.Cache {
+func (a *Agent) Cache() *cache.Cache {
 	return a.cache
 }
 

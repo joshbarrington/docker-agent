@@ -596,108 +596,63 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 	return tx.Commit()
 }
 
-// scanSession scans a single row into a Session struct
-// Note: Messages are loaded separately from session_items table
+// scanSession scans a single row into a Session struct.
+// Note: Messages are loaded separately from session_items table.
+// The thinking column is read but discarded — it is kept in the schema for
+// backward compatibility with older docker-agent versions that wrote it.
 func scanSession(scanner interface {
 	Scan(dest ...any) error
 },
 ) (*Session, error) {
-	var toolsApprovedStr, inputTokensStr, outputTokensStr, titleStr, costStr, sendUserMessageStr, maxIterationsStr, createdAtStr, starredStr, agentModelOverridesJSON, customModelsUsedJSON string
-	var thinkingStr string // read from DB but not used (kept for backward compatibility)
-	var sessionID string
-	var workingDir sql.NullString
-	var permissionsJSON sql.NullString
-	var parentID sql.NullString
-	err := scanner.Scan(&sessionID, &toolsApprovedStr, &inputTokensStr, &outputTokensStr, &titleStr, &costStr, &sendUserMessageStr, &maxIterationsStr, &workingDir, &createdAtStr, &starredStr, &permissionsJSON, &agentModelOverridesJSON, &customModelsUsedJSON, &thinkingStr, &parentID)
+	var (
+		sess                    Session
+		workingDir              sql.NullString
+		permissionsJSON         sql.NullString
+		parentID                sql.NullString
+		agentModelOverridesJSON string
+		customModelsUsedJSON    string
+		createdAtStr            string
+		thinking                bool // discarded
+	)
+
+	err := scanner.Scan(
+		&sess.ID, &sess.ToolsApproved, &sess.InputTokens, &sess.OutputTokens,
+		&sess.Title, &sess.Cost, &sess.SendUserMessage, &sess.MaxIterations,
+		&workingDir, &createdAtStr, &sess.Starred, &permissionsJSON,
+		&agentModelOverridesJSON, &customModelsUsedJSON, &thinking, &parentID,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	toolsApproved, err := strconv.ParseBool(toolsApprovedStr)
+	sess.CreatedAt, err = time.Parse(time.RFC3339, createdAtStr)
 	if err != nil {
 		return nil, err
 	}
 
-	inputTokens, err := strconv.ParseInt(inputTokensStr, 10, 64)
-	if err != nil {
-		return nil, err
-	}
+	sess.WorkingDir = workingDir.String
+	sess.ParentID = parentID.String
 
-	outputTokens, err := strconv.ParseInt(outputTokensStr, 10, 64)
-	if err != nil {
-		return nil, err
-	}
-
-	cost, err := strconv.ParseFloat(costStr, 64)
-	if err != nil {
-		return nil, err
-	}
-
-	sendUserMessage, err := strconv.ParseBool(sendUserMessageStr)
-	if err != nil {
-		return nil, err
-	}
-
-	maxIterations, err := strconv.Atoi(maxIterationsStr)
-	if err != nil {
-		return nil, err
-	}
-
-	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
-	if err != nil {
-		return nil, err
-	}
-
-	starred, err := strconv.ParseBool(starredStr)
-	if err != nil {
-		return nil, err
-	}
-
-	// thinkingStr is read from the DB but ignored (column kept for backward compatibility).
-
-	// Parse permissions if present
-	var permissions *PermissionsConfig
 	if permissionsJSON.Valid && permissionsJSON.String != "" {
-		permissions = &PermissionsConfig{}
-		if err := json.Unmarshal([]byte(permissionsJSON.String), permissions); err != nil {
+		sess.Permissions = &PermissionsConfig{}
+		if err := json.Unmarshal([]byte(permissionsJSON.String), sess.Permissions); err != nil {
 			return nil, err
 		}
 	}
 
-	// Parse agent model overrides (may be empty or "{}")
-	var agentModelOverrides map[string]string
 	if agentModelOverridesJSON != "" && agentModelOverridesJSON != "{}" {
-		if err := json.Unmarshal([]byte(agentModelOverridesJSON), &agentModelOverrides); err != nil {
+		if err := json.Unmarshal([]byte(agentModelOverridesJSON), &sess.AgentModelOverrides); err != nil {
 			return nil, err
 		}
 	}
 
-	// Parse custom models used (may be empty or "[]")
-	var customModelsUsed []string
 	if customModelsUsedJSON != "" && customModelsUsedJSON != "[]" {
-		if err := json.Unmarshal([]byte(customModelsUsedJSON), &customModelsUsed); err != nil {
+		if err := json.Unmarshal([]byte(customModelsUsedJSON), &sess.CustomModelsUsed); err != nil {
 			return nil, err
 		}
 	}
 
-	return &Session{
-		ID:                  sessionID,
-		Title:               titleStr,
-		Messages:            nil, // Loaded separately from session_items
-		ToolsApproved:       toolsApproved,
-		InputTokens:         inputTokens,
-		OutputTokens:        outputTokens,
-		Cost:                cost,
-		SendUserMessage:     sendUserMessage,
-		MaxIterations:       maxIterations,
-		CreatedAt:           createdAt,
-		WorkingDir:          workingDir.String,
-		Starred:             starred,
-		Permissions:         permissions,
-		AgentModelOverrides: agentModelOverrides,
-		CustomModelsUsed:    customModelsUsed,
-		ParentID:            parentID.String,
-	}, nil
+	return &sess, nil
 }
 
 // GetSession retrieves a session by ID
@@ -889,26 +844,18 @@ func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary
 
 	var summaries []Summary
 	for rows.Next() {
-		var id, title, createdAtStr, starredStr string
-		var numMessages int
-		if err := rows.Scan(&id, &title, &createdAtStr, &starredStr, &numMessages); err != nil {
+		var (
+			summary      Summary
+			createdAtStr string
+		)
+		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &summary.NumMessages); err != nil {
 			return nil, err
 		}
-		createdAt, err := time.Parse(time.RFC3339, createdAtStr)
+		summary.CreatedAt, err = time.Parse(time.RFC3339, createdAtStr)
 		if err != nil {
 			return nil, err
 		}
-		starred, err := strconv.ParseBool(starredStr)
-		if err != nil {
-			return nil, err
-		}
-		summaries = append(summaries, Summary{
-			ID:          id,
-			Title:       title,
-			CreatedAt:   createdAt,
-			Starred:     starred,
-			NumMessages: numMessages,
-		})
+		summaries = append(summaries, summary)
 	}
 
 	if err := rows.Err(); err != nil {

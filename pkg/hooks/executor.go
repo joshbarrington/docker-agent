@@ -263,14 +263,14 @@ func parseStdoutJSON(stdout string) *Output {
 
 // aggregate combines per-hook results into a single [Result].
 func aggregate(results []hookResult, event EventType) *Result {
+	spec := eventSpec(event)
 	final := &Result{Allowed: true}
 	var messages, contexts, sysMsgs []string
 
 	for _, r := range results {
 		switch {
 		case r.err != nil:
-			// PreToolUse is a security boundary: an exec failure denies.
-			if event == EventPreToolUse {
+			if spec.FailClosed {
 				slog.Warn("PreToolUse hook failed to execute; denying tool call", "error", r.err)
 				final.Allowed = false
 				final.ExitCode = -1
@@ -297,7 +297,7 @@ func aggregate(results []hookResult, event EventType) *Result {
 		case r.Output == nil:
 			// Plain stdout becomes AdditionalContext only for events
 			// whose runtime consumes it.
-			if r.Stdout != "" && event.consumesContext() {
+			if r.Stdout != "" && spec.StdoutPolicy == StdoutAdditionalContext {
 				contexts = append(contexts, strings.TrimSpace(r.Stdout))
 			}
 			continue

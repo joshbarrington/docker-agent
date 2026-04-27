@@ -47,19 +47,6 @@ const (
 	EventOnMaxIterations EventType = "on_max_iterations"
 )
 
-// consumesContext reports whether the runtime emit site for e routes
-// [Result.AdditionalContext] somewhere meaningful (a system message, a
-// transient turn_start prompt, ...). For observational events it is
-// silently dropped, so plain stdout from a hook is also discarded for
-// those.
-func (e EventType) consumesContext() bool {
-	switch e {
-	case EventSessionStart, EventTurnStart, EventPostToolUse, EventStop:
-		return true
-	}
-	return false
-}
-
 // Input is the JSON-serializable payload passed to hooks via stdin.
 type Input struct {
 	SessionID     string    `json:"session_id"`

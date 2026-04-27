@@ -28,8 +28,16 @@
 #             stdout JSON or exit codes (2 = block)
 #   builtin - in-process Go function registered by the runtime; reuses the
 #             `command` field for the builtin's name and the `args` field
-#             for parameters. Three are shipped: add_date,
-#             add_environment_info, add_prompt_files.
+#             for parameters. Shipped builtins:
+#               add_date              (turn_start)
+#               add_environment_info  (session_start)
+#               add_prompt_files      (turn_start; args = file names)
+#               add_git_status        (turn_start)
+#               add_git_diff          (turn_start; args = ["full"] for unified diff)
+#               add_directory_listing (session_start)
+#               add_user_info         (session_start)
+#               add_recent_commits    (session_start; args = ["<N>"], default 10)
+#               max_iterations        (before_llm_call; args = ["<N>"], hard stop)
 #
 # Try these prompts:
 #   "Run: echo hello"           → allowed

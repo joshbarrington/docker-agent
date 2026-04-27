@@ -90,6 +90,63 @@ agents:
           command: "./scripts/alert.sh"
 ```
 
+## Built-in Hooks
+
+In addition to shell `command` hooks, docker-agent ships a small library of **built-in hooks** — in-process Go functions that run without spawning a subprocess. They're invoked with `type: builtin`, where `command` is the builtin's registered name and `args` are passed through as the builtin's parameters.
+
+```yaml
+hooks:
+  turn_start:
+    - type: builtin
+      command: add_date
+    - type: builtin
+      command: add_prompt_files
+      args:
+        - GUIDELINES.md
+        - PROJECT.md
+  session_start:
+    - type: builtin
+      command: add_environment_info
+  before_llm_call:
+    - type: builtin
+      command: max_iterations
+      args: ["50"]
+```
+
+Built-ins are typically zero-config and faster than equivalent shell hooks because they don't fork a process. They cover the common "inject context into every turn / session" patterns out of the box.
+
+### Available built-ins
+
+| Builtin                 | Event             | Args                   | What it does                                                                                                          |
+| ----------------------- | ----------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `add_date`              | `turn_start`      | _none_                 | Prepends `Today's date: YYYY-MM-DD` so the model always knows the current date.                                       |
+| `add_environment_info`  | `session_start`   | _none_                 | Adds the working directory, git-repo status, OS, and CPU architecture.                                                |
+| `add_prompt_files`      | `turn_start`      | `[file1, file2, ...]`  | Reads each named file from the workdir hierarchy (walking up) and the home directory, and appends their contents.     |
+| `add_git_status`        | `turn_start`      | _none_                 | Adds the output of `git status --short --branch` (no-op outside a git repo or when git isn't installed).              |
+| `add_git_diff`          | `turn_start`      | _none_, or `["full"]`  | Adds `git diff --stat` by default. Pass `args: ["full"]` to emit the full unified diff. Output is capped to 4 KB.     |
+| `add_directory_listing` | `session_start`   | _none_                 | Adds an alphabetical listing of the cwd's top-level entries (skips dot-files, capped at 100 with a "... and N more"). |
+| `add_user_info`         | `session_start`   | _none_                 | Adds the current OS user (username and full name) and the hostname.                                                   |
+| `add_recent_commits`    | `session_start`   | _none_, or `["<N>"]`   | Adds `git log --oneline -n N`. `N` defaults to 10; pass a positive integer to override.                               |
+| `max_iterations`        | `before_llm_call` | `["<N>"]` (required)   | Hard-stops the agent after `N` model calls. State is per-session and reset at `session_end`.                          |
+
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">ℹ️ Per-turn vs. per-session
+</div>
+  <p><code>turn_start</code> built-ins recompute every turn and contribute <strong>transient</strong> context that is <em>not</em> persisted to the session — perfect for fast-moving signals like the date or current git state. <code>session_start</code> built-ins run once per session and their context <strong>persists</strong> across turns and resumes — pick this for stable context like the OS user or the initial directory listing.</p>
+</div>
+
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">ℹ️ Auto-injected built-ins
+</div>
+  <p>The agent flags <code>add_date: true</code>, <code>add_environment_info: true</code>, and <code>add_prompt_files: [...]</code> are shorthands that auto-register the matching built-in hook. You don't need to repeat them under <code>hooks:</code> — set the flag <em>or</em> the hook entry, not both.</p>
+</div>
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">⚠️ Two flavors of <code>max_iterations</code>
+</div>
+  <p>The <code>max_iterations</code> agent field has its own UX (it pauses and asks the user to resume past the limit). The <code>max_iterations</code> built-in hook is a <strong>hard stop with no resume</strong> — when its counter trips, the agent terminates with a block decision. Use the agent field for interactive sessions and the built-in hook to enforce non-negotiable caps in unattended runs.</p>
+</div>
+
 ## Matcher Patterns
 
 The `matcher` field uses regex patterns to match tool names:

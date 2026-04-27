@@ -180,24 +180,6 @@ func (a *Agent) HasModelOverride() bool {
 	return overrides != nil && len(*overrides) > 0
 }
 
-// ModelOverrides returns the currently active model override providers,
-// or nil when no override is set. The returned slice is a copy so it can
-// be safely retained by the caller for read-only inspection.
-//
-// Do NOT use this for save/restore around a temporary override: the
-// returned slice is a snapshot of the contents at call time, so naive
-// save+restore can clobber a concurrent change made by another caller
-// (e.g. the TUI model picker switching the model while a skill
-// sub-session is running). Use SnapshotModelOverride / RestoreModelOverride
-// for safe scoped overrides instead.
-func (a *Agent) ModelOverrides() []provider.Provider {
-	overrides := a.modelOverrides.Load()
-	if overrides == nil || len(*overrides) == 0 {
-		return nil
-	}
-	return append([]provider.Provider(nil), (*overrides)...)
-}
-
 // ModelOverrideSnapshot is an opaque token that captures the agent's model
 // override at a point in time. Pass it to RestoreModelOverride to undo a
 // scoped override safely.

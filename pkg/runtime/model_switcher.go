@@ -154,6 +154,29 @@ func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef st
 	return nil
 }
 
+// WithAgentModel applies modelRef as a model override on the named agent
+// and returns a function that restores the previous override safely.
+//
+// The returned restore func uses pointer-identity compare-and-swap on the
+// agent's override, so a concurrent change made between the apply and the
+// restore (e.g. by the TUI model picker) is preserved instead of being
+// clobbered.
+//
+// If modelRef cannot be resolved, the agent is left untouched, restore is
+// nil, and an error is returned.
+func (r *LocalRuntime) WithAgentModel(ctx context.Context, agentName, modelRef string) (restore func(), err error) {
+	a, err := r.team.Agent(agentName)
+	if err != nil {
+		return nil, fmt.Errorf("agent not found: %w", err)
+	}
+	prev := a.SnapshotModelOverride()
+	if err := r.SetAgentModel(ctx, agentName, modelRef); err != nil {
+		return nil, err
+	}
+	ours := a.SnapshotModelOverride()
+	return func() { a.RestoreModelOverride(prev, ours) }, nil
+}
+
 // resolveModelRef resolves a model reference to a single provider.
 // The reference can be a named model from the config or an inline
 // "provider/model" spec (e.g. "openai/gpt-4o-mini").

@@ -322,9 +322,9 @@ func TestCompiledMatcherMatchTool(t *testing.T) {
 				},
 			}
 			exec := NewExecutor(config, "/tmp", nil)
-			matchers := exec.eventTable[EventPreToolUse].matchers
+			matchers := exec.events[EventPreToolUse]
 			require.Len(t, matchers, 1)
-			assert.Equal(t, tt.expected, matchers[0].matchTool(tt.toolName))
+			assert.Equal(t, tt.expected, matchers[0].matches(tt.toolName))
 		})
 	}
 }

@@ -7,13 +7,9 @@
 // them when the corresponding agent flags (AddDate, AddEnvironmentInfo,
 // AddPromptFiles) are set.
 //
-// Behavioral note: AddDate and AddPromptFiles are registered against
-// turn_start so they recompute on every model call (matching the
-// original per-turn semantics of session.buildContextSpecificSystemMessages).
-// AddEnvironmentInfo is registered against session_start because working
-// directory, OS, and arch don't change during a session; snapshotting
-// once and persisting via Result.AdditionalContext is cheaper than
-// re-computing each turn.
+// AddDate and AddPromptFiles target turn_start so they recompute every
+// turn. AddEnvironmentInfo targets session_start because cwd / OS / arch
+// don't change during a session.
 package builtins
 
 import (
@@ -35,53 +31,37 @@ const (
 	AddPromptFiles     = "add_prompt_files"
 )
 
-// Register installs the stock builtin hooks on r. It is called once
-// from the runtime constructor so the builtins are available to every
-// executor the runtime constructs, without polluting any process-wide
-// state. The only failure modes are programmer errors (empty name or
-// nil function), which surface as a constructor error.
+// Register installs the stock builtin hooks on r.
 func Register(r *hooks.Registry) error {
-	pairs := []struct {
-		name string
-		fn   hooks.BuiltinFunc
-	}{
-		{AddDate, addDate},
-		{AddEnvironmentInfo, addEnvironmentInfo},
-		{AddPromptFiles, addPromptFiles},
-	}
-	for _, p := range pairs {
-		if err := r.RegisterBuiltin(p.name, p.fn); err != nil {
-			return fmt.Errorf("register %q builtin: %w", p.name, err)
+	for name, fn := range map[string]hooks.BuiltinFunc{
+		AddDate:            addDate,
+		AddEnvironmentInfo: addEnvironmentInfo,
+		AddPromptFiles:     addPromptFiles,
+	} {
+		if err := r.RegisterBuiltin(name, fn); err != nil {
+			return fmt.Errorf("register %q builtin: %w", name, err)
 		}
 	}
 	return nil
 }
 
-// addDate returns the current date as additional context. It is
-// equivalent to the previous inline `Today's date: ...` system message
-// that lived in pkg/session/session.go, lifted into the hook system.
-//
-// Registered against EventTurnStart so the date is recomputed every
-// turn rather than snapshotted at session start, matching the original
-// per-turn semantics.
-func addDate(_ context.Context, _ *hooks.Input, _ []string) (*hooks.Output, error) {
+// turnStartContext wraps additional context as a turn_start output.
+func turnStartContext(content string) *hooks.Output {
 	return &hooks.Output{
 		HookSpecificOutput: &hooks.HookSpecificOutput{
 			HookEventName:     hooks.EventTurnStart,
-			AdditionalContext: "Today's date: " + time.Now().Format("2006-01-02"),
+			AdditionalContext: content,
 		},
-	}, nil
+	}
 }
 
-// addEnvironmentInfo returns formatted environment information
-// (working directory, git status, OS, arch) as additional context. It
-// reuses [session.GetEnvironmentInfo] to keep the format identical to the
-// previous inline injection.
-//
-// The working directory comes from the hook input's Cwd, which the
-// runtime populates with its configured working directory. If Cwd is
-// empty the hook contributes nothing rather than fabricating misleading
-// info.
+// addDate emits today's date as turn_start additional context.
+func addDate(_ context.Context, _ *hooks.Input, _ []string) (*hooks.Output, error) {
+	return turnStartContext("Today's date: " + time.Now().Format("2006-01-02")), nil
+}
+
+// addEnvironmentInfo emits cwd / git / OS / arch info as session_start
+// additional context. No-op when Cwd is empty.
 func addEnvironmentInfo(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
 	if in == nil || in.Cwd == "" {
 		return nil, nil
@@ -94,19 +74,9 @@ func addEnvironmentInfo(_ context.Context, in *hooks.Input, _ []string) (*hooks.
 	}, nil
 }
 
-// addPromptFiles reads each filename in args and joins their contents
-// into AdditionalContext. It replaces the inline AddPromptFiles loop
-// that lived in pkg/session/session.go's
-// buildContextSpecificSystemMessages.
-//
-// Registered against EventTurnStart so the file contents are re-read
-// every turn — important because the user may be editing the prompt file
-// during the session and expects the model to pick up the latest text.
-//
-// Read errors are logged at warn level (one log line per failing file)
-// but do not fail the hook; surviving files still contribute their
-// content. This matches the previous loop's behavior of silently
-// skipping unreadable files.
+// addPromptFiles reads each filename in args (relative to Input.Cwd) and
+// joins their contents into turn_start additional context. Missing files
+// are logged and skipped; surviving files still contribute.
 func addPromptFiles(_ context.Context, in *hooks.Input, args []string) (*hooks.Output, error) {
 	if in == nil || in.Cwd == "" || len(args) == 0 {
 		return nil, nil
@@ -123,10 +93,5 @@ func addPromptFiles(_ context.Context, in *hooks.Input, args []string) (*hooks.O
 	if len(parts) == 0 {
 		return nil, nil
 	}
-	return &hooks.Output{
-		HookSpecificOutput: &hooks.HookSpecificOutput{
-			HookEventName:     hooks.EventTurnStart,
-			AdditionalContext: strings.Join(parts, "\n\n"),
-		},
-	}, nil
+	return turnStartContext(strings.Join(parts, "\n\n")), nil
 }

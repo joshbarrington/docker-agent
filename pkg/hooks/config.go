@@ -4,60 +4,50 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
-// FromConfig converts a latest.HooksConfig to a hooks.Config
+// FromConfig converts a [latest.HooksConfig] into the runtime [Config].
 func FromConfig(cfg *latest.HooksConfig) *Config {
 	if cfg == nil {
 		return nil
 	}
-
-	result := &Config{
+	return &Config{
 		PreToolUse:      convertMatchers(cfg.PreToolUse),
 		PostToolUse:     convertMatchers(cfg.PostToolUse),
-		SessionStart:    convertDefinitions(cfg.SessionStart),
-		TurnStart:       convertDefinitions(cfg.TurnStart),
-		BeforeLLMCall:   convertDefinitions(cfg.BeforeLLMCall),
-		AfterLLMCall:    convertDefinitions(cfg.AfterLLMCall),
-		SessionEnd:      convertDefinitions(cfg.SessionEnd),
-		OnUserInput:     convertDefinitions(cfg.OnUserInput),
-		Stop:            convertDefinitions(cfg.Stop),
-		Notification:    convertDefinitions(cfg.Notification),
-		OnError:         convertDefinitions(cfg.OnError),
-		OnMaxIterations: convertDefinitions(cfg.OnMaxIterations),
+		SessionStart:    convertHooks(cfg.SessionStart),
+		TurnStart:       convertHooks(cfg.TurnStart),
+		BeforeLLMCall:   convertHooks(cfg.BeforeLLMCall),
+		AfterLLMCall:    convertHooks(cfg.AfterLLMCall),
+		SessionEnd:      convertHooks(cfg.SessionEnd),
+		OnUserInput:     convertHooks(cfg.OnUserInput),
+		Stop:            convertHooks(cfg.Stop),
+		Notification:    convertHooks(cfg.Notification),
+		OnError:         convertHooks(cfg.OnError),
+		OnMaxIterations: convertHooks(cfg.OnMaxIterations),
 	}
-	return result
 }
 
-// convertMatchers converts a slice of [latest.HookMatcherConfig] entries into
-// the internal [MatcherConfig] shape. Returns nil for an empty input so the
-// caller's per-event slice stays nil-typed when nothing is configured.
 func convertMatchers(in []latest.HookMatcherConfig) []MatcherConfig {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]MatcherConfig, 0, len(in))
-	for _, matcher := range in {
-		out = append(out, MatcherConfig{
-			Matcher: matcher.Matcher,
-			Hooks:   convertDefinitions(matcher.Hooks),
-		})
+	out := make([]MatcherConfig, len(in))
+	for i, m := range in {
+		out[i] = MatcherConfig{Matcher: m.Matcher, Hooks: convertHooks(m.Hooks)}
 	}
 	return out
 }
 
-// convertDefinitions converts a slice of [latest.HookDefinition] into the
-// internal [Hook] shape. Returns nil for an empty input.
-func convertDefinitions(in []latest.HookDefinition) []Hook {
+func convertHooks(in []latest.HookDefinition) []Hook {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]Hook, 0, len(in))
-	for _, h := range in {
-		out = append(out, Hook{
+	out := make([]Hook, len(in))
+	for i, h := range in {
+		out[i] = Hook{
 			Type:    HookType(h.Type),
 			Command: h.Command,
 			Args:    h.Args,
 			Timeout: h.Timeout,
-		})
+		}
 	}
 	return out
 }

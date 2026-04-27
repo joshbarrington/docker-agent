@@ -606,11 +606,7 @@ func (d *workingDirPickerDialog) isStarClick(x, entryIdx int) bool {
 
 func (d *workingDirPickerDialog) setSection(s dirSection) {
 	d.section = s
-	if d.section == sectionBrowse {
-		d.textInput.Focus()
-	} else {
-		d.textInput.Blur()
-	}
+	d.updateSectionFocus()
 }
 
 // tabClickTarget returns the section index if the click is on a tab, or -1.

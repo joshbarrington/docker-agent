@@ -130,7 +130,9 @@ func (d *commandPaletteDialog) filterCommands() {
 		}
 	}
 
-	if d.selected >= len(d.filtered) {
+	// Clearing the search returns the cursor to the top, matching the file
+	// picker. Filtered queries preserve the cursor when still in range.
+	if query == "" || d.selected >= len(d.filtered) {
 		d.selected = 0
 	}
 	d.scrollview.SetScrollOffset(0)

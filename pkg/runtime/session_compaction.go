@@ -47,7 +47,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	compactionAgent := agent.New("root", compaction.SystemPrompt, agent.WithModel(summaryModel))
 
 	// Compute the messages to compact, keeping recent messages aside.
-	messages, firstKeptEntry := extractMessagesToCompact(sess, compactionAgent, int64(m.Limit.Context), additionalPrompt)
+	messages, firstKeptEntry := extractMessagesToCompact(sess, compactionAgent, int64(m.Limit.Context), additionalPrompt, r.now)
 
 	// Run the compaction.
 	compactionSession := session.New(
@@ -91,7 +91,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 // and the index (into sess.Messages) of the first message that was kept aside.
 // Recent messages (up to maxKeepTokens) are excluded from compaction so they
 // can be preserved verbatim in the session after summarization.
-func extractMessagesToCompact(sess *session.Session, compactionAgent *agent.Agent, contextLimit int64, additionalPrompt string) ([]chat.Message, int) {
+func extractMessagesToCompact(sess *session.Session, compactionAgent *agent.Agent, contextLimit int64, additionalPrompt string, now func() time.Time) ([]chat.Message, int) {
 	// Add all the existing messages.
 	var messages []chat.Message
 	for _, msg := range sess.GetMessages(compactionAgent) {
@@ -120,7 +120,7 @@ func extractMessagesToCompact(sess *session.Session, compactionAgent *agent.Agen
 	systemPromptMessage := chat.Message{
 		Role:      chat.MessageRoleSystem,
 		Content:   compaction.SystemPrompt,
-		CreatedAt: time.Now().Format(time.RFC3339),
+		CreatedAt: now().Format(time.RFC3339),
 	}
 	systemPromptMessageLen := compaction.EstimateMessageTokens(&systemPromptMessage)
 
@@ -132,7 +132,7 @@ func extractMessagesToCompact(sess *session.Session, compactionAgent *agent.Agen
 	userPromptMessage := chat.Message{
 		Role:      chat.MessageRoleUser,
 		Content:   userPrompt,
-		CreatedAt: time.Now().Format(time.RFC3339),
+		CreatedAt: now().Format(time.RFC3339),
 	}
 	userPromptMessageLen := compaction.EstimateMessageTokens(&userPromptMessage)
 

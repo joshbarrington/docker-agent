@@ -365,7 +365,7 @@ func (r *LocalRuntime) executeToolWithHandler(
 		Content:    content,
 		ToolCallID: toolCall.ID,
 		IsError:    res.IsError,
-		CreatedAt:  time.Now().Format(time.RFC3339),
+		CreatedAt:  r.now().Format(time.RFC3339),
 	}
 
 	// If the tool result contains images, attach them as MultiContent
@@ -489,9 +489,9 @@ func parseToolInput(arguments string) map[string]any {
 func (r *LocalRuntime) runAgentTool(ctx context.Context, handler ToolHandlerFunc, sess *session.Session, toolCall tools.ToolCall, tool tools.Tool, events chan Event, a *agent.Agent) {
 	r.executeToolWithHandler(ctx, toolCall, tool, events, sess, a, "runtime.tool.handler.runtime",
 		func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
-			start := time.Now()
+			start := r.now()
 			res, err := handler(ctx, sess, toolCall, events)
-			return res, time.Since(start), err
+			return res, r.now().Sub(start), err
 		})
 }
 
@@ -511,7 +511,7 @@ func (r *LocalRuntime) addToolErrorResponse(_ context.Context, sess *session.Ses
 		Content:    errorMsg,
 		ToolCallID: toolCall.ID,
 		IsError:    true,
-		CreatedAt:  time.Now().Format(time.RFC3339),
+		CreatedAt:  r.now().Format(time.RFC3339),
 	}
 	addAgentMessage(sess, a, &toolResponseMsg, events)
 }

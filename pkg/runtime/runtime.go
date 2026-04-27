@@ -243,6 +243,13 @@ type LocalRuntime struct {
 	onToolsChanged func(Event)
 
 	bgAgents *agenttool.Handler
+
+	// now is the runtime's clock. Defaults to time.Now and can be replaced
+	// in tests via WithClock to make timestamps and cooldown windows
+	// deterministic. Every time-dependent call inside the runtime (message
+	// CreatedAt, fallback cooldown windows, tool-call latency) goes through
+	// this hook so a single fake clock controls them all.
+	now func() time.Time
 }
 
 type Opt func(*LocalRuntime)
@@ -314,6 +321,18 @@ func WithEnv(env []string) Opt {
 	}
 }
 
+// WithClock replaces the runtime's clock. Defaults to time.Now. Tests that
+// need deterministic timestamps (assistant message CreatedAt, fallback
+// cooldown windows, tool-call latency) can pass a fake clock so assertions
+// don't depend on wall-clock advancement.
+func WithClock(now func() time.Time) Opt {
+	return func(r *LocalRuntime) {
+		if now != nil {
+			r.now = now
+		}
+	}
+}
+
 // WithRetryOnRateLimit enables automatic retry with backoff for HTTP 429 (rate limit)
 // errors when no fallback models are available. When enabled, the runtime will honor
 // the Retry-After header from the provider's response to determine wait time before
@@ -359,6 +378,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		fallbackCooldowns:    make(map[string]*fallbackCooldownState),
 		hooksRegistry:        hooksRegistry,
 		builtinsState:        builtinsState,
+		now:                  time.Now,
 	}
 	r.bgAgents = agenttool.NewHandler(r)
 

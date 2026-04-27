@@ -3,6 +3,7 @@ package runtime
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,7 +99,7 @@ func TestExtractMessagesToCompact(t *testing.T) {
 			sess := session.New(session.WithMessages(tt.messages))
 
 			a := agent.New("test", "test prompt")
-			result, _ := extractMessagesToCompact(sess, a, tt.contextLimit, tt.additionalPrompt)
+			result, _ := extractMessagesToCompact(sess, a, tt.contextLimit, tt.additionalPrompt, time.Now)
 
 			assert.GreaterOrEqual(t, len(result), tt.wantConversationMsgCount+2)
 			assert.Equal(t, chat.MessageRoleSystem, result[0].Role)
@@ -194,7 +195,7 @@ func TestExtractMessagesToCompact_KeepsRecentMessages(t *testing.T) {
 	sess := session.New(session.WithMessages(items))
 	a := agent.New("test", "test prompt")
 
-	result, firstKeptEntry := extractMessagesToCompact(sess, a, 200_000, "")
+	result, firstKeptEntry := extractMessagesToCompact(sess, a, 200_000, "", time.Now)
 
 	// The kept messages should not appear in the compaction result
 	// (only system + compacted messages + user prompt).

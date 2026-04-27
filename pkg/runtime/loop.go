@@ -290,7 +290,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 							"Execution stopped after reaching the configured max_iterations limit (%d).",
 							runtimeMaxIterations,
 						),
-						CreatedAt: time.Now().Format(time.RFC3339),
+						CreatedAt: r.now().Format(time.RFC3339),
 					}
 
 					addAgentMessage(sess, a, &assistantMessage, events)
@@ -314,7 +314,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 								"Execution stopped after reaching the configured max_iterations limit (%d).",
 								runtimeMaxIterations,
 							),
-							CreatedAt: time.Now().Format(time.RFC3339),
+							CreatedAt: r.now().Format(time.RFC3339),
 						}
 
 						addAgentMessage(sess, a, &assistantMessage, events)
@@ -655,7 +655,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 		ThoughtSignature:  res.ThoughtSignature,
 		ToolCalls:         res.Calls,
 		ToolDefinitions:   toolDefs,
-		CreatedAt:         time.Now().Format(time.RFC3339),
+		CreatedAt:         r.now().Format(time.RFC3339),
 		Usage:             res.Usage,
 		Model:             messageModel,
 		Cost:              messageCost,

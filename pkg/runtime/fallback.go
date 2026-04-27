@@ -91,7 +91,7 @@ func (r *LocalRuntime) getCooldownState(agentName string) *fallbackCooldownState
 	}
 
 	// Check if cooldown has expired; evict if so
-	if time.Now().After(state.until) {
+	if r.now().After(state.until) {
 		delete(r.fallbackCooldowns, agentName)
 		return nil
 	}
@@ -106,7 +106,7 @@ func (r *LocalRuntime) setCooldownState(agentName string, fallbackIndex int, coo
 
 	r.fallbackCooldowns[agentName] = &fallbackCooldownState{
 		fallbackIndex: fallbackIndex,
-		until:         time.Now().Add(cooldownDuration),
+		until:         r.now().Add(cooldownDuration),
 	}
 
 	slog.Info("Fallback cooldown activated",

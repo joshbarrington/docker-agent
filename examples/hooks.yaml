@@ -1,59 +1,87 @@
 #!/usr/bin/env docker agent run
 #
-# Hooks Example - Demonstrating Allow, Deny, and Modify
+# Hooks - one-stop example
+# ==========================================================================
 #
-# This example shows how hooks can control tool execution:
-#   - DENY: Block dangerous shell commands (rm -rf, sudo, etc.)
-#   - MODIFY: Automatically add safety flags to commands
-#   - ALLOW: Let safe operations proceed
+# Hooks let you observe and shape an agent's lifecycle. This file is the
+# single canonical example covering every supported event AND both handler
+# kinds, so you can see them side by side.
 #
-# Try these prompts to see hooks in action:
-#   - "Run: echo hello"           → Allowed
-#   - "Run: rm -rf /tmp/test"     → BLOCKED by hook
-#   - "Run: sudo apt update"      → BLOCKED by hook
-#   - "List files in current dir" → Command gets modified with -h flag
+# Events:
+#
+#   pre_tool_use      - allow / deny / modify a tool call
+#   post_tool_use     - inspect a tool call's result (logging, audits)
+#   session_start     - one-time setup; AdditionalContext PERSISTS in the session
+#   turn_start        - per-turn context; AdditionalContext is TRANSIENT
+#   before_llm_call   - just before each model call (observability, guardrails)
+#   after_llm_call    - just after a successful model call
+#   session_end       - cleanup when the session terminates
+#   on_user_input     - the agent is waiting on the user
+#   stop              - the model finished its response
+#   notification      - errors / warnings emitted by the runtime (catch-all)
+#   on_error          - structured handler for runtime errors
+#   on_max_iterations - structured handler for hitting max_iterations
+#
+# Handler kinds:
+#
+#   command - shell command, JSON Input on stdin, decision returned via
+#             stdout JSON or exit codes (2 = block)
+#   builtin - in-process Go function registered by the runtime; reuses the
+#             `command` field for the builtin's name and the `args` field
+#             for parameters. Three are shipped: add_date,
+#             add_environment_info, add_prompt_files.
+#
+# Try these prompts:
+#   "Run: echo hello"           → allowed
+#   "Run: rm -rf /tmp/test"     → denied by pre_tool_use
+#   "Run: sudo apt update"      → denied by pre_tool_use
+#   "List files in current dir" → ls gets -h injected (modify)
+#
+# Logs (tail these in another terminal):
+#   /tmp/agent-session.log         (session_start, session_end)
+#   /tmp/agent-llm-calls.log       (before_llm_call, after_llm_call)
+#   /tmp/agent-responses.log       (stop)
+#   /tmp/agent-notifications.log   (notification)
+#   /tmp/agent-errors.log          (on_error)
+#   /tmp/agent-max-iter.log        (on_max_iterations)
 #
 
 agents:
   root:
     model: openai/gpt-4o
-    description: An agent with lifecycle hooks demonstrating allow/deny/modify
+    description: One-stop example demonstrating every hook event and both handler kinds.
     instruction: |
       You are a helpful assistant with access to shell and filesystem tools.
-      Use them to help the user with their tasks.
-
-      When asked to run a command, use the shell tool directly.
+      Use them to help the user with their tasks. When asked to run a
+      command, use the shell tool directly.
     toolsets:
       - type: shell
       - type: filesystem
 
     hooks:
-      # ============================================================
-      # PRE-TOOL-USE HOOKS - Control what happens BEFORE a tool runs
-      # ============================================================
+      # ====================================================================
+      # PRE-TOOL-USE - control what happens BEFORE a tool runs.
+      # Tool-matched (regex on tool name); each entry can deny, allow with
+      # a modified input, or stay silent (default allow).
+      # ====================================================================
       pre_tool_use:
-        # DENY dangerous shell commands
+        # DENY dangerous shell commands.
         - matcher: "shell"
           hooks:
             - type: command
               timeout: 10
               command: |
-                # Read the JSON input from stdin
                 INPUT=$(cat)
                 CMD=$(echo "$INPUT" | jq -r '.tool_input.cmd // ""')
-
-                # Check for dangerous patterns and DENY if found
                 if echo "$CMD" | grep -qiE 'rm\s+(-[^\s]*)?\s*-rf|rm\s+(-[^\s]*)?\s*-fr|sudo|mkfs|dd\s+if=|:(\(\)\{|\s*){.*}'; then
-                  # Output JSON to deny with a reason
                   cat <<EOF
-                {"hook_specific_output":{"permission_decision":"deny","permission_decision_reason":"🚫 HOOK BLOCKED: Dangerous command pattern detected. Commands with rm -rf, sudo, mkfs, or dd are not allowed."}}
+                {"hook_specific_output":{"permission_decision":"deny","permission_decision_reason":"🚫 HOOK BLOCKED: dangerous command pattern detected. rm -rf, sudo, mkfs, dd are not allowed."}}
                 EOF
                 else
-                  # Allow the command to proceed
                   echo '{"continue": true}'
                 fi
 
-        # MODIFY: Add human-readable flag to ls commands
+        # MODIFY: inject -h into bare `ls` calls for human-readable sizes.
         - matcher: "shell"
           hooks:
             - type: command
@@ -61,20 +89,16 @@ agents:
               command: |
                 INPUT=$(cat)
                 CMD=$(echo "$INPUT" | jq -r '.tool_input.cmd // ""')
-
-                # If it's a plain 'ls' command without -h, add -h for human-readable sizes
                 if echo "$CMD" | grep -qE '^ls(\s|$)' && ! echo "$CMD" | grep -q '\-h'; then
-                  # Modify the command to add -h flag
                   NEW_CMD=$(echo "$CMD" | sed 's/^ls/ls -h/')
                   cat <<EOF
-                {"hook_specific_output":{"permission_decision":"allow","updated_input":{"cmd":"$NEW_CMD"}},"system_message":"📝 Hook modified command: added -h flag for human-readable output"}
+                {"hook_specific_output":{"permission_decision":"allow","updated_input":{"cmd":"$NEW_CMD"}},"system_message":"📝 Hook modified command: added -h for human-readable output"}
                 EOF
                 fi
-                # If no modification needed, output nothing (allows by default)
 
-      # ============================================================
-      # POST-TOOL-USE HOOKS - Run AFTER a tool completes
-      # ============================================================
+      # ====================================================================
+      # POST-TOOL-USE - run AFTER a tool completes (logging, audits).
+      # ====================================================================
       post_tool_use:
         - matcher: "shell"
           hooks:
@@ -82,25 +106,151 @@ agents:
               command: |
                 INPUT=$(cat)
                 TOOL=$(echo "$INPUT" | jq -r '.tool_name')
-                echo "✅ Post-hook: $TOOL completed successfully"
+                echo "✅ Post-hook: $TOOL completed"
 
-      # ============================================================
-      # SESSION HOOKS - Run at session start/end
-      # ============================================================
+      # ====================================================================
+      # SESSION-START - runs ONCE when the session begins.
+      # Result.AdditionalContext is appended to the session as a SystemMessage
+      # and persists across turns and resumes.
+      # ====================================================================
       session_start:
-        - type: command
-          command: echo "🚀 Session started at $(date). Hooks are active!"
+        # In-process Go function: reports working dir, OS, arch, git status.
+        - type: builtin
+          command: add_environment_info
 
+        # Custom command hook: log session start and tell the model where
+        # the log lives via additional_context.
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            echo "🚀 Session $SESSION_ID started at $(date)" >> /tmp/agent-session.log
+            echo '{"hook_specific_output":{"additional_context":"Session log: /tmp/agent-session.log"}}'
+
+      # ====================================================================
+      # TURN-START - runs at the start of every model call.
+      # Result.AdditionalContext is spliced after the invariant cache
+      # checkpoint and is NOT persisted, so per-turn signals refresh every
+      # turn without bloating the message history.
+      # ====================================================================
+      turn_start:
+        # Built-in: prepends "Today's date: YYYY-MM-DD".
+        - type: builtin
+          command: add_date
+
+        # Built-in: read each file under the working dir and join its
+        # contents into a system message. The `args` field carries per-hook
+        # parameters that builtin handlers receive directly.
+        - type: builtin
+          command: add_prompt_files
+          args:
+            - GUIDELINES.md
+            - PROJECT.md
+
+      # ====================================================================
+      # BEFORE-LLM-CALL - fires just before every model invocation, AFTER
+      # turn_start has assembled the messages slice. Use for observability
+      # / cost guardrails / auditing without contributing system messages
+      # (turn_start is the right place for the latter).
+      # ====================================================================
+      before_llm_call:
+        - type: command
+          timeout: 5
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            echo "[$(date)] [→] $SESSION_ID llm call starting" >> /tmp/agent-llm-calls.log
+
+      # ====================================================================
+      # AFTER-LLM-CALL - fires just after a successful model call. The
+      # assistant text content arrives via stop_response (matching the
+      # stop event's payload). Failed calls fire on_error instead and
+      # skip this event.
+      # ====================================================================
+      after_llm_call:
+        - type: command
+          timeout: 5
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            LEN=$(echo "$INPUT" | jq -r '.stop_response // ""' | wc -c | tr -d ' ')
+            echo "[$(date)] [←] $SESSION_ID llm call complete, content=$LEN chars" >> /tmp/agent-llm-calls.log
+
+      # ====================================================================
+      # SESSION-END - cleanup when the session terminates.
+      # ====================================================================
       session_end:
         - type: command
-          command: echo "👋 Session ended at $(date)"
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            REASON=$(echo "$INPUT" | jq -r '.reason // "unknown"')
+            echo "👋 Session $SESSION_ID ended (reason: $REASON) at $(date)" >> /tmp/agent-session.log
 
-      # ============================================================
-      # USER INPUT HOOKS - Run when agent needs user input
-      # ============================================================
+      # ====================================================================
+      # ON-USER-INPUT - the agent is waiting on the user.
+      # Useful for desktop notifications.
+      # ====================================================================
       on_user_input:
-        # Example: Notify when user input is requested
         - type: command
           command: |
-            # Send notification (macOS only - remove or adapt for other platforms)
-            osascript -e 'display notification "ready!" with title "docker-agent"'
+            # macOS only — adapt for Linux notify-send / Windows toast.
+            osascript -e 'display notification "ready!" with title "docker-agent"' 2>/dev/null || true
+
+      # ====================================================================
+      # STOP - runs when the model finishes a response.
+      # Receives the response text via the stop_response field.
+      # ====================================================================
+      stop:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            LEN=$(echo "$INPUT" | jq -r '.stop_response // ""' | wc -c | tr -d ' ')
+            echo "[$(date)] Session $SESSION_ID - response length: $LEN chars" >> /tmp/agent-responses.log
+
+      # ====================================================================
+      # NOTIFICATION - runs when the runtime emits a warning or error
+      # (max iterations, model errors, ...). Forward to Slack, Teams, or
+      # a logfile.
+      # ====================================================================
+      notification:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            LEVEL=$(echo "$INPUT" | jq -r '.notification_level // "unknown"')
+            MESSAGE=$(echo "$INPUT" | jq -r '.notification_message // "no message"')
+            echo "[$(date)] [$LEVEL] $MESSAGE" >> /tmp/agent-notifications.log
+
+      # ====================================================================
+      # ON-ERROR - fires alongside `notification` (level=error) but ONLY
+      # for runtime errors. Use this when you want a dedicated entry point
+      # for errors without filtering on .notification_level inside the
+      # handler. Both events fire for the same condition; you can have
+      # either or both.
+      # ====================================================================
+      on_error:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            MESSAGE=$(echo "$INPUT" | jq -r '.notification_message // "no message"')
+            echo "[$(date)] error: $MESSAGE" >> /tmp/agent-errors.log
+
+      # ====================================================================
+      # ON-MAX-ITERATIONS - fires alongside `notification` (level=warning)
+      # but ONLY when the agent hits its iteration cap. Useful for
+      # metrics pipelines that want to count runaway sessions without
+      # parsing the notification text.
+      # ====================================================================
+      on_max_iterations:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            MESSAGE=$(echo "$INPUT" | jq -r '.notification_message // "no message"')
+            echo "[$(date)] max-iterations: $MESSAGE" >> /tmp/agent-max-iter.log

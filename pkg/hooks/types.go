@@ -25,6 +25,30 @@ const (
 	// Can load context, setup environment, install dependencies.
 	EventSessionStart EventType = "session_start"
 
+	// EventTurnStart is triggered at the start of every agent turn (each
+	// model call), AFTER the persisted messages are read but BEFORE the
+	// model is invoked. Its AdditionalContext is appended as transient
+	// system messages for that turn only — it is NOT persisted to the
+	// session, so per-turn signals (date, environment, prompt files) are
+	// recomputed every turn instead of bloating the message history on
+	// every resume.
+	EventTurnStart EventType = "turn_start"
+
+	// EventBeforeLLMCall is triggered immediately before each model call,
+	// AFTER turn_start has assembled the messages slice. Use this for
+	// observability, cost guardrails, or auditing without contributing
+	// system messages — turn_start is the right event for the latter.
+	// The hook output is currently informational; a future extension may
+	// honor a deny verdict to short-circuit the call.
+	EventBeforeLLMCall EventType = "before_llm_call"
+
+	// EventAfterLLMCall is triggered immediately after a successful model
+	// call, BEFORE the response is recorded into the session and before
+	// any tool calls are dispatched. Receives the assistant text content
+	// in stop_response (matching the stop event). Failed model calls
+	// fire EventOnError instead.
+	EventAfterLLMCall EventType = "after_llm_call"
+
 	// EventSessionEnd is triggered when a session terminates.
 	// Can perform cleanup, logging, persist session state.
 	EventSessionEnd EventType = "session_end"
@@ -41,6 +65,21 @@ const (
 	// EventNotification is triggered when the agent emits a notification to the user,
 	// such as errors or warnings. Can send external notifications or log events.
 	EventNotification EventType = "notification"
+
+	// EventOnError is triggered specifically when the runtime hits an
+	// error during a turn (model failures, repetitive tool-call loops).
+	// Fires alongside EventNotification (level="error") so existing
+	// notification hooks keep working; on_error gives a structured entry
+	// point for users who want to react only to errors.
+	EventOnError EventType = "on_error"
+
+	// EventOnMaxIterations is triggered when the runtime reaches its
+	// configured max_iterations limit. Fires alongside EventNotification
+	// (level="warning") so existing notification hooks keep working;
+	// on_max_iterations gives a structured entry point for users who
+	// want to react only to that condition (e.g. log to a metrics
+	// pipeline rather than a chat channel).
+	EventOnMaxIterations EventType = "on_max_iterations"
 )
 
 // HookType represents the type of hook action
@@ -58,6 +97,12 @@ type Hook struct {
 
 	// Command is the shell command to execute (for command hooks)
 	Command string `json:"command,omitempty" yaml:"command,omitempty"`
+
+	// Args are arbitrary string arguments passed to the hook handler.
+	// They are interpreted by the handler kind: builtin hooks receive
+	// them as the args parameter of [BuiltinFunc]; future handler kinds
+	// (http, mcp, ...) can adopt the same field.
+	Args []string `json:"args,omitempty" yaml:"args,omitempty"`
 
 	// Timeout is the execution timeout in seconds (default: 60)
 	Timeout int `json:"timeout,omitempty" yaml:"timeout,omitempty"`
@@ -92,6 +137,20 @@ type Config struct {
 	// SessionStart hooks run when a session begins
 	SessionStart []Hook `json:"session_start,omitempty" yaml:"session_start,omitempty"`
 
+	// TurnStart hooks run at the start of every agent turn (each model
+	// call). AdditionalContext is injected transiently and never
+	// persisted to the session.
+	TurnStart []Hook `json:"turn_start,omitempty" yaml:"turn_start,omitempty"`
+
+	// BeforeLLMCall hooks run just before each model call (after
+	// turn_start). Output is informational; use turn_start to
+	// contribute system messages.
+	BeforeLLMCall []Hook `json:"before_llm_call,omitempty" yaml:"before_llm_call,omitempty"`
+
+	// AfterLLMCall hooks run just after each successful model call,
+	// before the response is recorded and tool calls dispatched.
+	AfterLLMCall []Hook `json:"after_llm_call,omitempty" yaml:"after_llm_call,omitempty"`
+
 	// SessionEnd hooks run when a session ends
 	SessionEnd []Hook `json:"session_end,omitempty" yaml:"session_end,omitempty"`
 
@@ -103,6 +162,16 @@ type Config struct {
 
 	// Notification hooks run when the agent sends a notification (error, warning) to the user
 	Notification []Hook `json:"notification,omitempty" yaml:"notification,omitempty"`
+
+	// OnError hooks run when the runtime hits an error during a turn
+	// (model failures, repetitive tool-call loops). Fires alongside
+	// Notification with level="error".
+	OnError []Hook `json:"on_error,omitempty" yaml:"on_error,omitempty"`
+
+	// OnMaxIterations hooks run when the runtime reaches its configured
+	// max_iterations limit. Fires alongside Notification with
+	// level="warning".
+	OnMaxIterations []Hook `json:"on_max_iterations,omitempty" yaml:"on_max_iterations,omitempty"`
 }
 
 // IsEmpty returns true if no hooks are configured
@@ -110,10 +179,15 @@ func (c *Config) IsEmpty() bool {
 	return len(c.PreToolUse) == 0 &&
 		len(c.PostToolUse) == 0 &&
 		len(c.SessionStart) == 0 &&
+		len(c.TurnStart) == 0 &&
+		len(c.BeforeLLMCall) == 0 &&
+		len(c.AfterLLMCall) == 0 &&
 		len(c.SessionEnd) == 0 &&
 		len(c.OnUserInput) == 0 &&
 		len(c.Stop) == 0 &&
-		len(c.Notification) == 0
+		len(c.Notification) == 0 &&
+		len(c.OnError) == 0 &&
+		len(c.OnMaxIterations) == 0
 }
 
 // Input represents the JSON input passed to hooks via stdin

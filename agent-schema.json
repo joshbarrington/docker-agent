@@ -505,6 +505,27 @@
             "$ref": "#/definitions/HookDefinition"
           }
         },
+        "turn_start": {
+          "type": "array",
+          "description": "Hooks that run at the start of every agent turn (each model call). Their AdditionalContext is appended as transient system messages for that turn only — it is NOT persisted to the session, so per-turn signals (date, prompt files) are recomputed every turn instead of bloating message history on every resume.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "before_llm_call": {
+          "type": "array",
+          "description": "Hooks that run just before each model call (after turn_start has assembled the messages). Use for observability, cost guardrails, or auditing without contributing system messages — turn_start is the right event for the latter.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "after_llm_call": {
+          "type": "array",
+          "description": "Hooks that run just after each successful model call, before the response is recorded into the session and tool calls are dispatched. Receives the assistant text content in stop_response. Failed calls fire on_error instead.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
         "session_end": {
           "type": "array",
           "description": "Hooks that run when a session ends. Can perform cleanup or logging.",
@@ -529,6 +550,20 @@
         "notification": {
           "type": "array",
           "description": "Hooks that run when the agent sends a notification (error, warning) to the user. Can send external notifications or log events.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "on_error": {
+          "type": "array",
+          "description": "Hooks that run when the runtime hits an error during a turn (model failures, repetitive tool-call loops). Fires alongside notification (level=error); use this for structured error-only handlers without parsing notification_level.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "on_max_iterations": {
+          "type": "array",
+          "description": "Hooks that run when the runtime reaches its configured max_iterations limit. Fires alongside notification (level=warning); use this for structured handlers (e.g. log to a metrics pipeline) without parsing notification_message.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
@@ -569,14 +604,22 @@
       "properties": {
         "type": {
           "type": "string",
-          "description": "Type of hook (currently only 'command' is supported)",
+          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime. The docker-agent runtime ships these builtins: 'add_date', 'add_environment_info', 'add_prompt_files'.",
           "enum": [
-            "command"
+            "command",
+            "builtin"
           ]
         },
         "command": {
           "type": "string",
-          "description": "Shell command to execute. Receives JSON input via stdin with tool/session information."
+          "description": "Shell command (type=command) or builtin name (type=builtin) to invoke. Command hooks receive JSON input via stdin with tool/session information."
+        },
+        "args": {
+          "type": "array",
+          "description": "Arbitrary string arguments passed to the hook handler. Builtin handlers receive them as a typed parameter; e.g. 'add_prompt_files' takes the list of prompt files to load.",
+          "items": {
+            "type": "string"
+          }
         },
         "timeout": {
           "type": "integer",

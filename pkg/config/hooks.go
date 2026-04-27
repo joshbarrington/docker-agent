@@ -74,11 +74,18 @@ func MergeHooks(base, cli *latest.HooksConfig) *latest.HooksConfig {
 	}
 
 	merged := &latest.HooksConfig{
-		PreToolUse:   append(append([]latest.HookMatcherConfig{}, base.PreToolUse...), cli.PreToolUse...),
-		PostToolUse:  append(append([]latest.HookMatcherConfig{}, base.PostToolUse...), cli.PostToolUse...),
-		SessionStart: append(append([]latest.HookDefinition{}, base.SessionStart...), cli.SessionStart...),
-		SessionEnd:   append(append([]latest.HookDefinition{}, base.SessionEnd...), cli.SessionEnd...),
-		OnUserInput:  append(append([]latest.HookDefinition{}, base.OnUserInput...), cli.OnUserInput...),
+		PreToolUse:      append(append([]latest.HookMatcherConfig{}, base.PreToolUse...), cli.PreToolUse...),
+		PostToolUse:     append(append([]latest.HookMatcherConfig{}, base.PostToolUse...), cli.PostToolUse...),
+		SessionStart:    append(append([]latest.HookDefinition{}, base.SessionStart...), cli.SessionStart...),
+		TurnStart:       append(append([]latest.HookDefinition{}, base.TurnStart...), cli.TurnStart...),
+		BeforeLLMCall:   append(append([]latest.HookDefinition{}, base.BeforeLLMCall...), cli.BeforeLLMCall...),
+		AfterLLMCall:    append(append([]latest.HookDefinition{}, base.AfterLLMCall...), cli.AfterLLMCall...),
+		SessionEnd:      append(append([]latest.HookDefinition{}, base.SessionEnd...), cli.SessionEnd...),
+		OnUserInput:     append(append([]latest.HookDefinition{}, base.OnUserInput...), cli.OnUserInput...),
+		Stop:            append(append([]latest.HookDefinition{}, base.Stop...), cli.Stop...),
+		Notification:    append(append([]latest.HookDefinition{}, base.Notification...), cli.Notification...),
+		OnError:         append(append([]latest.HookDefinition{}, base.OnError...), cli.OnError...),
+		OnMaxIterations: append(append([]latest.HookDefinition{}, base.OnMaxIterations...), cli.OnMaxIterations...),
 	}
 	return merged
 }

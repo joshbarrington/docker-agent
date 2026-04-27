@@ -194,6 +194,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 
 				maxIterMsg := fmt.Sprintf("Maximum iterations reached (%d)", runtimeMaxIterations)
 				r.executeNotificationHooks(ctx, a, sess.ID, "warning", maxIterMsg)
+				r.executeOnMaxIterationsHooks(ctx, a, sess.ID, maxIterMsg)
 				r.executeOnUserInputHooks(ctx, sess.ID, "max iterations reached")
 
 				// In non-interactive mode (e.g. MCP server), auto-stop instead of
@@ -310,7 +311,14 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 				r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeSteer, events)
 			}
 
-			messages := sess.GetMessages(a)
+			// Run turn_start hooks BEFORE building messages so their
+			// AdditionalContext can be spliced after the invariant cache
+			// checkpoint and before the conversation history. The hook
+			// output is not persisted to the session, so per-turn signals
+			// (date, prompt files) refresh every turn without bloating the
+			// stored history.
+			turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
+			messages := sess.GetMessages(a, turnStartMsgs...)
 			slog.Debug("Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
 
 			// Strip image content from messages if the model doesn't support image input.
@@ -319,6 +327,11 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 			if m != nil && len(m.Modalities.Input) > 0 && !slices.Contains(m.Modalities.Input, "image") {
 				messages = stripImageContent(messages)
 			}
+
+			// before_llm_call hooks fire just before the model is invoked.
+			// They are observational only (no deny semantics today); use
+			// turn_start to contribute system messages.
+			r.executeBeforeLLMCallHooks(ctx, sess, a)
 
 			// Try primary model with fallback chain if configured
 			res, usedModel, err := r.tryModelWithFallback(streamCtx, a, model, messages, agentTools, sess, m, events)
@@ -367,12 +380,19 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 				errMsg := modelerrors.FormatError(err)
 				events <- Error(errMsg)
 				r.executeNotificationHooks(ctx, a, sess.ID, "error", errMsg)
+				r.executeOnErrorHooks(ctx, a, sess.ID, errMsg)
 				streamSpan.End()
 				return
 			}
 
 			// A successful model call resets the overflow compaction counter.
 			overflowCompactions = 0
+
+			// after_llm_call hooks fire on success only; failed calls
+			// fire on_error above. The assistant text content is passed
+			// via stop_response, matching the stop event's payload, so
+			// handlers can reuse the same parsing.
+			r.executeAfterLLMCallHooks(ctx, sess, a, res.Content)
 
 			if usedModel != nil && usedModel.ID() != model.ID() {
 				slog.Info("Used fallback model", "agent", a.Name(), "primary", model.ID(), "used", usedModel.ID())
@@ -427,6 +447,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 					loopDetector.consecutive, toolName)
 				events <- Error(errMsg)
 				r.executeNotificationHooks(ctx, a, sess.ID, "error", errMsg)
+				r.executeOnErrorHooks(ctx, a, sess.ID, errMsg)
 				loopDetector.reset()
 				return
 			}

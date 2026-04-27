@@ -10,84 +10,54 @@ func FromConfig(cfg *latest.HooksConfig) *Config {
 		return nil
 	}
 
-	result := &Config{}
-
-	// Convert PreToolUse
-	for _, matcher := range cfg.PreToolUse {
-		mc := MatcherConfig{
-			Matcher: matcher.Matcher,
-			Hooks:   make([]Hook, 0, len(matcher.Hooks)),
-		}
-		for _, h := range matcher.Hooks {
-			mc.Hooks = append(mc.Hooks, Hook{
-				Type:    HookType(h.Type),
-				Command: h.Command,
-				Timeout: h.Timeout,
-			})
-		}
-		result.PreToolUse = append(result.PreToolUse, mc)
+	result := &Config{
+		PreToolUse:      convertMatchers(cfg.PreToolUse),
+		PostToolUse:     convertMatchers(cfg.PostToolUse),
+		SessionStart:    convertDefinitions(cfg.SessionStart),
+		TurnStart:       convertDefinitions(cfg.TurnStart),
+		BeforeLLMCall:   convertDefinitions(cfg.BeforeLLMCall),
+		AfterLLMCall:    convertDefinitions(cfg.AfterLLMCall),
+		SessionEnd:      convertDefinitions(cfg.SessionEnd),
+		OnUserInput:     convertDefinitions(cfg.OnUserInput),
+		Stop:            convertDefinitions(cfg.Stop),
+		Notification:    convertDefinitions(cfg.Notification),
+		OnError:         convertDefinitions(cfg.OnError),
+		OnMaxIterations: convertDefinitions(cfg.OnMaxIterations),
 	}
-
-	// Convert PostToolUse
-	for _, matcher := range cfg.PostToolUse {
-		mc := MatcherConfig{
-			Matcher: matcher.Matcher,
-			Hooks:   make([]Hook, 0, len(matcher.Hooks)),
-		}
-		for _, h := range matcher.Hooks {
-			mc.Hooks = append(mc.Hooks, Hook{
-				Type:    HookType(h.Type),
-				Command: h.Command,
-				Timeout: h.Timeout,
-			})
-		}
-		result.PostToolUse = append(result.PostToolUse, mc)
-	}
-
-	// Convert SessionStart
-	for _, h := range cfg.SessionStart {
-		result.SessionStart = append(result.SessionStart, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert SessionEnd
-	for _, h := range cfg.SessionEnd {
-		result.SessionEnd = append(result.SessionEnd, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert OnUserInput
-	for _, h := range cfg.OnUserInput {
-		result.OnUserInput = append(result.OnUserInput, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert Stop
-	for _, h := range cfg.Stop {
-		result.Stop = append(result.Stop, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert Notification
-	for _, h := range cfg.Notification {
-		result.Notification = append(result.Notification, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
 	return result
+}
+
+// convertMatchers converts a slice of [latest.HookMatcherConfig] entries into
+// the internal [MatcherConfig] shape. Returns nil for an empty input so the
+// caller's per-event slice stays nil-typed when nothing is configured.
+func convertMatchers(in []latest.HookMatcherConfig) []MatcherConfig {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]MatcherConfig, 0, len(in))
+	for _, matcher := range in {
+		out = append(out, MatcherConfig{
+			Matcher: matcher.Matcher,
+			Hooks:   convertDefinitions(matcher.Hooks),
+		})
+	}
+	return out
+}
+
+// convertDefinitions converts a slice of [latest.HookDefinition] into the
+// internal [Hook] shape. Returns nil for an empty input.
+func convertDefinitions(in []latest.HookDefinition) []Hook {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Hook, 0, len(in))
+	for _, h := range in {
+		out = append(out, Hook{
+			Type:    HookType(h.Type),
+			Command: h.Command,
+			Args:    h.Args,
+			Timeout: h.Timeout,
+		})
+	}
+	return out
 }

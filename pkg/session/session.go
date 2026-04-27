@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
-	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -767,58 +766,6 @@ func buildInvariantSystemMessages(a *agent.Agent) []chat.Message {
 	return messages
 }
 
-// buildContextSpecificSystemMessages builds system messages that vary
-// per user, project, or time. These messages should come after
-// the invariant checkpoint to maintain optimal caching behavior.
-//
-// These messages depend on runtime context (working directory, current date,
-// user-specific skills) and cannot be cached across sessions or users.
-// Note: Session summary is handled separately in buildSessionSummaryMessages.
-func buildContextSpecificSystemMessages(a *agent.Agent, s *Session) []chat.Message {
-	var messages []chat.Message
-
-	if a.AddDate() {
-		messages = append(messages, chat.Message{
-			Role:    chat.MessageRoleSystem,
-			Content: "Today's date: " + time.Now().Format("2006-01-02"),
-		})
-	}
-
-	wd := s.WorkingDir
-	if wd == "" {
-		var err error
-		wd, err = os.Getwd()
-		if err != nil {
-			slog.Error("getting current working directory for environment info", "error", err)
-		}
-	}
-	if wd != "" {
-		if a.AddEnvironmentInfo() {
-			messages = append(messages, chat.Message{
-				Role:    chat.MessageRoleSystem,
-				Content: getEnvironmentInfo(wd),
-			})
-		}
-
-		for _, prompt := range a.AddPromptFiles() {
-			additionalPrompts, err := readPromptFiles(wd, prompt)
-			if err != nil {
-				slog.Error("reading prompt file", "file", prompt, "error", err)
-				continue
-			}
-
-			for _, additionalPrompt := range additionalPrompts {
-				messages = append(messages, chat.Message{
-					Role:    chat.MessageRoleSystem,
-					Content: additionalPrompt,
-				})
-			}
-		}
-	}
-
-	return messages
-}
-
 // buildSessionSummaryMessages builds system messages containing the session summary
 // if one exists. Session summaries are context-specific per session and thus should not have a checkpoint (they will be cached alongside the first user message anyway)
 //
@@ -861,16 +808,12 @@ func buildSessionSummaryMessages(items []Item) ([]chat.Message, int) {
 	return messages, startIndex
 }
 
-func (s *Session) GetMessages(a *agent.Agent) []chat.Message {
+func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Message) []chat.Message {
 	slog.Debug("Getting messages for agent", "agent", a.Name(), "session_id", s.ID)
 
 	// Build invariant system messages (cacheable across sessions/users/projects)
 	invariantMessages := buildInvariantSystemMessages(a)
 	markLastMessageAsCacheControl(invariantMessages)
-
-	// Build context-specific system messages (vary per user/project/time)
-	contextMessages := buildContextSpecificSystemMessages(a, s)
-	markLastMessageAsCacheControl(contextMessages)
 
 	// Take a snapshot of Messages under the lock, copying Message structs
 	// to avoid racing with UpdateMessage which may modify the pointed-to objects.
@@ -890,7 +833,19 @@ func (s *Session) GetMessages(a *agent.Agent) []chat.Message {
 
 	var messages []chat.Message
 	messages = append(messages, invariantMessages...)
-	messages = append(messages, contextMessages...)
+	// extraSystemMessages are caller-supplied transient system messages
+	// (e.g. turn_start hook output) inserted after the invariant cache
+	// checkpoint and before the conversation. The last extra carries a
+	// cache_control marker so that stable per-session/per-day extras
+	// (AddPromptFiles, AddEnvironmentInfo) participate in prompt caching.
+	// Volatile extras (the daily date) live behind the same marker, which
+	// is acceptable: the cache simply rotates when the date rolls over,
+	// matching the behavior of the previous inline
+	// buildContextSpecificSystemMessages path.
+	if len(extraSystemMessages) > 0 {
+		messages = append(messages, extraSystemMessages...)
+		markLastMessageAsCacheControl(messages[len(messages)-len(extraSystemMessages):])
+	}
 	messages = append(messages, summaryMessages...)
 
 	// Begin adding conversation messages

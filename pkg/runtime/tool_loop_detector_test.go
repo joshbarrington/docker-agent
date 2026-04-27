@@ -185,3 +185,37 @@ func TestToolLoopDetector(t *testing.T) {
 		})
 	}
 }
+
+func TestToolLoopDetector_Reset(t *testing.T) {
+	calls := []tools.ToolCall{{
+		Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"a.txt"}`},
+	}}
+
+	d := newToolLoopDetector(3)
+	d.record(calls)
+	d.record(calls)
+	if d.consecutive != 2 {
+		t.Fatalf("consecutive = %d, want 2 before reset", d.consecutive)
+	}
+	if d.lastSignature == "" {
+		t.Fatalf("lastSignature should be populated before reset")
+	}
+
+	d.reset()
+
+	if d.consecutive != 0 {
+		t.Errorf("consecutive = %d, want 0 after reset", d.consecutive)
+	}
+	if d.lastSignature != "" {
+		t.Errorf("lastSignature = %q, want empty after reset", d.lastSignature)
+	}
+
+	// After reset, identical calls should restart counting from 1, not
+	// continue from the pre-reset count.
+	if tripped := d.record(calls); tripped {
+		t.Errorf("detector tripped on first call after reset; counter not cleared")
+	}
+	if d.consecutive != 1 {
+		t.Errorf("consecutive = %d, want 1 after first record post-reset", d.consecutive)
+	}
+}

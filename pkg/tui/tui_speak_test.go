@@ -3,58 +3,43 @@ package tui
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
-
-	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
-// fakeTranscriber is a controllable implementation of the Transcriber interface
-// used to exercise the speech-to-text handlers without touching audio hardware
-// or network.
+// fakeTranscriber is a controllable implementation of the Transcriber
+// interface used to exercise the speech-to-text handlers without touching
+// audio hardware or network. It is intentionally lock-free: the TUI runs the
+// transcriber on the single Bubble Tea event-loop goroutine, so concurrent
+// access from production code is not a concern, and tests interact with it
+// strictly after each handler call returns.
 type fakeTranscriber struct {
-	mu          sync.Mutex
-	supported   bool
-	startErr    error
-	running     bool
-	startCalls  int
-	stopCalls   int
-	lastHandler transcribe.TranscriptHandler
+	supported  bool
+	startErr   error
+	running    bool
+	startCalls int
+	stopCalls  int
 }
 
-func (f *fakeTranscriber) IsSupported() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.supported
-}
+func (f *fakeTranscriber) IsSupported() bool { return f.supported }
+func (f *fakeTranscriber) IsRunning() bool   { return f.running }
 
-func (f *fakeTranscriber) IsRunning() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.running
-}
-
-func (f *fakeTranscriber) Start(_ context.Context, handler transcribe.TranscriptHandler) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+func (f *fakeTranscriber) Start(_ context.Context, _ transcribe.TranscriptHandler) error {
 	f.startCalls++
 	if f.startErr != nil {
 		return f.startErr
 	}
 	f.running = true
-	f.lastHandler = handler
 	return nil
 }
 
 func (f *fakeTranscriber) Stop() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.stopCalls++
 	f.running = false
 }
@@ -104,13 +89,20 @@ func TestHandleStartSpeak_ReturnsErrorNotificationOnStartFailure(t *testing.T) {
 		t.Errorf("Start should be called exactly once; got %d", ft.startCalls)
 	}
 	if m.transcriptCh != nil {
-		t.Errorf("transcriptCh should be cleared after a failed Start")
+		t.Error("transcriptCh should be cleared after a failed Start")
 	}
 
-	// The returned cmd should produce an error notification.
+	// The returned cmd should produce an error notification.ShowMsg.
 	msg := cmd()
-	if !containsErrorNotification(msg) {
-		t.Errorf("expected an error notification.ShowMsg, got %#v", msg)
+	show, ok := msg.(notification.ShowMsg)
+	if !ok {
+		t.Fatalf("expected notification.ShowMsg, got %T (%v)", msg, msg)
+	}
+	if show.Type != notification.TypeError {
+		t.Errorf("expected notification of TypeError, got %v", show.Type)
+	}
+	if show.Text == "" {
+		t.Error("error notification should carry a non-empty Text")
 	}
 }
 
@@ -131,8 +123,7 @@ func TestHandleStopSpeak_StopsAndNotifies(t *testing.T) {
 	ft := &fakeTranscriber{running: true}
 	m := newSpeakTestModel(ft)
 	// Pretend a previous start opened a channel.
-	ch := make(chan string, 1)
-	m.transcriptCh = ch
+	m.transcriptCh = make(chan string, 1)
 
 	_, cmd := m.handleStopSpeak()
 	if cmd == nil {
@@ -142,14 +133,6 @@ func TestHandleStopSpeak_StopsAndNotifies(t *testing.T) {
 		t.Errorf("Stop should be called exactly once; got %d", ft.stopCalls)
 	}
 	if m.transcriptCh != nil {
-		t.Errorf("transcriptCh should be cleared after Stop")
+		t.Error("transcriptCh should be cleared after Stop")
 	}
-}
-
-// containsErrorNotification returns true when the message is a non-nil
-// notification (any type). It deliberately stays lightweight: the speak
-// handler only emits a single notification.ErrorCmd in this code path so
-// we just check that *something* was emitted.
-func containsErrorNotification(msg tea.Msg) bool {
-	return msg != nil
 }

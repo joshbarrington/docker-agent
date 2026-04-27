@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // editorPrefixes maps a binary-name prefix (e.g. "code") to a friendly display
@@ -69,7 +71,12 @@ func FromEnv(visual, editorEnv string) string {
 	}
 
 	if baseName != "" {
-		return strings.ToUpper(baseName[:1]) + baseName[1:]
+		// Capitalize the first rune (not byte) so that names beginning with
+		// multi-byte UTF-8 characters survive the round-trip.
+		r, size := utf8.DecodeRuneInString(baseName)
+		if r != utf8.RuneError {
+			return string(unicode.ToUpper(r)) + baseName[size:]
+		}
 	}
 
 	return "$EDITOR"

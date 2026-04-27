@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -232,20 +233,10 @@ func TestFormatWindowTitle(t *testing.T) {
 				t.Errorf("formatWindowTitle = %q, want %q", got, tt.wantEquals)
 			}
 			for _, sub := range tt.wantContains {
-				if !contains(got, sub) {
+				if !strings.Contains(got, sub) {
 					t.Errorf("formatWindowTitle = %q, want to contain %q", got, sub)
 				}
 			}
 		})
 	}
-}
-
-// contains is a small helper to avoid importing strings in this test file.
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

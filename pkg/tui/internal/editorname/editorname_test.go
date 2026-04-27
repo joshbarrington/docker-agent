@@ -125,6 +125,12 @@ func TestFromEnv(t *testing.T) {
 			editorEnv: "zed --wait",
 			want:      "Zed",
 		},
+		{
+			name:      "Unknown editor with multi-byte first rune",
+			visual:    "",
+			editorEnv: "édit", // U+00E9 (é) is 2 bytes in UTF-8.
+			want:      "Édit", // First rune capitalised, rest preserved.
+		},
 	}
 
 	for _, tt := range tests {

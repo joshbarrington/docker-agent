@@ -41,11 +41,21 @@ func TestConvertMultiContent(t *testing.T) {
 			wantCount: 2,
 		},
 		{
-			name: "image without URL",
+			name: "image with nil URL produces no part",
 			multiContent: []chat.MessagePart{
 				{Type: chat.MessagePartTypeImageURL, ImageURL: nil},
 			},
-			wantCount: 1,
+			wantCount: 0,
+		},
+		{
+			// The converter forwards all parts as-is; normalizeMessageContent in the
+			// session layer strips whitespace-only text parts before real usage.
+			name: "whitespace-only text part forwarded as-is",
+			multiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: "   "},
+				{Type: chat.MessagePartTypeText, Text: "hello"},
+			},
+			wantCount: 2,
 		},
 	}
 

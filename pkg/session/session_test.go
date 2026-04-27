@@ -574,3 +574,122 @@ func TestTransferTaskPromptExcludesParents(t *testing.T) {
 	assert.Contains(t, subAgentMsg, "librarian", "should list librarian as a valid sub-agent")
 	assert.NotContains(t, subAgentMsg, "planner", "should NOT list parent agent planner as a valid transfer target")
 }
+
+func TestNormalizeMessageContent(t *testing.T) {
+	t.Parallel()
+
+	img := chat.MessagePart{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,AAAA"}}
+
+	tests := []struct {
+		name  string
+		input []chat.Message
+		want  []chat.Message
+	}{
+		{
+			name:  "empty input",
+			input: nil,
+			want:  nil,
+		},
+		{
+			name: "whitespace-only user message dropped",
+			input: []chat.Message{
+				{Role: chat.MessageRoleUser, Content: "   \n\t  "},
+			},
+			want: nil,
+		},
+		{
+			name: "whitespace-only system message dropped",
+			input: []chat.Message{
+				{Role: chat.MessageRoleSystem, Content: "  "},
+			},
+			want: nil,
+		},
+		{
+			name: "whitespace-only assistant message dropped",
+			input: []chat.Message{
+				{Role: chat.MessageRoleAssistant, Content: "\t\n"},
+			},
+			want: nil,
+		},
+		{
+			name: "assistant with empty content but tool calls is kept",
+			input: []chat.Message{
+				{Role: chat.MessageRoleAssistant, Content: "", ToolCalls: []tools.ToolCall{{ID: "tc1"}}},
+			},
+			want: []chat.Message{
+				{Role: chat.MessageRoleAssistant, Content: "", ToolCalls: []tools.ToolCall{{ID: "tc1"}}},
+			},
+		},
+		{
+			name: "tool result always forwarded even if whitespace-only",
+			input: []chat.Message{
+				{Role: chat.MessageRoleTool, Content: "   ", ToolCallID: "t1"},
+			},
+			want: []chat.Message{
+				{Role: chat.MessageRoleTool, Content: "   ", ToolCallID: "t1"},
+			},
+		},
+		{
+			name: "non-empty messages preserved verbatim including leading/trailing space",
+			input: []chat.Message{
+				{Role: chat.MessageRoleUser, Content: "  hello  "},
+			},
+			want: []chat.Message{
+				{Role: chat.MessageRoleUser, Content: "  hello  "},
+			},
+		},
+		{
+			name: "whitespace-only text part stripped from MultiContent",
+			input: []chat.Message{
+				{Role: chat.MessageRoleUser, MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "   "},
+					img,
+				}},
+			},
+			want: []chat.Message{
+				{Role: chat.MessageRoleUser, MultiContent: []chat.MessagePart{img}},
+			},
+		},
+		{
+			name: "message dropped when all MultiContent parts are whitespace-only text",
+			input: []chat.Message{
+				{Role: chat.MessageRoleUser, MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "   "},
+					{Type: chat.MessagePartTypeText, Text: "\t"},
+				}},
+			},
+			want: nil,
+		},
+		{
+			name: "image-only MultiContent message preserved",
+			input: []chat.Message{
+				{Role: chat.MessageRoleUser, MultiContent: []chat.MessagePart{img}},
+			},
+			want: []chat.Message{
+				{Role: chat.MessageRoleUser, MultiContent: []chat.MessagePart{img}},
+			},
+		},
+		{
+			name: "mix: valid and whitespace messages",
+			input: []chat.Message{
+				{Role: chat.MessageRoleSystem, Content: "be helpful"},
+				{Role: chat.MessageRoleUser, Content: "  "},
+				{Role: chat.MessageRoleUser, Content: "hello"},
+				{Role: chat.MessageRoleTool, Content: "", ToolCallID: "t1"},
+			},
+			want: []chat.Message{
+				{Role: chat.MessageRoleSystem, Content: "be helpful"},
+				{Role: chat.MessageRoleUser, Content: "hello"},
+				{Role: chat.MessageRoleTool, Content: "", ToolCallID: "t1"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeMessageContent(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

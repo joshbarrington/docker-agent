@@ -22,9 +22,20 @@ const (
 	// patterns like a tool-call loop detector.
 	EventPostToolUse EventType = "post_tool_use"
 	// EventPermissionRequest fires just before the runtime would prompt
-	// the user to confirm a tool call. Hook may auto-allow or auto-deny
-	// via [HookSpecificOutput.PermissionDecision]; otherwise control
-	// falls through to the interactive confirmation.
+	// the user to confirm a tool call (i.e. when neither --yolo nor a
+	// permissions rule short-circuited the decision and the tool is not
+	// read-only). The hook can short-circuit the prompt by returning
+	// [HookSpecificOutput.PermissionDecision] = "allow" (sets
+	// [Result.PermissionAllowed] true — the runtime invokes the tool
+	// without asking) or "deny" (sets [Result.Allowed] false — the
+	// runtime rejects the tool with the hook's reason). Returning
+	// nothing falls through to the interactive confirmation.
+	//
+	// Unlike pre_tool_use — where allow is the implicit default and only
+	// deny carries new information — here allow is the explicit
+	// auto-approve verdict; that asymmetry is why permission_request
+	// has its own [Result.PermissionAllowed] flag separate from
+	// [Result.Allowed].
 	EventPermissionRequest EventType = "permission_request"
 	// EventSessionStart fires when a session begins or resumes.
 	EventSessionStart EventType = "session_start"

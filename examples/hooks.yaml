@@ -46,6 +46,12 @@
 #               add_recent_commits    (session_start; args = ["<N>"], default 10)
 #               max_iterations        (before_llm_call; args = ["<N>"], hard stop)
 #
+# Requirements: the command-style hooks below pipe stdin through `jq` for
+# convenient JSON access. If you don't have jq installed (`brew install jq`
+# on macOS, `apt-get install jq` on Debian/Ubuntu), a hook will exit non-zero
+# and the runtime will log a 'Hook execution error' warning but otherwise
+# continue — use plain `awk`/`sed`/`grep` or any other parser if you prefer.
+#
 # Try these prompts:
 #   "Run: echo hello"           → allowed
 #   "Run: rm -rf /tmp/test"     → denied by pre_tool_use

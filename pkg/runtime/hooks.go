@@ -429,4 +429,3 @@ func (r *LocalRuntime) executeSubagentStopHooks(ctx context.Context, parent, chi
 		StopResponse:    response,
 	}, nil)
 }
-

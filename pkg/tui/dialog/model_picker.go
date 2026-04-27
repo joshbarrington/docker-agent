@@ -28,20 +28,10 @@ type modelPickerDialog struct {
 	models   []runtime.ModelChoice
 	filtered []runtime.ModelChoice
 	errMsg   string // validation error message
-
-	// cached grouped list, rebuilt on every render so the layout used by
-	// View() is shared with mouse hit-testing and findSelectedLine.
-	cached *groupedList
 }
 
 // Model picker dialog dimension constants
 const (
-	pickerWidthPercent  = 80
-	pickerMinWidth      = 50
-	pickerMaxWidth      = 100
-	pickerHeightPercent = 70
-	pickerMaxHeight     = 150
-
 	// Column widths for the per-row stats. Values are right-aligned in their
 	// own column so the list reads like a table.
 	pickerInputColWidth   = 10
@@ -92,8 +82,7 @@ func NewModelPickerDialog(models []runtime.ModelChoice) Dialog {
 	d.textInput.CharLimit = 100
 
 	// Sort models: config first, then catalog, then custom.
-	sortedModels := make([]runtime.ModelChoice, len(models))
-	copy(sortedModels, models)
+	sortedModels := slices.Clone(models)
 	slices.SortFunc(sortedModels, func(a, b runtime.ModelChoice) int {
 		return comparePickerSortKeys(modelSortKeys(a), modelSortKeys(b))
 	})
@@ -119,12 +108,10 @@ func modelSortKeys(m runtime.ModelChoice) pickerSortKeys {
 	}
 }
 
-func (d *modelPickerDialog) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (d *modelPickerDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end
+	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end.
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -135,23 +122,13 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.PasteMsg:
-		var cmd tea.Cmd
-		d.textInput, cmd = d.textInput.Update(msg)
-		d.filterModels()
-		d.errMsg = ""
+		cmd := d.handleInputChange(msg)
 		return d, cmd
 
 	case tea.MouseClickMsg:
-		// Scrollbar clicks handled above; this handles list item clicks
-		if msg.Button == tea.MouseLeft {
-			if modelIdx := d.mouseListIndex(msg.Y, d.lineToModelIndex); modelIdx >= 0 {
-				if d.recordClick(modelIdx) {
-					d.selected = modelIdx
-					cmd := d.handleSelection()
-					return d, cmd
-				}
-				d.selected = modelIdx
-			}
+		if dbl, _ := d.handleListClick(msg, d.lineToModelIndex); dbl {
+			cmd := d.handleSelection()
+			return d, cmd
 		}
 		return d, nil
 
@@ -159,34 +136,20 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
-
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
 			return d, closeDialogCmd()
-
 		case key.Matches(msg, d.keyMap.Up):
-			if d.selected > 0 {
-				d.selected--
-				d.scrollview.EnsureLineVisible(d.findSelectedLine())
-			}
+			d.navigate(-1, len(d.filtered), d.findSelectedLine)
 			return d, nil
-
 		case key.Matches(msg, d.keyMap.Down):
-			if d.selected < len(d.filtered)-1 {
-				d.selected++
-				d.scrollview.EnsureLineVisible(d.findSelectedLine())
-			}
+			d.navigate(+1, len(d.filtered), d.findSelectedLine)
 			return d, nil
-
 		case key.Matches(msg, d.keyMap.Enter):
 			cmd := d.handleSelection()
 			return d, cmd
-
 		default:
-			var cmd tea.Cmd
-			d.textInput, cmd = d.textInput.Update(msg)
-			d.filterModels()
-			d.errMsg = ""
+			cmd := d.handleInputChange(msg)
 			return d, cmd
 		}
 	}
@@ -194,67 +157,62 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
-// buildList rebuilds the cached grouped list of models, including the
-// catalog/custom separators. Pass contentWidth=0 to compute the layout
-// without producing rendered content (for find/hit-test paths).
+// handleInputChange forwards msg to the text input, re-runs the filter, and
+// clears any validation error from a previous submission.
+func (d *modelPickerDialog) handleInputChange(msg tea.Msg) tea.Cmd {
+	return d.updateInput(msg, func() {
+		d.filterModels()
+		d.errMsg = ""
+	})
+}
+
+// buildList constructs the list of models with section separators between
+// the (config -> catalog -> custom) groups. Pass contentWidth=0 to compute
+// the layout without rendering items (used by mouse hit-testing and
+// findSelectedLine).
 func (d *modelPickerDialog) buildList(contentWidth int) *groupedList {
 	gl := newGroupedList()
 
-	hasConfigModels := false
-	hasCatalogModels := false
+	hasConfig := false
+	hasCatalog := false
 	for _, m := range d.filtered {
 		switch {
 		case m.IsCustom:
-			// Custom models don't affect separator logic for config/catalog
+			// Custom models don't affect the catalog/config separator logic.
 		case m.IsCatalog:
-			hasCatalogModels = true
+			hasCatalog = true
 		default:
-			hasConfigModels = true
+			hasConfig = true
 		}
 	}
 
-	catalogSeparatorShown := false
-	customSeparatorShown := false
-
+	catalogSepShown := false
+	customSepShown := false
 	for i, model := range d.filtered {
-		if model.IsCatalog && !model.IsCustom && !catalogSeparatorShown {
-			if hasConfigModels {
+		if model.IsCatalog && !model.IsCustom && !catalogSepShown {
+			if hasConfig {
 				gl.AddNonItem(RenderGroupSeparator(catalogSeparatorLabel, contentWidth))
 			}
-			catalogSeparatorShown = true
+			catalogSepShown = true
 		}
-		if model.IsCustom && !customSeparatorShown {
-			if hasConfigModels || hasCatalogModels {
+		if model.IsCustom && !customSepShown {
+			if hasConfig || hasCatalog {
 				gl.AddNonItem(RenderGroupSeparator(customSeparatorLabel, contentWidth))
 			}
-			customSeparatorShown = true
+			customSepShown = true
 		}
-		if contentWidth > 0 {
-			gl.AddItem(d.renderModel(model, i == d.selected, contentWidth))
-		} else {
-			gl.AddItem("")
-		}
+		gl.AddItem(d.renderModel(model, i == d.selected, contentWidth))
 	}
 
-	d.cached = gl
 	return gl
 }
 
-// lineToModelIndex returns the model index for a rendered line, or -1 for
-// separators. Used by mouse hit-testing.
 func (d *modelPickerDialog) lineToModelIndex(line int) int {
-	if d.cached == nil {
-		d.buildList(0)
-	}
-	return d.cached.ItemForLine(line)
+	return d.buildList(0).ItemForLine(line)
 }
 
-// findSelectedLine returns the line index for the currently selected model.
 func (d *modelPickerDialog) findSelectedLine() int {
-	if d.cached == nil {
-		d.buildList(0)
-	}
-	return d.cached.LineForItem(d.selected)
+	return d.buildList(0).LineForItem(d.selected)
 }
 
 func (d *modelPickerDialog) handleSelection() tea.Cmd {
@@ -361,7 +319,6 @@ func (d *modelPickerDialog) filterModels() {
 		d.selected = max(0, len(d.filtered)-1)
 	}
 	d.scrollview.SetScrollOffset(0)
-	d.cached = nil
 }
 
 func (d *modelPickerDialog) View() string {
@@ -439,6 +396,9 @@ func pickerRowStyles(selected bool) pickerRowPalette {
 }
 
 func (d *modelPickerDialog) renderModel(model runtime.ModelChoice, selected bool, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
 	p := pickerRowStyles(selected)
 	nameWidth := pickerNameColWidth(maxWidth)
 	return renderRowName(model, nameWidth, p) + renderRowStats(model, p)

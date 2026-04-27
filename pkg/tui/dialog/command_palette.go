@@ -29,38 +29,29 @@ type commandPaletteDialog struct {
 	filtered   []commands.Item
 }
 
-// Command palette dialog dimension constants
-const (
-	paletteWidthPercent  = 80
-	paletteMinWidth      = 50
-	paletteMaxWidth      = 80
-	paletteHeightPercent = 70
-	paletteMaxHeight     = 30
-
-	// paletteListOverhead = title(1) + space(1) + input(1) + separator(1) +
-	// space(1) + help(1) + borders/padding(2)
-	paletteListOverhead = 8
-
-	// paletteListStartY = border(1) + padding(1) + title(1) + space(1) +
-	// input(1) + separator(1)
-	paletteListStartY = 6
-)
-
-// commandPalettePickerLayout is the layout used by the command palette.
-var commandPalettePickerLayout = pickerLayout{
-	WidthPercent:    paletteWidthPercent,
-	MinWidth:        paletteMinWidth,
-	MaxWidth:        paletteMaxWidth,
-	HeightPercent:   paletteHeightPercent,
-	MaxHeight:       paletteMaxHeight,
-	ListOverhead:    paletteListOverhead,
-	ListStartOffset: paletteListStartY,
+// commandPaletteLayout is the layout used by the command palette.
+//
+// ListOverhead = title(1) + space(1) + input(1) + separator(1) + space(1) +
+//
+//	help(1) + borders/padding(2) = 8
+//
+// ListStartOffset = border(1) + padding(1) + title(1) + space(1) + input(1) +
+//
+//	separator(1) = 6
+var commandPaletteLayout = pickerLayout{
+	WidthPercent:    80,
+	MinWidth:        50,
+	MaxWidth:        80,
+	HeightPercent:   70,
+	MaxHeight:       30,
+	ListOverhead:    8,
+	ListStartOffset: 6,
 }
 
-// NewCommandPaletteDialog creates a new command palette dialog
+// NewCommandPaletteDialog creates a new command palette dialog.
 func NewCommandPaletteDialog(categories []commands.Category) Dialog {
 	d := &commandPaletteDialog{
-		pickerCore: newPickerCore(commandPalettePickerLayout, "Type to search commands…"),
+		pickerCore: newPickerCore(commandPaletteLayout, "Type to search commands…"),
 		categories: categories,
 	}
 	d.textInput.CharLimit = 100
@@ -68,12 +59,8 @@ func NewCommandPaletteDialog(categories []commands.Category) Dialog {
 	return d
 }
 
-// Init initializes the command palette dialog
-func (d *commandPaletteDialog) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (d *commandPaletteDialog) Init() tea.Cmd { return textinput.Blink }
 
-// Update handles messages for the command palette dialog
 func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end
 	if handled, cmd := d.scrollview.Update(msg); handled {
@@ -86,22 +73,14 @@ func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.PasteMsg:
-		var cmd tea.Cmd
-		d.textInput, cmd = d.textInput.Update(msg)
-		d.filterCommands()
+		cmd := d.updateInput(msg, d.filterCommands)
 		return d, cmd
 
 	case tea.MouseClickMsg:
-		// Scrollbar clicks already handled above; this handles list item clicks
-		if msg.Button == tea.MouseLeft {
-			if cmdIdx := d.mouseListIndex(msg.Y, d.lineToCmdIndex); cmdIdx >= 0 {
-				if d.recordClick(cmdIdx) {
-					d.selected = cmdIdx
-					cmd := d.executeSelected()
-					return d, cmd
-				}
-				d.selected = cmdIdx
-			}
+		// Scrollbar clicks already handled above; this handles list item clicks.
+		if dbl, _ := d.handleListClick(msg, d.lineToCmdIndex); dbl {
+			cmd := d.executeSelected()
+			return d, cmd
 		}
 		return d, nil
 
@@ -109,33 +88,20 @@ func (d *commandPaletteDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
-
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
 			return d, closeDialogCmd()
-
 		case key.Matches(msg, d.keyMap.Up):
-			if d.selected > 0 {
-				d.selected--
-				d.scrollview.EnsureLineVisible(d.findSelectedLine())
-			}
+			d.navigate(-1, len(d.filtered), d.findSelectedLine)
 			return d, nil
-
 		case key.Matches(msg, d.keyMap.Down):
-			if d.selected < len(d.filtered)-1 {
-				d.selected++
-				d.scrollview.EnsureLineVisible(d.findSelectedLine())
-			}
+			d.navigate(+1, len(d.filtered), d.findSelectedLine)
 			return d, nil
-
 		case key.Matches(msg, d.keyMap.Enter):
 			cmd := d.executeSelected()
 			return d, cmd
-
 		default:
-			var cmd tea.Cmd
-			d.textInput, cmd = d.textInput.Update(msg)
-			d.filterCommands()
+			cmd := d.updateInput(msg, d.filterCommands)
 			return d, cmd
 		}
 	}
@@ -156,7 +122,7 @@ func (d *commandPaletteDialog) executeSelected() tea.Cmd {
 	return tea.Sequence(cmds...)
 }
 
-// filterCommands filters the command list based on search input
+// filterCommands filters the command list based on search input.
 func (d *commandPaletteDialog) filterCommands() {
 	query := strings.ToLower(strings.TrimSpace(d.textInput.Value()))
 
@@ -184,14 +150,11 @@ func matchesCommandQuery(cmd commands.Item, query string) bool {
 		strings.Contains(strings.ToLower(cmd.SlashCommand), query)
 }
 
-// buildLines builds the visual lines for the command list and returns:
-//   - lines: the rendered line strings (with category headers)
-//   - lineToCmd: maps each line index to command index (-1 for headers/blanks)
-//
-// contentWidth controls whether items are rendered with full styling: when 0,
-// raw category names and empty strings are emitted (used by tests and by
-// findSelectedLine, which only needs the mapping).
-func (d *commandPaletteDialog) buildLines(contentWidth int) (lines []string, lineToCmd []int) {
+// buildList builds the visual list of commands grouped by category, with a
+// blank line + category header before each new group. Pass contentWidth=0 to
+// produce a layout-only list (used by mouse hit-testing and findSelectedLine,
+// which only need the line→item mapping).
+func (d *commandPaletteDialog) buildList(contentWidth int) *groupedList {
 	gl := newGroupedList()
 	var lastCategory string
 
@@ -200,59 +163,52 @@ func (d *commandPaletteDialog) buildLines(contentWidth int) (lines []string, lin
 			if lastCategory != "" {
 				gl.AddNonItem("")
 			}
-			if contentWidth > 0 {
-				gl.AddNonItem(styles.PaletteCategoryStyle.MarginTop(0).Render(cmd.Category))
-			} else {
-				gl.AddNonItem(cmd.Category)
-			}
+			gl.AddNonItem(d.renderCategoryHeader(cmd.Category, contentWidth))
 			lastCategory = cmd.Category
 		}
-
-		if contentWidth > 0 {
-			gl.AddItem(d.renderCommand(cmd, i == d.selected, contentWidth))
-		} else {
-			gl.AddItem("")
-		}
+		gl.AddItem(d.renderCommand(cmd, i == d.selected, contentWidth))
 	}
 
+	return gl
+}
+
+func (d *commandPaletteDialog) renderCategoryHeader(category string, contentWidth int) string {
+	if contentWidth <= 0 {
+		return category
+	}
+	return styles.PaletteCategoryStyle.MarginTop(0).Render(category)
+}
+
+// lineToCmdIndex returns the command index for a rendered line, or -1
+// when the line is a header or blank. Used for mouse hit-testing.
+func (d *commandPaletteDialog) lineToCmdIndex(line int) int {
+	return d.buildList(0).ItemForLine(line)
+}
+
+// findSelectedLine returns the rendered line index for the selected command.
+func (d *commandPaletteDialog) findSelectedLine() int {
+	return d.buildList(0).LineForItem(d.selected)
+}
+
+// buildLines returns the rendered lines and the line→item mapping. It exists
+// for the test suite; production code uses buildList directly.
+func (d *commandPaletteDialog) buildLines(contentWidth int) (lines []string, lineToCmd []int) {
+	gl := d.buildList(contentWidth)
 	return gl.Lines(), gl.LineToItem()
 }
 
-// lineToCmdIndex returns the command index for a given visual line, or -1
-// when the line is a header or blank. Used for mouse hit-testing.
-func (d *commandPaletteDialog) lineToCmdIndex(line int) int {
-	_, lineToCmd := d.buildLines(0)
-	if line < 0 || line >= len(lineToCmd) {
-		return -1
-	}
-	return lineToCmd[line]
-}
-
-// findSelectedLine returns the line index that corresponds to the selected command.
-func (d *commandPaletteDialog) findSelectedLine() int {
-	_, lineToCmd := d.buildLines(0)
-	for i, cmdIdx := range lineToCmd {
-		if cmdIdx == d.selected {
-			return i
-		}
-	}
-	return 0
-}
-
-// View renders the command palette dialog
+// View renders the command palette dialog.
 func (d *commandPaletteDialog) View() string {
 	dialogWidth, _, contentWidth := d.dialogSize()
 	d.textInput.SetWidth(contentWidth)
 
-	allLines, _ := d.buildLines(contentWidth)
+	gl := d.buildList(contentWidth)
 	d.updateScrollviewPosition()
-	d.scrollview.SetContent(allLines, len(allLines))
+	d.scrollview.SetContent(gl.Lines(), len(gl.Lines()))
 
-	var scrollableContent string
+	scrollableContent := d.scrollview.View()
 	if len(d.filtered) == 0 {
 		scrollableContent = d.renderEmptyState("No commands found", contentWidth)
-	} else {
-		scrollableContent = d.scrollview.View()
 	}
 
 	content := NewContent(d.regionWidth(contentWidth)).
@@ -268,8 +224,12 @@ func (d *commandPaletteDialog) View() string {
 	return styles.DialogStyle.Width(dialogWidth).Render(content)
 }
 
-// renderCommand renders a single command in the list
+// renderCommand renders a single command line in the list.
 func (d *commandPaletteDialog) renderCommand(cmd commands.Item, selected bool, contentWidth int) string {
+	if contentWidth <= 0 {
+		return ""
+	}
+
 	actionStyle := styles.PaletteUnselectedActionStyle
 	descStyle := styles.PaletteUnselectedDescStyle
 	if selected {
@@ -278,17 +238,15 @@ func (d *commandPaletteDialog) renderCommand(cmd commands.Item, selected bool, c
 	}
 
 	label := " " + cmd.Label
-	labelWidth := lipgloss.Width(actionStyle.Render(label))
-
 	content := actionStyle.Render(label)
-	if cmd.Description != "" {
-		separator := " • "
-		separatorWidth := lipgloss.Width(separator)
-		availableWidth := contentWidth - labelWidth - separatorWidth
-		if availableWidth > 0 {
-			truncatedDesc := toolcommon.TruncateText(cmd.Description, availableWidth)
-			content += descStyle.Render(separator + truncatedDesc)
-		}
+	if cmd.Description == "" {
+		return content
 	}
-	return content
+
+	const separator = " • "
+	availableWidth := contentWidth - lipgloss.Width(content) - lipgloss.Width(separator)
+	if availableWidth <= 0 {
+		return content
+	}
+	return content + descStyle.Render(separator+toolcommon.TruncateText(cmd.Description, availableWidth))
 }

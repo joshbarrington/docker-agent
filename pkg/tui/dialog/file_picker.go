@@ -176,12 +176,10 @@ func (d *filePickerDialog) loadDirectory() {
 	d.filtered = d.entries
 }
 
-func (d *filePickerDialog) Init() tea.Cmd {
-	return textinput.Blink
-}
+func (d *filePickerDialog) Init() tea.Cmd { return textinput.Blink }
 
 func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	// Scrollview handles mouse click/motion/release, wheel, and pgup/pgdn/home/end
+	// Scrollview handles mouse click/motion/release, wheel, and pgup/pgdn/home/end.
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -192,71 +190,69 @@ func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.PasteMsg:
-		var cmd tea.Cmd
-		d.textInput, cmd = d.textInput.Update(msg)
-		d.filterEntries()
+		cmd := d.updateInput(msg, d.filterEntries)
 		return d, cmd
 
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
-
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
 			return d, closeDialogCmd()
-
 		case key.Matches(msg, d.keyMap.Up):
-			if d.selected > 0 {
-				d.selected--
-				d.scrollview.EnsureLineVisible(d.selected)
-			}
+			d.navigate(-1, len(d.filtered), nil)
 			return d, nil
-
 		case key.Matches(msg, d.keyMap.Down):
-			if d.selected < len(d.filtered)-1 {
-				d.selected++
-				d.scrollview.EnsureLineVisible(d.selected)
-			}
+			d.navigate(+1, len(d.filtered), nil)
 			return d, nil
-
 		case key.Matches(msg, d.keyMap.Enter):
-			if d.selected >= 0 && d.selected < len(d.filtered) {
-				entry := d.filtered[d.selected]
-				if entry.isDir {
-					d.currentDir = entry.path
-					d.textInput.SetValue("")
-					d.loadDirectory()
-					return d, nil
-				}
-				return d, tea.Sequence(
-					closeDialogCmd(),
-					core.CmdHandler(messages.InsertFileRefMsg{FilePath: entry.path}),
-				)
-			}
-			return d, nil
-
+			cmd := d.activateSelected()
+			return d, cmd
 		case msg.String() == "alt+h":
-			d.showHidden = !d.showHidden
-			d.loadDirectory()
-			d.filterEntries()
+			d.toggleHidden()
 			return d, nil
-
 		case msg.String() == "alt+i":
-			d.showIgnored = !d.showIgnored
-			d.loadDirectory()
-			d.filterEntries()
+			d.toggleIgnored()
 			return d, nil
-
 		default:
-			var cmd tea.Cmd
-			d.textInput, cmd = d.textInput.Update(msg)
-			d.filterEntries()
+			cmd := d.updateInput(msg, d.filterEntries)
 			return d, cmd
 		}
 	}
 
 	return d, nil
+}
+
+// activateSelected handles enter on the current entry. Directories are
+// navigated into; files are returned to the caller via InsertFileRefMsg.
+func (d *filePickerDialog) activateSelected() tea.Cmd {
+	if d.selected < 0 || d.selected >= len(d.filtered) {
+		return nil
+	}
+	entry := d.filtered[d.selected]
+	if entry.isDir {
+		d.currentDir = entry.path
+		d.textInput.SetValue("")
+		d.loadDirectory()
+		return nil
+	}
+	return tea.Sequence(
+		closeDialogCmd(),
+		core.CmdHandler(messages.InsertFileRefMsg{FilePath: entry.path}),
+	)
+}
+
+func (d *filePickerDialog) toggleHidden() {
+	d.showHidden = !d.showHidden
+	d.loadDirectory()
+	d.filterEntries()
+}
+
+func (d *filePickerDialog) toggleIgnored() {
+	d.showIgnored = !d.showIgnored
+	d.loadDirectory()
+	d.filterEntries()
 }
 
 func (d *filePickerDialog) filterEntries() {

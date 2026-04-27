@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -139,7 +138,7 @@ func newTestModel() (*appModel, *mockEditor) {
 		pendingSidebarCollapsed: map[string]bool{},
 		chatPage:                page,
 		editor:                  ed,
-		transcriber:             transcribe.New(""),
+		transcriber:             &fakeTranscriber{},
 		notification:            notification.New(),
 		dialogMgr:               dialog.New(),
 		completions:             completion.New(),

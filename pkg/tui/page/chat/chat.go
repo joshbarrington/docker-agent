@@ -1,12 +1,9 @@
 package chat
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
-	goruntime "runtime"
 	"strings"
 	"time"
 
@@ -256,61 +253,6 @@ func defaultKeyMap() KeyMap {
 			key.WithHelp("Ctrl+b", "toggle sidebar"),
 		),
 	}
-}
-
-// getEditorDisplayNameFromEnv returns a friendly display name for the configured editor.
-// It takes visual and editorEnv values as parameters and maps common editors to display names.
-// If neither is set, it returns the platform-specific fallback that will actually be used.
-func getEditorDisplayNameFromEnv(visual, editorEnv string) string {
-	editorCmd := cmp.Or(visual, editorEnv)
-	if editorCmd == "" {
-		if goruntime.GOOS == "windows" {
-			return "Notepad"
-		}
-		return "Vi"
-	}
-
-	parts := strings.Fields(editorCmd)
-	if len(parts) == 0 {
-		return "$EDITOR"
-	}
-
-	baseName := filepath.Base(parts[0])
-
-	editorPrefixes := []struct {
-		prefix string
-		name   string
-	}{
-		{"code", "VSCode"},
-		{"cursor", "Cursor"},
-		{"nvim", "Neovim"},
-		{"vim", "Vim"},
-		{"vi", "Vi"},
-		{"nano", "Nano"},
-		{"emacs", "Emacs"},
-		{"subl", "Sublime Text"},
-		{"sublime", "Sublime Text"},
-		{"atom", "Atom"},
-		{"gedit", "gedit"},
-		{"kate", "Kate"},
-		{"notepad++", "Notepad++"},
-		{"notepad", "Notepad"},
-		{"textmate", "TextMate"},
-		{"mate", "TextMate"},
-		{"zed", "Zed"},
-	}
-
-	for _, e := range editorPrefixes {
-		if strings.HasPrefix(baseName, e.prefix) {
-			return e.name
-		}
-	}
-
-	if baseName != "" {
-		return strings.ToUpper(baseName[:1]) + baseName[1:]
-	}
-
-	return "$EDITOR"
 }
 
 // New creates a new chat page

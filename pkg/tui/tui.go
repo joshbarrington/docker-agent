@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"time"
@@ -35,6 +34,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/internal/editorname"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -91,7 +91,7 @@ type appModel struct {
 	completions  completion.Manager
 
 	// Speech-to-text
-	transcriber  *transcribe.Transcriber
+	transcriber  Transcriber
 	transcriptCh chan string // bridges transcriber goroutine → Bubble Tea event loop
 
 	// Working state indicator (resize handle spinner)
@@ -169,6 +169,17 @@ type appModel struct {
 	appVersion string
 }
 
+// Transcriber is the speech-to-text interface used by the TUI. It is an
+// interface (rather than the concrete *transcribe.Transcriber) so that tests
+// can inject a fake implementation via WithTranscriber and so that the TUI
+// does not depend on a concrete audio backend.
+type Transcriber interface {
+	Start(ctx context.Context, handler transcribe.TranscriptHandler) error
+	Stop()
+	IsRunning() bool
+	IsSupported() bool
+}
+
 // Option configures the TUI.
 type Option func(*appModel)
 
@@ -212,6 +223,17 @@ func WithCommandBuilder(
 ) Option {
 	return func(m *appModel) {
 		m.buildCommandCategories = fn
+	}
+}
+
+// WithTranscriber overrides the speech-to-text backend used by the TUI. This
+// is intended for tests that need to exercise speech handlers without
+// connecting to a real audio device or external API.
+func WithTranscriber(t Transcriber) Option {
+	return func(m *appModel) {
+		if t != nil {
+			m.transcriber = t
+		}
 	}
 }
 
@@ -1727,7 +1749,7 @@ func (m *appModel) AllBindings() []key.Binding {
 	if m.focusedPanel == PanelContent {
 		bindings = append(bindings, m.chatPage.Bindings()...)
 	} else {
-		editorName := getEditorDisplayNameFromEnv(os.Getenv("VISUAL"), os.Getenv("EDITOR"))
+		editorName := editorname.FromEnv(os.Getenv("VISUAL"), os.Getenv("EDITOR"))
 		bindings = append(bindings,
 			key.NewBinding(
 				key.WithKeys("ctrl+g"),
@@ -2147,16 +2169,27 @@ const (
 // hitTestRegion determines which layout region a Y coordinate falls in.
 func (m *appModel) hitTestRegion(y int) layoutRegion {
 	if m.leanMode {
-		// Lean mode: content | editor (no resize handle, tab bar, or status bar)
-		if y < m.contentHeight {
-			return regionContent
-		}
-		return regionEditor
+		return hitTestLeanRegion(y, m.contentHeight)
 	}
+	_, editorHeight := m.editor.GetSize()
+	return hitTestFullRegion(y, m.contentHeight, m.tabBar.Height(), editorHeight)
+}
 
-	tabBarHeight := m.tabBar.Height()
+// hitTestLeanRegion is the pure layout calculation used in lean mode where
+// the screen is split between content and editor only.
+func hitTestLeanRegion(y, contentHeight int) layoutRegion {
+	if y < contentHeight {
+		return regionContent
+	}
+	return regionEditor
+}
 
-	resizeHandleTop := m.contentHeight
+// hitTestFullRegion is the pure layout calculation used in full mode where the
+// screen is content | resize handle | [tab bar] | editor | status bar.
+// It is exported as a free function (rather than a method) so that it can be
+// unit-tested without constructing a full appModel.
+func hitTestFullRegion(y, contentHeight, tabBarHeight, editorHeight int) layoutRegion {
+	resizeHandleTop := contentHeight
 	tabBarTop := resizeHandleTop + 1
 	editorTop := tabBarTop + tabBarHeight
 
@@ -2168,7 +2201,6 @@ func (m *appModel) hitTestRegion(y int) layoutRegion {
 	case y < editorTop:
 		return regionTabBar
 	default:
-		_, editorHeight := m.editor.GetSize()
 		if y < editorTop+editorHeight {
 			return regionEditor
 		}
@@ -2351,16 +2383,24 @@ func (m *appModel) View() tea.View {
 	return toFullscreenView(baseView, windowTitle, m.chatPage.IsWorking(), m.leanMode)
 }
 
-// windowTitle returns the terminal window title.
+// windowTitle returns the terminal window title for the current model state.
 // When the agent is working, a rotating spinner character is prepended so that
 // terminal multiplexers (tmux) can detect activity in the pane.
 func (m *appModel) windowTitle() string {
-	title := m.appName
-	if sessionTitle := m.sessionState.SessionTitle(); sessionTitle != "" {
-		title = sessionTitle + " - " + m.appName
+	return formatWindowTitle(m.appName, m.sessionState.SessionTitle(), m.chatPage.IsWorking(), m.animFrame)
+}
+
+// formatWindowTitle assembles the terminal window title string from the
+// individual inputs that contribute to it. Pure function — extracted from the
+// windowTitle method so that it can be unit-tested without constructing a
+// full appModel.
+func formatWindowTitle(appName, sessionTitle string, working bool, animFrame int) string {
+	title := appName
+	if sessionTitle != "" {
+		title = sessionTitle + " - " + appName
 	}
-	if m.chatPage.IsWorking() {
-		title = spinner.Frame(m.animFrame) + " " + title
+	if working {
+		title = spinner.Frame(animFrame) + " " + title
 	}
 	return title
 }
@@ -2489,59 +2529,6 @@ func (m *appModel) openExternalEditor() (tea.Model, tea.Cmd) {
 
 		return nil
 	})
-}
-
-// getEditorDisplayNameFromEnv returns a friendly display name for the configured editor.
-func getEditorDisplayNameFromEnv(visual, editorEnv string) string {
-	editorCmd := cmp.Or(visual, editorEnv)
-	if editorCmd == "" {
-		if goruntime.GOOS == "windows" {
-			return "Notepad"
-		}
-		return "Vi"
-	}
-
-	parts := strings.Fields(editorCmd)
-	if len(parts) == 0 {
-		return "$EDITOR"
-	}
-
-	baseName := filepath.Base(parts[0])
-
-	editorPrefixes := []struct {
-		prefix string
-		name   string
-	}{
-		{"code", "VSCode"},
-		{"cursor", "Cursor"},
-		{"nvim", "Neovim"},
-		{"vim", "Vim"},
-		{"vi", "Vi"},
-		{"nano", "Nano"},
-		{"emacs", "Emacs"},
-		{"subl", "Sublime Text"},
-		{"sublime", "Sublime Text"},
-		{"atom", "Atom"},
-		{"gedit", "gedit"},
-		{"kate", "Kate"},
-		{"notepad++", "Notepad++"},
-		{"notepad", "Notepad"},
-		{"textmate", "TextMate"},
-		{"mate", "TextMate"},
-		{"zed", "Zed"},
-	}
-
-	for _, e := range editorPrefixes {
-		if strings.HasPrefix(baseName, e.prefix) {
-			return e.name
-		}
-	}
-
-	if baseName != "" {
-		return strings.ToUpper(baseName[:1]) + baseName[1:]
-	}
-
-	return "$EDITOR"
 }
 
 func toFullscreenView(content, windowTitle string, working, leanMode bool) tea.View {

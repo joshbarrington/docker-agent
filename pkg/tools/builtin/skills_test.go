@@ -367,7 +367,7 @@ func TestSkillsToolset_PrepareForkSubSession(t *testing.T) {
 	require.NoError(t, os.WriteFile(skillFile, []byte("system instructions"), 0o644))
 
 	st := NewSkillsToolset([]skills.Skill{
-		{Name: "forked", Description: "Forked", Context: "fork", FilePath: skillFile, BaseDir: tmpDir},
+		{Name: "forked", Description: "Forked", Context: "fork", FilePath: skillFile, BaseDir: tmpDir, Model: "openai/gpt-4o-mini"},
 	}, "")
 
 	prepared, errResult := st.PrepareForkSubSession(t.Context(), RunSkillArgs{Name: "forked", Task: "do the thing"})
@@ -376,6 +376,23 @@ func TestSkillsToolset_PrepareForkSubSession(t *testing.T) {
 	assert.Equal(t, "forked", prepared.SkillName)
 	assert.Equal(t, "do the thing", prepared.Task)
 	assert.Equal(t, "system instructions", prepared.Content)
+	assert.Equal(t, "openai/gpt-4o-mini", prepared.Model)
+}
+
+func TestSkillsToolset_PrepareForkSubSession_NoModelOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	skillFile := filepath.Join(tmpDir, "SKILL.md")
+	require.NoError(t, os.WriteFile(skillFile, []byte("system instructions"), 0o644))
+
+	st := NewSkillsToolset([]skills.Skill{
+		// No Model set in the frontmatter — Prepared.Model must be empty.
+		{Name: "forked", Description: "Forked", Context: "fork", FilePath: skillFile, BaseDir: tmpDir},
+	}, "")
+
+	prepared, errResult := st.PrepareForkSubSession(t.Context(), RunSkillArgs{Name: "forked", Task: "x"})
+	require.Nil(t, errResult)
+	require.NotNil(t, prepared)
+	assert.Empty(t, prepared.Model)
 }
 
 func TestSkillsToolset_PrepareForkSubSession_NotFound(t *testing.T) {

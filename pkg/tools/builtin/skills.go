@@ -247,6 +247,9 @@ type PreparedSkillFork struct {
 	// Content is the expanded SKILL.md content, intended to be used as the
 	// system message of the child session.
 	Content string
+	// Model is the optional model override declared in the SKILL.md
+	// frontmatter. Empty means "use the parent agent's current model".
+	Model string
 }
 
 // PrepareForkSubSession validates a run_skill request and loads the expanded
@@ -277,6 +280,7 @@ func (s *SkillsToolset) PrepareForkSubSession(ctx context.Context, args RunSkill
 		SkillName: args.Name,
 		Task:      args.Task,
 		Content:   content,
+		Model:     skill.Model,
 	}, nil
 }
 

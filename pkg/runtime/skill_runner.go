@@ -64,14 +64,14 @@ func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session
 	// model, alloy, inline provider/model, inline alloy) and returns a
 	// CAS-safe restore func that is always non-nil; on failure we log a
 	// warning and fall back to the agent's currently-active model.
-	if skill.Model != "" {
-		restore, err := r.WithAgentModel(ctx, ca, skill.Model)
+	if prepared.Model != "" {
+		restore, err := r.WithAgentModel(ctx, ca, prepared.Model)
 		defer restore()
 		if err != nil {
 			slog.Warn("Failed to apply skill model override; using current model",
 				"agent", ca,
-				"skill", params.Name,
-				"model", skill.Model,
+				"skill", prepared.SkillName,
+				"model", prepared.Model,
 				"error", err,
 			)
 		}

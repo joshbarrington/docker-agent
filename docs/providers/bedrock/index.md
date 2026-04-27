@@ -92,6 +92,7 @@ Use inference profile prefixes for optimal routing:
 | `global.` | All commercial AWS regions (recommended) |
 | `us.`     | US regions only                          |
 | `eu.`     | EU regions only (GDPR compliance)        |
+| `apac.`   | Asia Pacific regions only                |
 
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">💡 Inference profiles

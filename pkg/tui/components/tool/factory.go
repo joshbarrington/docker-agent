@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool/shell"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/todotool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/transfertask"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/userprompt"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/writefile"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -72,6 +73,7 @@ func newDefaultRegistry() *Registry {
 		{[]string{builtin.ToolNameDirectoryTree}, directorytree.New},
 		{[]string{builtin.ToolNameSearchFilesContent}, searchfilescontent.New},
 		{[]string{builtin.ToolNameShell}, shell.New},
+		{[]string{builtin.ToolNameUserPrompt}, userprompt.New},
 		{[]string{builtin.ToolNameFetch, "category:api"}, api.New},
 		{
 			[]string{

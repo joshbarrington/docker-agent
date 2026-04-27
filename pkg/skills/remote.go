@@ -8,11 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strings"
-	"time"
 
 	"github.com/docker/docker-agent/pkg/paths"
-	"github.com/docker/docker-agent/pkg/remote"
 )
 
 // remoteIndex represents the index.json served at /.well-known/skills/index.json
@@ -44,11 +43,7 @@ func loadRemoteSkillsWithCache(ctx context.Context, baseURL string, cache *diskC
 
 	slog.Debug("Fetching remote skills index", "url", indexURL)
 
-	httpClient := &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: remote.NewTransport(ctx),
-	}
-	resp, err := httpClient.Get(indexURL)
+	resp, err := httpGet(ctx, indexURL)
 	if err != nil {
 		slog.Warn("Failed to fetch remote skills index", "url", indexURL, "error", err)
 		return nil
@@ -75,6 +70,10 @@ func loadRemoteSkillsWithCache(ctx context.Context, baseURL string, cache *diskC
 	var skills []Skill
 	for _, entry := range index.Skills {
 		if entry.Name == "" || entry.Description == "" {
+			continue
+		}
+		if !isValidSkillName(entry.Name) {
+			slog.Warn("Skipping remote skill with invalid name", "url", baseURL, "name", entry.Name)
 			continue
 		}
 
@@ -117,26 +116,31 @@ func prefetchFiles(ctx context.Context, cache *diskCache, baseURL, skillName str
 }
 
 // isValidFilePath checks a relative file path from the index for safety.
-// Rejects absolute paths, parent traversals, and invalid characters.
+// Rejects absolute paths, parent traversals, and characters that are not
+// safe in both filesystem paths and URL path segments.
 func isValidFilePath(path string) bool {
-	if path == "" {
+	if path == "" || strings.HasPrefix(path, "/") || strings.Contains(path, "..") {
 		return false
 	}
-	if strings.HasPrefix(path, "/") {
-		return false
-	}
-	if strings.Contains(path, "..") {
-		return false
-	}
-	// Reject backslashes, query strings, fragments, brackets
 	for _, c := range path {
-		switch c {
-		case '\\', '?', '#', '[', ']':
+		if c < 0x20 || c > 0x7E {
 			return false
 		}
-		if c < 0x20 || c > 0x7E {
+		if strings.ContainsRune(`\?#[]`, c) {
 			return false
 		}
 	}
 	return true
+}
+
+// skillNameRe matches a safe single path component: ASCII letters, digits,
+// '.', '-' or '_', not starting with '.', 1-128 chars.
+//
+// Skill names from a remote index are used both as a filesystem path
+// component (filepath.Join(cacheBase, urlHash, skillName)) and as a URL path
+// segment, so anything fancier than this conservative set is unsafe.
+var skillNameRe = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$`)
+
+func isValidSkillName(name string) bool {
+	return skillNameRe.MatchString(name)
 }

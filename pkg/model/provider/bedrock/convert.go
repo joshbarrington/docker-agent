@@ -29,13 +29,13 @@ func convertMessages(messages []chat.Message, enableCaching bool) ([]types.Messa
 			// Extract system messages into separate system blocks
 			if len(msg.MultiContent) > 0 {
 				for _, part := range msg.MultiContent {
-					if part.Type == chat.MessagePartTypeText && strings.TrimSpace(part.Text) != "" {
+					if part.Type == chat.MessagePartTypeText {
 						systemBlocks = append(systemBlocks, &types.SystemContentBlockMemberText{
 							Value: part.Text,
 						})
 					}
 				}
-			} else if strings.TrimSpace(msg.Content) != "" {
+			} else {
 				systemBlocks = append(systemBlocks, &types.SystemContentBlockMemberText{
 					Value: msg.Content,
 				})
@@ -126,11 +126,9 @@ func convertUserContent(msg *chat.Message) []types.ContentBlock {
 		for _, part := range msg.MultiContent {
 			switch part.Type {
 			case chat.MessagePartTypeText:
-				if strings.TrimSpace(part.Text) != "" {
-					blocks = append(blocks, &types.ContentBlockMemberText{
-						Value: part.Text,
-					})
-				}
+				blocks = append(blocks, &types.ContentBlockMemberText{
+					Value: part.Text,
+				})
 			case chat.MessagePartTypeImageURL:
 				if part.ImageURL != nil {
 					if imageBlock := convertImageURL(part.ImageURL); imageBlock != nil {
@@ -139,7 +137,7 @@ func convertUserContent(msg *chat.Message) []types.ContentBlock {
 				}
 			}
 		}
-	} else if strings.TrimSpace(msg.Content) != "" {
+	} else {
 		blocks = append(blocks, &types.ContentBlockMemberText{
 			Value: msg.Content,
 		})
@@ -212,7 +210,7 @@ func convertAssistantContent(msg *chat.Message) []types.ContentBlock {
 	}
 
 	// Add text content if present
-	if strings.TrimSpace(msg.Content) != "" {
+	if msg.Content != "" {
 		blocks = append(blocks, &types.ContentBlockMemberText{
 			Value: msg.Content,
 		})

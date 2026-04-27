@@ -32,6 +32,22 @@ $ docker agent serve a2a ./agent.yaml --listen 127.0.0.1:9000
 $ docker agent serve a2a agentcatalog/pirate
 ```
 
+## Flags
+
+| Flag                              | Default          | Description                                                                                                          |
+| --------------------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `-l, --listen <addr>`             | `127.0.0.1:8082` | Address to listen on.                                                                                                |
+| `-a, --agent <name>`              | `root`           | Name of the agent to expose when the config contains multiple agents.                                                |
+| `--working-dir <path>`            | current dir      | Working directory the agent runs in.                                                                                 |
+| `--env-from-file <file>`          | (none)           | Load additional environment variables from a `.env` file (repeatable).                                               |
+| `--models-gateway <url>`          | (none)           | Route all provider traffic through a models gateway URL.                                                             |
+| `--code-mode-tools`               | `false`          | Expose tools as a single "code" toolset that accepts a JavaScript snippet to run.                                    |
+| `--hook-pre-tool-use <cmd>`       | (none)           | Add a pre-tool-use hook (repeatable). See [Hooks]({{ '/configuration/hooks/' | relative_url }}).                     |
+| `--hook-post-tool-use <cmd>`      | (none)           | Add a post-tool-use hook (repeatable).                                                                               |
+| `--hook-session-start <cmd>`      | (none)           | Add a session-start hook (repeatable).                                                                               |
+| `--hook-session-end <cmd>`        | (none)           | Add a session-end hook (repeatable).                                                                                 |
+| `--hook-on-user-input <cmd>`      | (none)           | Add an on-user-input hook (repeatable).                                                                              |
+
 ## Features
 
 - **Auto port selection** — Picks an available port if not specified

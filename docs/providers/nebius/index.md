@@ -69,7 +69,7 @@ Nebius hosts various open models. Check the [Nebius documentation](https://nebiu
 Nebius is implemented as a built-in alias in docker-agent:
 
 - **API Type:** OpenAI-compatible (`openai_chatcompletions`)
-- **Base URL:** `https://api.studio.nebius.ai/v1`
+- **Base URL:** `https://api.studio.nebius.com/v1`
 - **Token Variable:** `NEBIUS_API_KEY`
 
 ## Example: Code Assistant

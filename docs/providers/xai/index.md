@@ -76,7 +76,7 @@ models:
   grok:
     provider: xai
     model: grok-3
-    thinking_budget: high # minimal, low, medium, high, or none
+    thinking_budget: high # minimal, low, medium, high, xhigh, max, none, or adaptive/<level>
 ```
 
 ## How It Works

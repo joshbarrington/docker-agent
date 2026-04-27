@@ -326,15 +326,10 @@ func (r *LocalRuntime) executeToolWithHandler(
 
 // runTool executes agent tools from toolsets (MCP, filesystem, etc.).
 func (r *LocalRuntime) runTool(ctx context.Context, tool tools.Tool, toolCall tools.ToolCall, events chan Event, sess *session.Session, a *agent.Agent) {
-	hooksExec := r.getHooksExecutor(a)
-
-	// Execute pre-tool hooks if configured.
-	if hooksExec != nil && hooksExec.HasPreToolUseHooks() {
-		blocked, modifiedTC := r.executePreToolHook(ctx, hooksExec, sess, toolCall, tool, events, a)
-		if blocked {
-			return
-		}
-		toolCall = modifiedTC
+	// Pre-tool hook: may block the call or rewrite its arguments.
+	blocked, toolCall := r.executePreToolHook(ctx, sess, toolCall, tool, events, a)
+	if blocked {
+		return
 	}
 
 	r.executeToolWithHandler(ctx, toolCall, tool, events, sess, a, "runtime.tool.handler",
@@ -343,17 +338,16 @@ func (r *LocalRuntime) runTool(ctx context.Context, tool tools.Tool, toolCall to
 			return res, 0, err
 		})
 
-	// Execute post-tool hooks if configured.
-	if hooksExec != nil && hooksExec.HasPostToolUseHooks() {
-		r.executePostToolHook(ctx, hooksExec, sess, toolCall, events, a)
-	}
+	// Post-tool hook: observational; SystemMessage is emitted by dispatchHook.
+	r.executePostToolHook(ctx, sess, toolCall, a, events)
 }
 
 // newHooksInput builds a hooks.Input from the common tool-call fields.
-func (r *LocalRuntime) newHooksInput(sess *session.Session, toolCall tools.ToolCall) *hooks.Input {
+// [hooks.Executor.Dispatch] auto-fills Cwd from the executor's working
+// directory, so callers don't set it here.
+func newHooksInput(sess *session.Session, toolCall tools.ToolCall) *hooks.Input {
 	return &hooks.Input{
 		SessionID: sess.ID,
-		Cwd:       r.workingDir,
 		ToolName:  toolCall.Function.Name,
 		ToolUseID: toolCall.ID,
 		ToolInput: parseToolInput(toolCall.Function.Arguments),
@@ -364,53 +358,48 @@ func (r *LocalRuntime) newHooksInput(sess *session.Session, toolCall tools.ToolC
 // call was blocked and the (possibly modified) tool call.
 func (r *LocalRuntime) executePreToolHook(
 	ctx context.Context,
-	hooksExec *hooks.Executor,
 	sess *session.Session,
 	toolCall tools.ToolCall,
 	tool tools.Tool,
 	events chan Event,
 	a *agent.Agent,
 ) (blocked bool, modifiedTC tools.ToolCall) {
-	result, err := hooksExec.ExecutePreToolUse(ctx, r.newHooksInput(sess, toolCall))
-	switch {
-	case err != nil:
-		slog.Warn("Pre-tool hook execution failed", "tool", toolCall.Function.Name, "error", err)
-	case !result.Allowed:
+	// dispatchHook returns nil when no hook is configured, the agent is
+	// missing, or dispatch failed — in every case the right move is to
+	// run the tool unchanged.
+	result := r.dispatchHook(ctx, a, hooks.EventPreToolUse, newHooksInput(sess, toolCall), events)
+	if result == nil {
+		return false, toolCall
+	}
+
+	if !result.Allowed {
 		slog.Debug("Pre-tool hook blocked tool call", "tool", toolCall.Function.Name, "message", result.Message)
 		events <- HookBlocked(toolCall, tool, result.Message, a.Name())
 		r.addToolErrorResponse(ctx, sess, toolCall, tool, events, a, "Tool call blocked by hook: "+result.Message)
 		return true, toolCall
-	default:
-		if result.SystemMessage != "" {
-			events <- Warning(result.SystemMessage, a.Name())
-		}
-		if result.ModifiedInput != nil {
-			if updated, merr := json.Marshal(result.ModifiedInput); merr != nil {
-				slog.Warn("Failed to marshal modified tool input from hook", "tool", toolCall.Function.Name, "error", merr)
-			} else {
-				slog.Debug("Pre-tool hook modified tool input", "tool", toolCall.Function.Name)
-				toolCall.Function.Arguments = string(updated)
-			}
+	}
+
+	if result.ModifiedInput != nil {
+		if updated, merr := json.Marshal(result.ModifiedInput); merr != nil {
+			slog.Warn("Failed to marshal modified tool input from hook", "tool", toolCall.Function.Name, "error", merr)
+		} else {
+			slog.Debug("Pre-tool hook modified tool input", "tool", toolCall.Function.Name)
+			toolCall.Function.Arguments = string(updated)
 		}
 	}
 	return false, toolCall
 }
 
-// executePostToolHook runs the post-tool-use hook and emits any system messages.
+// executePostToolHook runs the post-tool-use hook. SystemMessage is
+// emitted as a Warning by [dispatchHook].
 func (r *LocalRuntime) executePostToolHook(
 	ctx context.Context,
-	hooksExec *hooks.Executor,
 	sess *session.Session,
 	toolCall tools.ToolCall,
-	events chan Event,
 	a *agent.Agent,
+	events chan Event,
 ) {
-	result, err := hooksExec.ExecutePostToolUse(ctx, r.newHooksInput(sess, toolCall))
-	if err != nil {
-		slog.Warn("Post-tool hook execution failed", "tool", toolCall.Function.Name, "error", err)
-	} else if result.SystemMessage != "" {
-		events <- Warning(result.SystemMessage, a.Name())
-	}
+	r.dispatchHook(ctx, a, hooks.EventPostToolUse, newHooksInput(sess, toolCall), events)
 }
 
 // parseToolInput parses tool arguments JSON into a map

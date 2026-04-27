@@ -10,9 +10,25 @@ _Use Gemini 2.5 Flash, Gemini 3 Pro, and other Google models with docker-agent._
 
 ## Setup
 
+docker-agent reads the first credential it finds from these environment variables (see `pkg/model/provider/gemini/client.go`):
+
+| Variable                    | Purpose                                                                             |
+| --------------------------- | ----------------------------------------------------------------------------------- |
+| `GOOGLE_API_KEY`            | Primary Gemini API key.                                                             |
+| `GEMINI_API_KEY`            | Alternative name for the Gemini API key (also used by the official Google SDK).     |
+| `GOOGLE_GENAI_USE_VERTEXAI` | When set (any value), routes through Vertex AI instead of the Gemini Developer API. |
+| `GOOGLE_CLOUD_PROJECT`      | GCP project used when `GOOGLE_GENAI_USE_VERTEXAI` is set or for Vertex AI Model Garden. |
+| `GOOGLE_CLOUD_LOCATION`     | GCP region for Vertex AI (defaults to the SDK default).                             |
+
 ```bash
-# Set your API key
-export GOOGLE_API_KEY="AI..."
+# Gemini Developer API
+export GOOGLE_API_KEY="AI..."   # or GEMINI_API_KEY
+
+# Vertex AI (no API key; uses Application Default Credentials)
+gcloud auth application-default login
+export GOOGLE_GENAI_USE_VERTEXAI=1
+export GOOGLE_CLOUD_PROJECT="my-gcp-project"
+export GOOGLE_CLOUD_LOCATION="us-central1"
 ```
 
 ## Configuration
@@ -117,8 +133,14 @@ models:
 You can use non-Gemini models (e.g. Claude, Llama) hosted on Google Cloud's
 [Vertex AI Model Garden](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/use-partner-models)
 through the `google` provider. When a `publisher` is specified in `provider_opts`,
-requests are routed through Vertex AI's OpenAI-compatible endpoint instead of the
-Gemini SDK.
+requests are routed through the appropriate Vertex AI endpoint instead of the
+Gemini SDK:
+
+- **Anthropic Claude** (`publisher: anthropic`) uses the Anthropic-native
+  `:rawPredict` / `:streamRawPredict` endpoints. Claude models on Vertex AI do
+  not support the OpenAI `/chat/completions` path.
+- **Other publishers** (e.g. `meta`, `mistral`) use Vertex AI's
+  OpenAI-compatible `/chat/completions` endpoint.
 
 ### Authentication
 

@@ -244,7 +244,7 @@ func createDirectProvider(ctx context.Context, cfg *latest.ModelConfig, env envi
 		return anthropic.NewClient(ctx, enhancedCfg, env, opts...)
 	case "google":
 		// Route non-Gemini models on Vertex AI (Model Garden) through the
-		// OpenAI-compatible endpoint instead of the Gemini SDK.
+		// vertexai package, which picks the right endpoint per publisher.
 		if vertexai.IsModelGardenConfig(enhancedCfg) {
 			return vertexai.NewClient(ctx, enhancedCfg, env, opts...)
 		}

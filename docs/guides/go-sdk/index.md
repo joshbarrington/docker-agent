@@ -264,7 +264,7 @@ func createAgentWithBuiltinTools(llm provider.Provider) *agent.Agent {
         agent.WithModel(llm),
         agent.WithToolSets(
             // Shell tool for running commands
-            builtin.NewShellTool(os.Environ(), rtConfig, nil),
+            builtin.NewShellTool(os.Environ(), rtConfig),
             // Filesystem tools
             builtin.NewFilesystemTool(rtConfig.Config.WorkingDir),
             // Think tool for reasoning

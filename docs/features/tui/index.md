@@ -34,21 +34,28 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 
 | Command     | Description                                    |
 | ----------- | ---------------------------------------------- |
-| `/new`      | Start a new conversation                       |
-| `/compact`  | Summarize and compact the conversation history |
-| `/copy`     | Copy the conversation to clipboard             |
-| `/export`   | Export the session as HTML                     |
-| `/sessions` | Browse and load past sessions                  |
-| `/model`    | Change the model for the current agent         |
-| `/theme`    | Change the color theme                         |
-| `/yolo`     | Toggle automatic tool call approval            |
-| `/title`    | Set or regenerate session title                |
-| `/attach`   | Attach a file to your message                  |
-| `/shell`    | Open a shell                                   |
-| `/star`     | Star/unstar the current session                |
-| `/cost`     | Show cost breakdown for this session           |
-| `/eval`     | Create an evaluation report                    |
-| `/exit`     | Exit the application                           |
+| `/new`         | Start a new conversation                                              |
+| `/clear`       | Clear the current conversation (keep session, drop messages)          |
+| `/compact`     | Summarize and compact the conversation history                        |
+| `/fork`        | Fork the current session into a new branch                            |
+| `/copy`        | Copy the entire conversation to clipboard                             |
+| `/copy-last`   | Copy only the last assistant message to clipboard                     |
+| `/export`      | Export the session as HTML                                            |
+| `/sessions`    | Browse and load past sessions                                         |
+| `/model`       | Change the model for the current agent                                |
+| `/theme`       | Change the color theme                                                |
+| `/yolo`        | Toggle automatic tool call approval                                   |
+| `/title`       | Set or regenerate session title                                       |
+| `/attach`      | Attach a file to your message                                         |
+| `/shell`       | Open a shell                                                          |
+| `/star`        | Star/unstar the current session                                       |
+| `/cost`        | Show cost breakdown for this session                                  |
+| `/eval`        | Create an evaluation report                                           |
+| `/tools`       | Browse available tools for the current agent                          |
+| `/permissions` | Inspect and edit tool permission rules                                |
+| `/split-diff`  | Toggle split-diff view for file edits                                 |
+| `/speak`       | Voice input via system speech-to-text (macOS only)                    |
+| `/exit`        | Exit the application (aliases: `/quit`, `/q`)                         |
 
 ## File Attachments
 
@@ -120,17 +127,26 @@ Customize session titles to make them more meaningful and easier to find. By def
 
 ## Keyboard Shortcuts
 
-| Shortcut | Action                                          |
-| -------- | ----------------------------------------------- |
-| Ctrl+K   | Open command palette                            |
-| Ctrl+M   | Switch model                                    |
-| Ctrl+R   | Reverse history search (search previous inputs) |
-| Ctrl+L   | Start audio listening mode (voice input)        |
-| Ctrl+Z   | Suspend TUI to background (resume with `fg`)    |
-| Ctrl+X   | Clear queued messages                           |
-| Escape   | Cancel current operation                        |
-| Enter    | Send message (or newline with Shift+Enter)      |
-| Up/Down  | Navigate message history                        |
+| Shortcut     | Action                                          |
+| ------------ | ----------------------------------------------- |
+| Ctrl+K       | Open command palette                            |
+| Ctrl+M       | Switch model                                    |
+| Ctrl+R       | Reverse history search (search previous inputs) |
+| Ctrl+G       | Cancel reverse history search                   |
+| Ctrl+S       | Cycle to next agent in the team                 |
+| Ctrl+1 – 9   | Switch directly to agent _N_ in the team list   |
+| Ctrl+T       | Open a new tab (additional agent session)       |
+| Ctrl+W       | Close the current tab                           |
+| Ctrl+N       | Next tab                                        |
+| Ctrl+P       | Previous tab                                    |
+| Ctrl+B       | Toggle the sidebar (full-UI mode only)          |
+| Ctrl+Y       | Toggle YOLO mode (auto-approve tool calls)      |
+| Ctrl+O       | Toggle hide tool results                        |
+| Ctrl+Z       | Suspend TUI to background (resume with `fg`)    |
+| Ctrl+X       | Clear queued messages                           |
+| Escape       | Cancel current operation                        |
+| Enter        | Send message (or newline with Shift+Enter)      |
+| Up/Down      | Navigate message history                        |
 
 Press <kbd>Ctrl</kbd>+<kbd>H</kbd> to view the complete list of all available keyboard shortcuts.
 

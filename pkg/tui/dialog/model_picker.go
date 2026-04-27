@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -374,13 +375,30 @@ const (
 	// pickerDialogPadding is the horizontal padding inside the dialog border (2 on each side + border)
 	pickerDialogPadding = 6
 
+	// Column widths for the per-row stats. Values are right-aligned in their
+	// own column so the list reads like a table.
+	pickerInputColWidth   = 10
+	pickerOutputColWidth  = 10
+	pickerContextColWidth = 8
+
+	// pickerDetailsLines is the number of lines reserved for the model
+	// details panel rendered below the model list.
+	pickerDetailsLines = 4
+
 	// pickerListVerticalOverhead is the number of rows used by dialog chrome:
-	// title(1) + space(1) + input(1) + separator(1) + space at bottom(1) + help keys(1) + borders/padding(2) = 8
-	pickerListVerticalOverhead = 8
+	// title(1) + space(1) + input(1) + separator(1) + column header(1) +
+	// details separator(1) + details (pickerDetailsLines) + space at bottom(1) +
+	// help keys(1) + borders/padding(2) = 10 + pickerDetailsLines
+	pickerListVerticalOverhead = 10 + pickerDetailsLines
 
 	// pickerListStartOffset is the Y offset from dialog top to where the model list starts:
-	// border(1) + padding(1) + title(1) + space(1) + input(1) + separator(1) = 6
-	pickerListStartOffset = 6
+	// border(1) + padding(1) + title(1) + space(1) + input(1) + separator(1) +
+	// column header(1) = 7
+	pickerListStartOffset = 7
+
+	// pickerDetailsLabelWidth is the column width for the labels in the
+	// details panel ("Reference", "Pricing", "Limits", "Modalities").
+	pickerDetailsLabelWidth = 12
 
 	// catalogSeparatorLabel is the text for the catalog section separator
 	catalogSeparatorLabel = "── Other models "
@@ -485,7 +503,10 @@ func (d *modelPickerDialog) View() string {
 
 	content := contentBuilder.
 		AddSeparator().
+		AddContent(d.renderColumnHeader(contentWidth)).
 		AddContent(scrollableContent).
+		AddSeparator().
+		AddContent(d.renderDetails(contentWidth)).
 		AddSpace().
 		AddHelpKeys("↑/↓", "navigate", "enter", "select", "esc", "cancel").
 		Build()
@@ -546,93 +567,304 @@ func (d *modelPickerDialog) findSelectedLine(allModelLines []string) int {
 	return min(lineIndex, len(allModelLines)-1)
 }
 
+// pickerRowPalette is the set of styles used to render one row of the
+// model list. Selection inverts the foreground/background colours of
+// every visible element so the row reads as a single highlighted band.
+type pickerRowPalette struct {
+	name     lipgloss.Style
+	desc     lipgloss.Style
+	alloy    lipgloss.Style
+	defBadge lipgloss.Style
+	current  lipgloss.Style
+	stats    lipgloss.Style
+	missing  lipgloss.Style
+}
+
+func pickerRowStyles(selected bool) pickerRowPalette {
+	p := pickerRowPalette{
+		name:     styles.PaletteUnselectedActionStyle,
+		desc:     styles.PaletteUnselectedDescStyle,
+		alloy:    styles.BadgeAlloyStyle,
+		defBadge: styles.BadgeDefaultStyle,
+		current:  styles.BadgeCurrentStyle,
+		stats:    styles.SecondaryStyle,
+		missing:  styles.MutedStyle,
+	}
+	if !selected {
+		return p
+	}
+	p.name = styles.PaletteSelectedActionStyle
+	p.desc = styles.PaletteSelectedDescStyle
+	p.alloy = p.alloy.Background(styles.MobyBlue)
+	p.defBadge = p.defBadge.Background(styles.MobyBlue)
+	p.current = p.current.Background(styles.MobyBlue)
+	// Reuse the description style so the cells share the selection band.
+	p.stats = p.desc
+	p.missing = p.desc.Italic(true)
+	return p
+}
+
 func (d *modelPickerDialog) renderModel(model runtime.ModelChoice, selected bool, maxWidth int) string {
-	nameStyle, descStyle := styles.PaletteUnselectedActionStyle, styles.PaletteUnselectedDescStyle
-	alloyBadgeStyle, defaultBadgeStyle, currentBadgeStyle := styles.BadgeAlloyStyle, styles.BadgeDefaultStyle, styles.BadgeCurrentStyle
-	if selected {
-		nameStyle, descStyle = styles.PaletteSelectedActionStyle, styles.PaletteSelectedDescStyle
-		// Keep badge colors visible on selection background
-		alloyBadgeStyle = alloyBadgeStyle.Background(styles.MobyBlue)
-		defaultBadgeStyle = defaultBadgeStyle.Background(styles.MobyBlue)
-		currentBadgeStyle = currentBadgeStyle.Background(styles.MobyBlue)
+	p := pickerRowStyles(selected)
+	nameWidth := pickerNameColWidth(maxWidth)
+	return renderRowName(model, nameWidth, p) + renderRowStats(model, p)
+}
+
+// pickerNameColWidth returns the width allotted to the name column for
+// a given total content width.
+func pickerNameColWidth(maxWidth int) int {
+	return max(1, maxWidth-pickerInputColWidth-pickerOutputColWidth-pickerContextColWidth)
+}
+
+// renderRowName renders the model name and any badges, padded to width.
+func renderRowName(model runtime.ModelChoice, width int, p pickerRowPalette) string {
+	badges, badgeWidth := renderRowBadges(model, p)
+
+	nameMax := max(1, width-badgeWidth)
+	displayName := model.Name
+	if lipgloss.Width(displayName) > nameMax {
+		displayName = toolcommon.TruncateText(displayName, nameMax)
 	}
 
-	// Check if this is an alloy model (no provider but has comma-separated models)
-	isAlloy := model.Provider == "" && strings.Contains(model.Model, ",")
+	name := p.name.Render(displayName) + badges
+	padding := max(0, width-lipgloss.Width(name))
+	return name + p.desc.Render(strings.Repeat(" ", padding))
+}
 
-	// Calculate badge widths
-	var badgeWidth int
-	if isAlloy {
-		badgeWidth += lipgloss.Width(" (alloy)")
+// renderRowBadges returns the rendered badge segment plus its width.
+func renderRowBadges(model runtime.ModelChoice, p pickerRowPalette) (string, int) {
+	var (
+		text  string
+		width int
+	)
+	add := func(label string, style lipgloss.Style) {
+		text += style.Render(label)
+		width += lipgloss.Width(label)
 	}
-	if model.IsCurrent {
-		badgeWidth += lipgloss.Width(" (current)")
-	} else if model.IsDefault {
-		badgeWidth += lipgloss.Width(" (default)")
+	if isAlloyModel(model) {
+		add(" (alloy)", p.alloy)
 	}
+	switch {
+	case model.IsCurrent:
+		add(" (current)", p.current)
+	case model.IsDefault:
+		add(" (default)", p.defBadge)
+	}
+	return text, width
+}
 
-	// Build description
-	var desc string
+// renderRowStats renders the three right-aligned stats columns.
+func renderRowStats(model runtime.ModelChoice, p pickerRowPalette) string {
+	return renderStatsCell(formatCostPerMillion(model.InputCost), pickerInputColWidth, p, model.InputCost > 0) +
+		renderStatsCell(formatCostPerMillion(model.OutputCost), pickerOutputColWidth, p, model.OutputCost > 0) +
+		renderStatsCell(formatContextCell(model.ContextLimit), pickerContextColWidth, p, model.ContextLimit > 0)
+}
+
+// renderStatsCell right-aligns value in a fixed-width column. Missing
+// values fade by using the palette's missing style.
+func renderStatsCell(value string, width int, p pickerRowPalette, present bool) string {
+	padding := max(0, width-lipgloss.Width(value))
+	pad := p.stats.Render(strings.Repeat(" ", padding))
+	valueStyle := p.stats
+	if !present {
+		valueStyle = p.missing
+	}
+	return pad + valueStyle.Render(value)
+}
+
+// isAlloyModel returns true when the model is an alloy spec (no
+// provider, comma-separated provider/model list in Model).
+func isAlloyModel(model runtime.ModelChoice) bool {
+	return model.Provider == "" && strings.Contains(model.Model, ",")
+}
+
+// renderColumnHeader renders the static header above the model list,
+// labelling the per-row stats columns.
+func (d *modelPickerDialog) renderColumnHeader(maxWidth int) string {
+	header := strings.Repeat(" ", pickerNameColWidth(maxWidth)) +
+		rightAlign("Input/1M", pickerInputColWidth) +
+		rightAlign("Output/1M", pickerOutputColWidth) +
+		rightAlign("Context", pickerContextColWidth)
+	return styles.MutedStyle.Render(header)
+}
+
+// rightAlign returns s padded with leading spaces so its rendered width
+// equals width. Strings already wider than width are returned unchanged.
+func rightAlign(s string, width int) string {
+	padding := width - lipgloss.Width(s)
+	if padding <= 0 {
+		return s
+	}
+	return strings.Repeat(" ", padding) + s
+}
+
+// leftPad returns s padded with trailing spaces to width. Strings already
+// wider than width are returned unchanged.
+func leftPad(s string, width int) string {
+	padding := width - lipgloss.Width(s)
+	if padding <= 0 {
+		return s
+	}
+	return s + strings.Repeat(" ", padding)
+}
+
+// formatContextCell formats a context window size for the table column.
+// Returns an em-dash placeholder when the size is unknown.
+func formatContextCell(tokens int) string {
+	if tokens <= 0 {
+		return "—"
+	}
+	return formatTokenCount(int64(tokens))
+}
+
+// formatCostPerMillion renders a USD-per-million-tokens price using a
+// compact representation. Values <= 0 render as an em-dash; sub-cent
+// values keep four decimals so they don't collapse to "$0.00";
+// sub-dollar values keep two decimals; larger values trim trailing
+// zeros (e.g., $3 instead of $3.00).
+func formatCostPerMillion(cost float64) string {
+	switch {
+	case cost <= 0:
+		return "—"
+	case cost < 0.01:
+		return fmt.Sprintf("$%.4f", cost)
+	case cost < 1:
+		return fmt.Sprintf("$%.2f", cost)
+	}
+	s := strconv.FormatFloat(cost, 'f', 2, 64)
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	return "$" + s
+}
+
+// modelReference returns the technical "provider/model" reference for a
+// model choice, suitable for the details panel.
+func modelReference(model runtime.ModelChoice) string {
 	switch {
 	case model.IsCustom:
-		// Custom models: name already is provider/model, no need to repeat
-	case model.IsCatalog:
-		// Catalog models: show provider/model as description (Name is the human-readable name)
-		desc = model.Provider + "/" + model.Model
+		return model.Ref
+	case isAlloyModel(model):
+		return model.Model
 	case model.Provider != "" && model.Model != "":
-		desc = model.Provider + "/" + model.Model
-	case isAlloy:
-		// Alloy model: show the constituent models
-		desc = model.Model
-	case model.Ref != "" && !strings.Contains(model.Name, model.Ref):
-		desc = model.Ref
+		return model.Provider + "/" + model.Model
+	default:
+		return model.Ref
+	}
+}
+
+// detailsStyles bundles the styles used by the details panel.
+type detailsStyles struct {
+	label lipgloss.Style
+	value lipgloss.Style
+	muted lipgloss.Style
+}
+
+func newDetailsStyles() detailsStyles {
+	return detailsStyles{
+		label: styles.SecondaryStyle.Bold(true),
+		value: styles.BaseStyle,
+		muted: styles.MutedStyle.Italic(true),
+	}
+}
+
+// renderDetails returns the details panel for the currently-selected
+// model. It always renders pickerDetailsLines lines so the dialog has a
+// stable height.
+func (d *modelPickerDialog) renderDetails(width int) string {
+	s := newDetailsStyles()
+
+	var lines []string
+	if d.selected >= 0 && d.selected < len(d.filtered) {
+		lines = formatDetailsLines(d.filtered[d.selected], s)
+	} else {
+		lines = []string{s.muted.Render("No model selected")}
 	}
 
-	// Calculate available width for name and description
-	separatorWidth := 0
-	if desc != "" {
-		separatorWidth = lipgloss.Width(" • ")
+	// Pad to a stable height so the dialog doesn't change size.
+	for len(lines) < pickerDetailsLines {
+		lines = append(lines, "")
 	}
-
-	// Maximum width for name (leaving space for badges and description)
-	maxNameWidth := maxWidth - badgeWidth
-	if desc != "" {
-		// Reserve at least some space for description (minimum 10 chars or available)
-		minDescWidth := min(10, len(desc))
-		maxNameWidth = maxWidth - badgeWidth - separatorWidth - minDescWidth
-	}
-
-	// Truncate name if needed
-	displayName := model.Name
-	if lipgloss.Width(displayName) > maxNameWidth {
-		displayName = toolcommon.TruncateText(displayName, maxNameWidth)
-	}
-
-	// Build the name with colored badges
-	var nameParts []string
-	nameParts = append(nameParts, nameStyle.Render(displayName))
-	if isAlloy {
-		nameParts = append(nameParts, alloyBadgeStyle.Render(" (alloy)"))
-	}
-	if model.IsCurrent {
-		nameParts = append(nameParts, currentBadgeStyle.Render(" (current)"))
-	} else if model.IsDefault {
-		nameParts = append(nameParts, defaultBadgeStyle.Render(" (default)"))
-	}
-	name := strings.Join(nameParts, "")
-
-	if desc != "" {
-		// Calculate remaining width for description
-		nameWidth := lipgloss.Width(name)
-		remainingWidth := maxWidth - nameWidth - separatorWidth
-		if remainingWidth > 0 {
-			truncatedDesc := toolcommon.TruncateText(desc, remainingWidth)
-			return name + descStyle.Render(" • "+truncatedDesc)
+	// Truncate any line that would wrap.
+	for i, l := range lines {
+		if lipgloss.Width(l) > width {
+			lines[i] = toolcommon.TruncateText(l, width)
 		}
-		// No room for description
-		return name
 	}
-	return name
+	return strings.Join(lines[:pickerDetailsLines], "\n")
+}
+
+// formatDetailsLines builds the four labelled rows shown for a model.
+func formatDetailsLines(model runtime.ModelChoice, s detailsStyles) []string {
+	row := func(label, value string) string {
+		return s.label.Render(leftPad(label, pickerDetailsLabelWidth)) + value
+	}
+
+	ref := s.value.Render(modelReference(model))
+	if model.Family != "" && !strings.EqualFold(model.Family, model.Provider) {
+		ref += s.muted.Render(" · " + model.Family + " family")
+	}
+
+	return []string{
+		row("Reference", ref),
+		row("Pricing", formatPricingRow(model, s)),
+		row("Limits", formatLimitsRow(model, s)),
+		row("Modalities", formatModalitiesRow(model, s)),
+	}
+}
+
+// formatPricingRow renders the pricing line of the details panel.
+func formatPricingRow(model runtime.ModelChoice, s detailsStyles) string {
+	var parts []string
+	if model.InputCost > 0 || model.OutputCost > 0 {
+		parts = append(parts,
+			s.value.Render(formatCostPerMillion(model.InputCost)+" in"),
+			s.value.Render(formatCostPerMillion(model.OutputCost)+" out"),
+		)
+	}
+	if model.CacheReadCost > 0 {
+		parts = append(parts, s.value.Render(formatCostPerMillion(model.CacheReadCost)+" cache read"))
+	}
+	if model.CacheWriteCost > 0 {
+		parts = append(parts, s.value.Render(formatCostPerMillion(model.CacheWriteCost)+" cache write"))
+	}
+	if len(parts) == 0 {
+		return s.muted.Render("unavailable")
+	}
+	parts = append(parts, s.muted.Render("per 1M tokens"))
+	return strings.Join(parts, s.muted.Render(" · "))
+}
+
+// formatLimitsRow renders the limits line of the details panel.
+func formatLimitsRow(model runtime.ModelChoice, s detailsStyles) string {
+	var parts []string
+	if model.ContextLimit > 0 {
+		parts = append(parts, s.value.Render(formatTokenCount(int64(model.ContextLimit))+" context window"))
+	}
+	if model.OutputLimit > 0 {
+		parts = append(parts, s.value.Render(formatTokenCount(model.OutputLimit)+" max output"))
+	}
+	if len(parts) == 0 {
+		return s.muted.Render("unavailable")
+	}
+	return strings.Join(parts, s.muted.Render(" · "))
+}
+
+// formatModalitiesRow renders the modalities line of the details panel.
+func formatModalitiesRow(model runtime.ModelChoice, s detailsStyles) string {
+	if len(model.InputModalities) == 0 && len(model.OutputModalities) == 0 {
+		return s.muted.Render("unavailable")
+	}
+	in := joinOrDash(model.InputModalities)
+	out := joinOrDash(model.OutputModalities)
+	return s.value.Render(in) + s.muted.Render(" → ") + s.value.Render(out)
+}
+
+// joinOrDash returns the comma-joined list, or an em-dash when empty.
+func joinOrDash(parts []string) string {
+	if len(parts) == 0 {
+		return "—"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (d *modelPickerDialog) Position() (row, col int) {

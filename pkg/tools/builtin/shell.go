@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -102,9 +103,62 @@ type RunShellArgs struct {
 	Timeout int    `json:"timeout,omitempty" jsonschema:"Command execution timeout in seconds (default: 30)"`
 }
 
+// UnmarshalJSON accepts both the canonical "cmd" key and the common alias
+// "command" for the shell command parameter.
+//
+// The advertised schema still declares "cmd" as the canonical name, but many
+// models (particularly ones biased by Anthropic's built-in bash tool and other
+// ecosystems that use "command") occasionally emit "command" instead. Accepting
+// both prevents a wasted turn on an empty-command error while keeping the
+// canonical contract unchanged. When "cmd" is present with a non-blank value
+// it wins; a blank (empty or whitespace-only) "cmd" falls back to "command"
+// so a valid alias is not silently shadowed.
+func (a *RunShellArgs) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Cmd     string `json:"cmd"`
+		Command string `json:"command"`
+		Cwd     string `json:"cwd"`
+		Timeout int    `json:"timeout"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	a.Cmd = preferNonBlank(raw.Cmd, raw.Command)
+	a.Cwd = raw.Cwd
+	a.Timeout = raw.Timeout
+	return nil
+}
+
 type RunShellBackgroundArgs struct {
 	Cmd string `json:"cmd" jsonschema:"The shell command to execute in the background"`
 	Cwd string `json:"cwd,omitempty" jsonschema:"The working directory to execute the command in (default: \".\")"`
+}
+
+// UnmarshalJSON accepts both "cmd" (canonical) and "command" (common alias),
+// mirroring RunShellArgs.UnmarshalJSON. See its comment for rationale.
+func (a *RunShellBackgroundArgs) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Cmd     string `json:"cmd"`
+		Command string `json:"command"`
+		Cwd     string `json:"cwd"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	a.Cmd = preferNonBlank(raw.Cmd, raw.Command)
+	a.Cwd = raw.Cwd
+	return nil
+}
+
+// preferNonBlank returns primary when it has a non-whitespace character;
+// otherwise it returns fallback. The chosen value is returned unmodified so
+// that whitespace inside a legitimate command (e.g. trailing newlines in a
+// heredoc) is preserved.
+func preferNonBlank(primary, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return primary
+	}
+	return fallback
 }
 
 type ViewBackgroundJobArgs struct {
@@ -132,7 +186,7 @@ func statusToString(status int32) string {
 
 func (h *shellHandler) RunShell(ctx context.Context, params RunShellArgs) (*tools.ToolCallResult, error) {
 	if strings.TrimSpace(params.Cmd) == "" {
-		return tools.ResultError("Error: empty command"), nil
+		return tools.ResultError(`Error: missing or empty "cmd" parameter. Pass the shell command as {"cmd": "..."}.`), nil
 	}
 
 	timeout := h.timeout
@@ -166,7 +220,10 @@ func (h *shellHandler) RunShell(ctx context.Context, params RunShellArgs) (*tool
 const waitDelayAfterShellExit = 500 * time.Millisecond
 
 func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, command, cwd string, timeout time.Duration) *tools.ToolCallResult {
-	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, command)...)
+	// Cancellation is handled manually below (timeoutCtx + Process.Kill +
+	// process group + WaitDelay), so we use exec.Command rather than
+	// exec.CommandContext to keep that flow in one place.
+	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, command)...) //nolint:noctx // see comment above
 	cmd.Env = h.env
 	cmd.Dir = cwd
 	cmd.SysProcAttr = platformSpecificSysProcAttr()
@@ -182,6 +239,9 @@ func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, command
 
 	pg, err := createProcessGroup(cmd.Process)
 	if err != nil {
+		// Successfully started the child but couldn't install it in its own
+		// process group: clean it up before bailing out.
+		reapSpawnedChild(cmd, pg)
 		return tools.ResultError(fmt.Sprintf("Error creating process group: %s", err))
 	}
 
@@ -211,10 +271,14 @@ func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, command
 }
 
 func (h *shellHandler) RunShellBackground(_ context.Context, params RunShellBackgroundArgs) (*tools.ToolCallResult, error) {
+	if strings.TrimSpace(params.Cmd) == "" {
+		return tools.ResultError(`Error: missing or empty "cmd" parameter. Pass the shell command as {"cmd": "..."}.`), nil
+	}
+
 	counter := h.jobCounter.Add(1)
 	jobID := fmt.Sprintf("job_%d_%d", time.Now().Unix(), counter)
 
-	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, params.Cmd)...)
+	cmd := exec.Command(h.shell, append(h.shellArgsPrefix, params.Cmd)...) //nolint:noctx // RunShellBackground intentionally outlives the request context
 	cmd.Env = h.env
 	cmd.Dir = h.resolveWorkDir(params.Cwd)
 	cmd.SysProcAttr = platformSpecificSysProcAttr()
@@ -240,7 +304,9 @@ func (h *shellHandler) RunShellBackground(_ context.Context, params RunShellBack
 
 	pg, err := createProcessGroup(cmd.Process)
 	if err != nil {
-		_ = kill(cmd.Process, pg)
+		// Successfully started the child but couldn't install it in its own
+		// process group: clean it up before bailing out.
+		reapSpawnedChild(cmd, pg)
 		return tools.ResultError(fmt.Sprintf("Error creating process group: %s", err)), nil
 	}
 
@@ -359,6 +425,29 @@ func (h *shellHandler) StopBackgroundJob(_ context.Context, params StopBackgroun
 	}
 
 	return tools.ResultSuccess(fmt.Sprintf("Job %s stopped successfully", params.JobID)), nil
+}
+
+// reapSpawnedChild terminates a child that we've started but decided not
+// to run (e.g. follow-up setup failed) and waits for it so we don't leak a
+// zombie or its stdout/stderr pipes. SIGTERM is sent first; if the child
+// hasn't exited after a short grace period we escalate to SIGKILL.
+func reapSpawnedChild(cmd *exec.Cmd, pg *processGroup) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = kill(cmd.Process, pg)
+
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+	}
 }
 
 // NewShellTool creates a new shell tool.

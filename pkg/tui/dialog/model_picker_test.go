@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -477,4 +478,165 @@ func TestModelPickerCatalogFiltering(t *testing.T) {
 	require.Len(t, d.filtered, 1)
 	require.Equal(t, "Claude Sonnet", d.filtered[0].Name)
 	require.True(t, d.filtered[0].IsCatalog)
+}
+
+func TestFormatCostPerMillion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cost float64
+		want string
+	}{
+		{name: "zero", cost: 0, want: "—"},
+		{name: "sub-cent uses 4 decimals", cost: 0.001, want: "$0.0010"},
+		{name: "sub-cent half", cost: 0.005, want: "$0.0050"},
+		{name: "one cent uses 2 decimals", cost: 0.01, want: "$0.01"},
+		{name: "sub-dollar", cost: 0.3, want: "$0.30"},
+		{name: "sub-dollar small", cost: 0.075, want: "$0.07"},
+		{name: "round dollars", cost: 3, want: "$3"},
+		{name: "two decimals", cost: 2.5, want: "$2.5"},
+		{name: "trims trailing zero", cost: 15, want: "$15"},
+		{name: "keeps significant decimals", cost: 1.99, want: "$1.99"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, formatCostPerMillion(tt.cost))
+		})
+	}
+}
+
+func TestStatsCellFormatting(t *testing.T) {
+	// Helpers backing the table-style stats columns.
+	t.Parallel()
+
+	t.Run("formatCostPerMillion zero renders em-dash", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "—", formatCostPerMillion(0))
+	})
+	t.Run("formatCostPerMillion positive", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "$3", formatCostPerMillion(3))
+	})
+	t.Run("formatContextCell zero renders em-dash", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "—", formatContextCell(0))
+	})
+	t.Run("formatContextCell positive", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "200.0K", formatContextCell(200_000))
+	})
+}
+
+func TestRightAlign(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "   foo", rightAlign("foo", 6))
+	assert.Equal(t, "foobar", rightAlign("foobar", 4), "strings wider than width are left untouched")
+	assert.Equal(t, "foo", rightAlign("foo", 3))
+}
+
+func TestModelReference(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "openai/gpt-4o", modelReference(runtime.ModelChoice{Provider: "openai", Model: "gpt-4o"}))
+	assert.Equal(t, "openai/gpt-4o,anthropic/claude", modelReference(runtime.ModelChoice{Model: "openai/gpt-4o,anthropic/claude"}))
+	assert.Equal(t, "openai/custom", modelReference(runtime.ModelChoice{Ref: "openai/custom", IsCustom: true}))
+}
+
+func TestModelPickerShowsPricingInRow(t *testing.T) {
+	t.Parallel()
+
+	models := []runtime.ModelChoice{
+		{
+			Name: "default_model", Ref: "default_model",
+			Provider: "openai", Model: "gpt-4o", IsDefault: true,
+			InputCost: 2.5, OutputCost: 10, ContextLimit: 128_000,
+		},
+	}
+
+	dialog := NewModelPickerDialog(models)
+	d := dialog.(*modelPickerDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+
+	view := d.View()
+	assert.Contains(t, view, "Input/1M", "column header should label the input column")
+	assert.Contains(t, view, "Output/1M", "column header should label the output column")
+	assert.Contains(t, view, "Context", "column header should label the context column")
+	assert.Contains(t, view, "$2.5", "row should show input cost")
+	assert.Contains(t, view, "$10", "row should show output cost")
+	assert.Contains(t, view, "128.0K", "row should show context window")
+	// The internal provider/model reference must NOT appear in the list any more.
+	refIdx := strings.Index(view, "Reference")
+	require.Positive(t, refIdx, "details panel with Reference should be present")
+	listView := view[:refIdx]
+	assert.NotContains(t, listView, "openai/gpt-4o", "row must not show provider/model reference; it belongs to the details panel")
+}
+
+func TestModelPickerDetailsPanel(t *testing.T) {
+	t.Parallel()
+
+	models := []runtime.ModelChoice{
+		{
+			Name: "claude", Ref: "anthropic/claude-sonnet-4-0",
+			Provider: "anthropic", Model: "claude-sonnet-4-0", IsCatalog: true,
+			Family:           "claude",
+			InputCost:        3,
+			OutputCost:       15,
+			CacheReadCost:    0.3,
+			CacheWriteCost:   3.75,
+			ContextLimit:     200_000,
+			OutputLimit:      8_192,
+			InputModalities:  []string{"text", "image"},
+			OutputModalities: []string{"text"},
+		},
+	}
+
+	dialog := NewModelPickerDialog(models)
+	d := dialog.(*modelPickerDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 140, Height: 50})
+
+	view := d.View()
+
+	// Reference line
+	assert.Contains(t, view, "Reference")
+	assert.Contains(t, view, "anthropic/claude-sonnet-4-0")
+	assert.Contains(t, view, "claude family")
+
+	// Pricing breakdown
+	assert.Contains(t, view, "Pricing")
+	assert.Contains(t, view, "$3 in")
+	assert.Contains(t, view, "$15 out")
+	assert.Contains(t, view, "$0.30 cache read")
+	assert.Contains(t, view, "$3.75 cache write")
+	assert.Contains(t, view, "per 1M tokens")
+
+	// Limits
+	assert.Contains(t, view, "Limits")
+	assert.Contains(t, view, "200.0K context window")
+	assert.Contains(t, view, "8.2K max output")
+
+	// Modalities
+	assert.Contains(t, view, "Modalities")
+	assert.Contains(t, view, "text, image")
+	assert.Contains(t, view, "→")
+}
+
+func TestModelPickerDetailsPanelMissingInfo(t *testing.T) {
+	t.Parallel()
+
+	models := []runtime.ModelChoice{
+		{Name: "plain", Ref: "plain", Provider: "openai", Model: "gpt-4o", IsDefault: true},
+	}
+
+	dialog := NewModelPickerDialog(models)
+	d := dialog.(*modelPickerDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+
+	view := d.View()
+	assert.Contains(t, view, "unavailable", "details panel should indicate missing catalog info")
 }

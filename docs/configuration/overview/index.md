@@ -14,7 +14,7 @@ A docker-agent YAML config has these main sections:
 
 ```bash
 # 1. Version — configuration schema version (optional but recommended)
-version: 6
+version: 8
 
 # 2. Metadata — optional agent metadata for distribution
 metadata:
@@ -46,14 +46,21 @@ rag:
       - type: chunked-embeddings
         model: openai/text-embedding-3-small
 
-# 6. Providers — optional reusable provider definitions
+# 6. MCPs — reusable MCP server definitions (optional)
+mcps:
+  github:
+    remote:
+      url: https://api.githubcopilot.com/mcp
+      transport_type: sse
+
+# 7. Providers — optional reusable provider definitions
 providers:
   my_provider:
     provider: anthropic  # or openai (default), google, amazon-bedrock, etc.
     token_key: MY_API_KEY
     max_tokens: 16384
 
-# 7. Permissions — agent-level tool permission rules (optional)
+# 8. Permissions — agent-level tool permission rules (optional)
 #    For user-wide global permissions, see ~/.config/cagent/config.yaml
 permissions:
   allow: ["read_*"]
@@ -181,10 +188,10 @@ For editor autocompletion and validation, use the [Docker Agent JSON Schema](htt
 
 ## Config Versioning
 
-docker-agent configs are versioned. The current version is `5`. Add the version at the top of your config:
+docker-agent configs are versioned. The current version is `8`. Add the version at the top of your config:
 
 ```yaml
-version: 5
+version: 8
 
 agents:
   root:
@@ -217,6 +224,32 @@ metadata:
 | `version`     | Semantic version string                    |
 
 See [Agent Distribution]({{ '/concepts/distribution/' | relative_url }}) for publishing agents to registries.
+
+## Reusable MCP Servers (`mcps:`)
+
+The top-level `mcps:` section defines named MCP server configurations that agents can reference with `toolsets: [{type: mcp, ref: <name>}]`. This avoids repeating the same command / URL / headers across agents and keeps credentials in one place.
+
+```yaml
+mcps:
+  github:
+    remote:
+      url: https://api.githubcopilot.com/mcp
+      transport_type: sse
+  playwright:
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-playwright"]
+
+agents:
+  root:
+    model: openai/gpt-4o
+    toolsets:
+      - type: mcp
+        ref: github        # reuse the definition above
+      - type: mcp
+        ref: playwright
+```
+
+An `mcps` entry accepts every field a regular `type: mcp` toolset accepts (command/args/env, `remote` with `url`/`transport_type`/`headers`/`oauth`, `tools` filter, `instruction`, `defer`, …) — the `type: mcp` is implicit. See the [Tool Config]({{ '/configuration/tools/' | relative_url }}) page for all options and the [Remote MCP Servers]({{ '/features/remote-mcp/' | relative_url }}) guide for remote setups.
 
 ## Custom Providers Section
 

@@ -39,24 +39,27 @@ All endpoints are under the `/api` prefix.
 
 ### Sessions
 
-| Method   | Path                                | Description                                         |
-| -------- | ----------------------------------- | --------------------------------------------------- |
-| `GET`    | `/api/sessions`                     | List all sessions                                   |
-| `POST`   | `/api/sessions`                     | Create a new session                                |
-| `GET`    | `/api/sessions/:id`                 | Get a session by ID (messages, tokens, permissions) |
-| `DELETE` | `/api/sessions/:id`                 | Delete a session                                    |
-| `PATCH`  | `/api/sessions/:id/title`           | Update session title                                |
-| `PATCH`  | `/api/sessions/:id/permissions`     | Update session permissions                          |
-| `POST`   | `/api/sessions/:id/resume`          | Resume a paused session (after tool confirmation)   |
-| `POST`   | `/api/sessions/:id/tools/toggle`    | Toggle auto-approve (YOLO) mode                     |
-| `POST`   | `/api/sessions/:id/elicitation`     | Respond to an MCP tool elicitation request          |
+| Method   | Path                                | Description                                             |
+| -------- | ----------------------------------- | ------------------------------------------------------- |
+| `GET`    | `/api/sessions`                     | List all sessions                                       |
+| `POST`   | `/api/sessions`                     | Create a new session                                    |
+| `GET`    | `/api/sessions/:id`                 | Get a session by ID (messages, tokens, permissions)     |
+| `DELETE` | `/api/sessions/:id`                 | Delete a session                                        |
+| `PATCH`  | `/api/sessions/:id/title`           | Update session title                                    |
+| `PATCH`  | `/api/sessions/:id/permissions`     | Update session permissions                              |
+| `POST`   | `/api/sessions/:id/resume`          | Resume a paused session (after tool confirmation)       |
+| `POST`   | `/api/sessions/:id/tools/toggle`    | Toggle auto-approve (YOLO) mode                         |
+| `POST`   | `/api/sessions/:id/elicitation`     | Respond to an MCP tool elicitation request              |
+| `POST`   | `/api/sessions/:id/steer`           | Inject messages into a running turn (pre-empts current) |
+| `POST`   | `/api/sessions/:id/followup`        | Enqueue messages to run after the current turn finishes |
 
 ### Agent Execution
 
-| Method | Path                                   | Description                                   |
-| ------ | -------------------------------------- | --------------------------------------------- |
-| `POST` | `/api/sessions/:id/agent/:agent`       | Run the root agent for a session (SSE stream) |
-| `POST` | `/api/sessions/:id/agent/:agent/:name` | Run a specific named agent (SSE stream)       |
+| Method | Path                                       | Description                                                                          |
+| ------ | ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `POST` | `/api/sessions/:id/agent/:agent`           | Run the root agent for a session (SSE stream)                                        |
+| `POST` | `/api/sessions/:id/agent/:agent/:name`     | Run a specific named agent (SSE stream)                                              |
+| `GET`  | `/api/agents/:id/:agent_name/tools/count`  | Count tools currently available to `:agent_name` (accounts for deferred toolsets).   |
 
 **Path parameters:**
 

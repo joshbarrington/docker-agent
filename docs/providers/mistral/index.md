@@ -74,17 +74,17 @@ When you run `docker agent run` without specifying a config, docker-agent automa
 
 ## Extended Thinking
 
-Mistral models support thinking mode through the OpenAI-compatible API. By default, docker-agent enables `medium` thinking effort:
+Mistral models support thinking mode through the OpenAI-compatible API. Thinking is **not enabled by default** — you must set `thinking_budget` explicitly on the model:
 
 ```yaml
 models:
   mistral:
     provider: mistral
     model: mistral-large-latest
-    thinking_budget: high # minimal, low, medium, high, or none
+    thinking_budget: high # minimal, low, medium, high, xhigh, or none
 ```
 
-To disable thinking:
+To disable thinking (the default):
 
 ```yaml
 models:

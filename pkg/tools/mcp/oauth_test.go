@@ -355,7 +355,11 @@ func TestCallbackServer_RejectsCallbackBeforeStateSet(t *testing.T) {
 	defer func() { _ = cs.Shutdown(t.Context()) }()
 
 	// Send a callback before SetExpectedState has been called.
-	resp, err := http.Get(cs.GetRedirectURI() + "?code=authcode&state=anything")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, cs.GetRedirectURI()+"?code=authcode&state=anything", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

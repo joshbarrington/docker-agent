@@ -374,6 +374,15 @@ func NewSQLiteSessionStore(path string) (Store, error) {
 			return nil, err
 		}
 
+		// Don't attempt recovery if we couldn't even open/create the database file
+		// (e.g., permission denied, read-only filesystem, missing directory).
+		// The backup+retry dance can't fix a filesystem-level problem, and would just
+		// wrap the real error in a confusing "migration failed even after database reset"
+		// message.
+		if sqliteutil.IsCantOpenError(err) {
+			return nil, err
+		}
+
 		// If migrations failed, try to recover by backing up the database and starting fresh
 		slog.Warn("Failed to open session store, attempting recovery", "error", err)
 

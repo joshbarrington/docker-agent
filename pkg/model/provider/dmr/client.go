@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"time"
@@ -54,6 +55,7 @@ type Client struct {
 	client     openai.Client
 	baseURL    string
 	httpClient *http.Client
+	engine     string
 }
 
 // NewClient creates a new DMR client from the provided configuration
@@ -103,18 +105,28 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 
 	clientOptions = append(clientOptions, option.WithBaseURL(baseURL), option.WithAPIKey("")) // DMR doesn't need auth
 
-	// Build runtime flags from ModelConfig and engine
-	contextSize, providerRuntimeFlags, specOpts := parseDMRProviderOpts(cfg)
-	configFlags := buildRuntimeFlagsFromModelConfig(engine, cfg)
-	finalFlags, warnings := mergeRuntimeFlagsPreferUser(configFlags, providerRuntimeFlags)
-	for _, w := range warnings {
-		slog.Warn(w)
+	parsed, err := parseDMRProviderOpts(engine, cfg)
+	if err != nil {
+		slog.Error("DMR provider_opts invalid", "error", err, "model", cfg.Model)
+		return nil, err
 	}
-	slog.Debug("DMR provider_opts parsed", "model", cfg.Model, "context_size", contextSize, "runtime_flags", finalFlags, "speculative_opts", specOpts, "engine", engine)
+	backendCfg := buildConfigureBackendConfig(parsed.contextSize, parsed.runtimeFlags, parsed.specOpts, parsed.llamaCpp, parsed.vllm, parsed.keepAlive)
+	slog.Debug("DMR provider_opts parsed",
+		"model", cfg.Model,
+		"engine", engine,
+		"context_size", derefInt64(parsed.contextSize),
+		"runtime_flags", parsed.runtimeFlags,
+		"raw_runtime_flags", parsed.rawRuntimeFlags,
+		"mode", derefString(parsed.mode),
+		"keep_alive", derefString(parsed.keepAlive),
+		"speculative_opts", parsed.specOpts,
+		"llamacpp", parsed.llamaCpp,
+		"vllm", parsed.vllm,
+	)
 	// Skip model configuration when generating titles to avoid reconfiguring the model
 	// with different settings (e.g., smaller max_tokens) that would affect the main agent.
 	if !globalOptions.GeneratingTitle() {
-		if err := configureModel(ctx, httpClient, baseURL, cfg.Model, contextSize, finalFlags, specOpts); err != nil {
+		if err := configureModel(ctx, httpClient, baseURL, cfg.Model, backendCfg, parsed.mode, parsed.rawRuntimeFlags); err != nil {
 			slog.Debug("model configure via API skipped or failed", "error", err)
 		}
 	}
@@ -129,6 +141,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		client:     openai.NewClient(clientOptions...),
 		baseURL:    baseURL,
 		httpClient: httpClient,
+		engine:     engine,
 	}, nil
 }
 
@@ -214,6 +227,43 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 		}
 	}
 
+	// Collect per-request extra JSON fields. SetExtraFields replaces the map
+	// wholesale, so merge all contributors before a single Set call.
+	extraFields := map[string]any{}
+
+	// NoThinking: disable reasoning at the chat-template level. llama.cpp and
+	// vLLM both honor chat_template_kwargs.enable_thinking=false for Qwen3 /
+	// Hermes / DeepSeek-R1 style templates; other engines ignore unknown keys.
+	//
+	// When the caller has also set a small MaxTokens (e.g. session title
+	// generation sets max_tokens=20), raise it to noThinkingMinOutputTokens
+	// so any residual reasoning tokens the engine/template still emits can't
+	// starve the visible output. The nil-guard is intentional: if MaxTokens
+	// is unset the caller has imposed no cap, so there is nothing to floor
+	// and we leave max_tokens off the request (letting the engine use its
+	// own output budget). Mirrors the OpenAI provider (see
+	// pkg/model/provider/openai/client.go).
+	if c.ModelOptions.NoThinking() {
+		extraFields["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
+		if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
+			params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
+			slog.Debug("DMR NoThinking: bumped max_tokens floor",
+				"from", *c.ModelConfig.MaxTokens, "to", noThinkingMinOutputTokens)
+		}
+	}
+
+	// vLLM-specific per-request fields (e.g. thinking_token_budget).
+	if c.engine == engineVLLM {
+		if fields := buildVLLMRequestFields(&c.ModelConfig); fields != nil {
+			maps.Copy(extraFields, fields)
+		}
+	}
+
+	if len(extraFields) > 0 {
+		params.SetExtraFields(extraFields)
+		slog.Debug("DMR extra request fields applied", "fields", extraFields)
+	}
+
 	// Log the request in JSON format for debugging
 	if requestJSON, err := json.Marshal(params); err == nil {
 		slog.Debug("DMR chat completion request", "request", string(requestJSON))
@@ -222,7 +272,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 	}
 
 	if structuredOutput := c.ModelOptions.StructuredOutput(); structuredOutput != nil {
-		slog.Debug("Adding structured output to DMR request", "structured_output", structuredOutput)
+		slog.Debug("Adding structured output to DMR request", "name", structuredOutput.Name, "strict", structuredOutput.Strict)
 
 		params.ResponseFormat.OfJSONSchema = &openai.ResponseFormatJSONSchemaParam{
 			JSONSchema: openai.ResponseFormatJSONSchemaJSONSchemaParam{

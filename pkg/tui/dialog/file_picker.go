@@ -27,21 +27,23 @@ type fileEntry struct {
 }
 
 const (
-	filePickerListOverhead = 10
+	filePickerListOverhead = 11
 	filePickerListStartY   = 7 // border(1) + padding(1) + title(1) + space(1) + dir(1) + input(1) + separator(1)
 )
 
 type filePickerDialog struct {
 	BaseDialog
 
-	textInput  textinput.Model
-	currentDir string
-	entries    []fileEntry
-	filtered   []fileEntry
-	selected   int
-	scrollview *scrollview.Model
-	keyMap     commandPaletteKeyMap
-	err        error
+	textInput   textinput.Model
+	currentDir  string
+	entries     []fileEntry
+	filtered    []fileEntry
+	selected    int
+	scrollview  *scrollview.Model
+	keyMap      commandPaletteKeyMap
+	err         error
+	showHidden  bool
+	showIgnored bool
 }
 
 // NewFilePickerDialog creates a new file picker dialog for attaching files.
@@ -131,11 +133,11 @@ func (d *filePickerDialog) loadDirectory() {
 	}
 
 	for _, entry := range dirEntries {
-		if strings.HasPrefix(entry.Name(), ".") {
+		if !d.showHidden && strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		fullPath := filepath.Join(d.currentDir, entry.Name())
-		if shouldIgnore != nil && shouldIgnore(fullPath) {
+		if !d.showIgnored && shouldIgnore != nil && shouldIgnore(fullPath) {
 			continue
 		}
 		if entry.IsDir() {
@@ -148,11 +150,14 @@ func (d *filePickerDialog) loadDirectory() {
 	}
 
 	for _, entry := range dirEntries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		if entry.IsDir() {
+			continue
+		}
+		if !d.showHidden && strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		fullPath := filepath.Join(d.currentDir, entry.Name())
-		if shouldIgnore != nil && shouldIgnore(fullPath) {
+		if !d.showIgnored && shouldIgnore != nil && shouldIgnore(fullPath) {
 			continue
 		}
 		info, err := entry.Info()
@@ -229,6 +234,18 @@ func (d *filePickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 					core.CmdHandler(messages.InsertFileRefMsg{FilePath: entry.path}),
 				)
 			}
+			return d, nil
+
+		case msg.String() == "alt+h":
+			d.showHidden = !d.showHidden
+			d.loadDirectory()
+			d.filterEntries()
+			return d, nil
+
+		case msg.String() == "alt+i":
+			d.showIgnored = !d.showIgnored
+			d.loadDirectory()
+			d.filterEntries()
 			return d, nil
 
 		default:
@@ -322,6 +339,7 @@ func (d *filePickerDialog) View() string {
 		scrollableContent = d.scrollview.View()
 	}
 
+	helpRow1, helpRow2 := d.filePickerHelpKeysRows()
 	content := NewContent(regionWidth).
 		AddTitle("Attach File").
 		AddSpace().
@@ -330,7 +348,8 @@ func (d *filePickerDialog) View() string {
 		AddSeparator().
 		AddContent(scrollableContent).
 		AddSpace().
-		AddHelpKeys("↑/↓", "navigate", "enter", "select", "esc", "close").
+		AddHelpKeys(helpRow1...).
+		AddHelpKeys(helpRow2...).
 		Build()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content)
@@ -371,6 +390,27 @@ func (d *filePickerDialog) renderEntry(entry fileEntry, selected bool, maxWidth 
 	}
 
 	return line
+}
+
+func (d *filePickerDialog) filePickerHelpKeysRows() (row1, row2 []string) {
+	hiddenLabel := "show hidden"
+	if d.showHidden {
+		hiddenLabel = "hide hidden"
+	}
+	ignoredLabel := "show ignored"
+	if d.showIgnored {
+		ignoredLabel = "hide ignored"
+	}
+	row1 = []string{
+		"↑/↓", "navigate",
+		"enter", "select",
+		"esc", "close",
+		"alt+h", hiddenLabel,
+	}
+	row2 = []string{
+		"alt+i", ignoredLabel,
+	}
+	return row1, row2
 }
 
 func (d *filePickerDialog) Position() (row, col int) {

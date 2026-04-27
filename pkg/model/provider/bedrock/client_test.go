@@ -105,13 +105,19 @@ func TestConvertMessages_ToolResult(t *testing.T) {
 func TestConvertMessages_EmptyContent(t *testing.T) {
 	t.Parallel()
 
+	// Whitespace-only messages are filtered by session.normalizeMessageContent
+	// before they reach the provider converter, so the converter itself no longer
+	// needs to guard against them. This test documents that the converter passes
+	// them through as-is (empty content blocks); it is the session layer's job
+	// to ensure such messages never arrive here.
 	msgs := []chat.Message{
 		{Role: chat.MessageRoleUser, Content: ""},
 		{Role: chat.MessageRoleUser, Content: "   "},
 	}
 
 	bedrockMsgs, _ := convertMessages(msgs, false)
-	assert.Empty(t, bedrockMsgs)
+	// Both messages now produce user turns with empty or whitespace content blocks.
+	assert.Len(t, bedrockMsgs, 2)
 }
 
 func TestConvertToolConfig(t *testing.T) {
@@ -247,7 +253,9 @@ func TestBearerTokenTransport(t *testing.T) {
 
 	// Make a request through the transport
 	client := &http.Client{Transport: transport}
-	resp, err := client.Get(server.URL)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 

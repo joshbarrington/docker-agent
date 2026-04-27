@@ -30,18 +30,22 @@ docker-agent ships with several built-in tools that require no external dependen
 | Tool | Description |
 | --- | --- |
 | [Filesystem]({{ '/tools/filesystem/' | relative_url }}) | Read, write, list, search, and navigate files and directories |
-| [Shell]({{ '/tools/shell/' | relative_url }}) | Execute arbitrary shell commands in the user's environment |
+| [Shell]({{ '/tools/shell/' | relative_url }}) | Execute synchronous and background shell commands |
 | [Think]({{ '/tools/think/' | relative_url }}) | Step-by-step reasoning scratchpad for planning and decision-making |
 | [Todo]({{ '/tools/todo/' | relative_url }}) | Task list management for complex multi-step workflows |
+| [Tasks]({{ '/tools/tasks/' | relative_url }}) | Persistent task database shared across sessions |
 | [Memory]({{ '/tools/memory/' | relative_url }}) | Persistent key-value storage backed by SQLite |
-| [Fetch]({{ '/tools/fetch/' | relative_url }}) | Make HTTP requests to external APIs and web services |
+| [Fetch]({{ '/tools/fetch/' | relative_url }}) | Read content from HTTP/HTTPS URLs (GET only) |
 | [Script]({{ '/tools/script/' | relative_url }}) | Define custom shell scripts as named tools |
 | [LSP]({{ '/tools/lsp/' | relative_url }}) | Connect to Language Server Protocol servers for code intelligence |
 | [API]({{ '/tools/api/' | relative_url }}) | Create custom tools that call HTTP APIs without writing code |
+| [OpenAPI]({{ '/tools/openapi/' | relative_url }}) | Generate tools from an OpenAPI 3.x document |
+| [RAG]({{ '/features/rag/' | relative_url }}) | Retrieval-augmented generation over indexed sources |
+| [Model Picker]({{ '/tools/model-picker/' | relative_url }}) | Let the agent pick between several models per turn |
 | [User Prompt]({{ '/tools/user-prompt/' | relative_url }}) | Ask users questions and collect interactive input |
 | [Transfer Task]({{ '/tools/transfer-task/' | relative_url }}) | Delegate tasks to sub-agents (auto-enabled with `sub_agents`) |
 | [Background Agents]({{ '/tools/background-agents/' | relative_url }}) | Dispatch work to sub-agents concurrently |
-| [Handoff]({{ '/tools/handoff/' | relative_url }}) | Delegate tasks to remote agents via A2A |
+| [Handoff]({{ '/tools/handoff/' | relative_url }}) | Hand the conversation off to another local agent in the same config (auto-enabled with `handoffs:`) |
 | [A2A]({{ '/tools/a2a/' | relative_url }}) | Connect to remote agents via the Agent-to-Agent protocol |
 
 ## MCP Tools

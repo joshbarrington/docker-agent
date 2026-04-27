@@ -37,10 +37,12 @@ models:
 
 ## Available Models
 
-| Model               | Best For                            |
-| ------------------- | ----------------------------------- |
-| `claude-sonnet-4-5` | Most capable, extended thinking     |
-| `claude-sonnet-4-0` | Strong coding, balanced performance |
+| Model ID            | Description                                         |
+| ------------------- | --------------------------------------------------- |
+| `claude-opus-4-7`   | Highest-capability Opus model; supports task budget |
+| `claude-sonnet-4-5` | Most capable Sonnet, extended thinking (default)    |
+| `claude-sonnet-4-0` | Strong coding, balanced performance                 |
+| `claude-haiku-4-5`  | Fast and inexpensive, good for tight loops          |
 
 ## Thinking Budget
 

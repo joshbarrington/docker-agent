@@ -22,6 +22,8 @@ The filesystem tool gives agents the ability to explore codebases, read and edit
 | `edit_file`            | Make line-based edits (find-and-replace) in an existing file              |
 | `list_directory`       | List files and directories at a given path                                |
 | `directory_tree`       | Recursive tree view of a directory                                        |
+| `create_directory`     | Create a new directory (creates parent directories as needed)             |
+| `remove_directory`     | Remove an empty directory                                                 |
 | `search_files_content` | Search for text or regex patterns across files                            |
 
 ## Configuration

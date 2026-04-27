@@ -45,6 +45,18 @@ agents:
 
 The coordinator agent automatically gets a `transfer_task` tool that can delegate to `developer` or `researcher`.
 
+## Tool Interface
+
+The `transfer_task` tool takes three parameters:
+
+| Parameter         | Type   | Required | Description                                                                                 |
+| ----------------- | ------ | -------- | ------------------------------------------------------------------------------------------- |
+| `agent`           | string | ✓        | Name of the sub-agent to delegate to. Must be listed under the caller's `sub_agents`.        |
+| `task`            | string | ✓        | Clear, concise description of the task the sub-agent should achieve.                        |
+| `expected_output` | string | ✓        | Description of the result/format the caller expects back.                                   |
+
+The call blocks until the sub-agent returns its result, which becomes the tool's response. For non-blocking parallel delegation, use [`background_agents`]({{ '/tools/background-agents/' | relative_url }}) instead.
+
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">💡 See also
 </div>

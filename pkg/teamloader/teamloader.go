@@ -206,6 +206,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		// Add skills toolset if skills are enabled
 		if agentConfig.Skills.Enabled() {
 			loadedSkills := skills.Load(agentConfig.Skills.Sources)
+			loadedSkills = filterSkillsByName(loadedSkills, agentConfig.Skills.Include)
 			if len(loadedSkills) > 0 {
 				agentTools = append(agentTools, builtin.NewSkillsToolset(loadedSkills, runConfig.WorkingDir))
 			}
@@ -464,6 +465,34 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	}
 
 	return toolSets, warnings
+}
+
+// filterSkillsByName returns the subset of skills whose Name matches one of
+// the include filters. When include is empty, skills is returned unchanged.
+// Skills are not reordered; each matching skill keeps its original position.
+// Any include entry that does not match any loaded skill is logged as a warning.
+func filterSkillsByName(loaded []skills.Skill, include []string) []skills.Skill {
+	if len(include) == 0 {
+		return loaded
+	}
+	wanted := make(map[string]bool, len(include))
+	for _, name := range include {
+		wanted[name] = true
+	}
+	matched := make(map[string]bool, len(wanted))
+	filtered := make([]skills.Skill, 0, len(loaded))
+	for _, s := range loaded {
+		if wanted[s.Name] {
+			filtered = append(filtered, s)
+			matched[s.Name] = true
+		}
+	}
+	for _, name := range include {
+		if !matched[name] {
+			slog.Warn("Skill filter does not match any loaded skill", "name", name)
+		}
+	}
+	return filtered
 }
 
 // configNameFromSource extracts a clean config name from a source name.

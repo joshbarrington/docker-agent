@@ -165,6 +165,15 @@ func resourceMetadataFromWWWAuth(wwwAuth string) string {
 	return ""
 }
 
+// callbackRedirectURLFrom is a nil-safe accessor for the optional
+// CallbackRedirectURL field on a RemoteOAuthConfig.
+func callbackRedirectURLFrom(c *latest.RemoteOAuthConfig) string {
+	if c == nil {
+		return ""
+	}
+	return c.CallbackRedirectURL
+}
+
 // oauthTransport wraps an HTTP transport with OAuth support
 type oauthTransport struct {
 	base http.RoundTripper
@@ -355,7 +364,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		return fmt.Errorf("failed to start callback server: %w", err)
 	}
 
-	redirectURI := callbackServer.GetRedirectURI()
+	redirectURI := callbackServer.resolveRedirectURI(callbackRedirectURLFrom(t.oauthConfig))
 	slog.Debug("Using redirect URI", "uri", redirectURI)
 
 	var clientID string

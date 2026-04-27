@@ -57,7 +57,7 @@ Every docker-agent configuration has a **root agent** — the entry point that r
 | `add_environment_info` | boolean | ✗        | Include OS, working directory, git info in context             |
 | `max_iterations`       | int     | ✗        | Max tool-calling loops (default: unlimited)                    |
 | `commands`             | object  | ✗        | Named prompts callable via `/command`                          |
-| `skills`               | boolean | ✗        | Enable skill discovery and loading                             |
+| `skills`               | boolean \| list | ✗    | Enable skill discovery and loading. `true` = `["local"]`; list values may combine `"local"` with remote skill-server URLs. |
 
 ## Model Fallbacks
 

@@ -86,6 +86,62 @@ func NewDefaultToolsetRegistry() *ToolsetRegistry {
 	return r
 }
 
+// checkDirExists returns an error if the given directory does not exist or is
+// not a directory. toolsetType is used only in the error message.
+func checkDirExists(dir, toolsetType string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("working_dir %q for %s toolset does not exist", dir, toolsetType)
+		}
+		return fmt.Errorf("working_dir %q for %s toolset: %w", dir, toolsetType, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("working_dir %q for %s toolset is not a directory", dir, toolsetType)
+	}
+	return nil
+}
+
+// resolveToolsetWorkingDir returns the effective working directory for a toolset process.
+//
+// Resolution rules:
+//   - If toolsetWorkingDir is empty, agentWorkingDir is returned unchanged.
+//   - Shell patterns (~ and ${VAR}/$VAR) are expanded before any further processing.
+//   - If the expanded path is absolute, it is returned as-is.
+//   - If the expanded path is relative and agentWorkingDir is non-empty,
+//     it is joined with agentWorkingDir and made absolute via filepath.Abs.
+//   - If the expanded path is relative and agentWorkingDir is empty,
+//     the relative path is returned unchanged (caller will inherit the process cwd).
+//
+// Note: unlike resolveToolsetPath, this helper does not enforce containment
+// within the agent working directory. working_dir is treated like command/args —
+// a trusted, operator-authored value where cross-tree references (e.g. a sibling
+// module root in a monorepo) are intentional and must not be silently blocked.
+func resolveToolsetWorkingDir(toolsetWorkingDir, agentWorkingDir string) string {
+	if toolsetWorkingDir == "" {
+		return agentWorkingDir
+	}
+	// Expand ~ and environment variables before path operations.
+	toolsetWorkingDir = path.ExpandPath(toolsetWorkingDir)
+	if filepath.IsAbs(toolsetWorkingDir) {
+		return toolsetWorkingDir
+	}
+	if agentWorkingDir != "" {
+		// filepath.Abs cleans the result and anchors the URI correctly
+		// (avoids file://./backend-style LSP root URIs when the agent dir
+		// is itself absolute, which is the normal case).
+		abs, err := filepath.Abs(filepath.Join(agentWorkingDir, toolsetWorkingDir))
+		if err == nil {
+			return abs
+		}
+		// Fallback: return the joined path without Abs (should not happen in practice).
+		return filepath.Join(agentWorkingDir, toolsetWorkingDir)
+	}
+	// agentWorkingDir is empty and path is relative: return as-is.
+	// The child process will inherit the OS working directory.
+	return toolsetWorkingDir
+}
+
 // resolveToolsetPath expands shell patterns (~, env vars) in the given path,
 // then validates it relative to the working directory or parent directory.
 func resolveToolsetPath(toolsetPath, parentDir string, runConfig *config.RuntimeConfig) (string, error) {
@@ -241,6 +297,24 @@ func createFetchTool(_ context.Context, toolset latest.Toolset, _ string, _ *con
 func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	envProvider := runConfig.EnvProvider()
 
+	// Resolve the working directory once; used for all subprocess-based branches.
+	// Note: validation only rejects working_dir for toolsets with an explicit
+	// remote.url. Ref-based MCPs (e.g. ref: docker:context7) pass validation
+	// regardless, because their transport type is only known at runtime via the
+	// MCP Catalog API. If such a ref resolves to a remote server at runtime, we
+	// return an explicit error below rather than silently discarding the field.
+	cwd := resolveToolsetWorkingDir(toolset.WorkingDir, runConfig.WorkingDir)
+
+	// S1: validate the resolved directory exists (if one was specified) so we
+	// surface a clear error now rather than a cryptic exec failure later.
+	// Skip this check for ref-based toolsets whose transport type is not yet
+	// known — the check would be premature and potentially wrong.
+	if toolset.WorkingDir != "" && toolset.Ref == "" {
+		if err := checkDirExists(cwd, "mcp"); err != nil {
+			return nil, err
+		}
+	}
+
 	switch {
 	// MCP Server from the MCP Catalog, running with the MCP Gateway
 	case toolset.Ref != "":
@@ -252,7 +326,21 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 
 		// TODO(dga): until the MCP Gateway supports oauth with docker agent, we fetch the remote url and directly connect to it.
 		if serverSpec.Type == "remote" {
+			// working_dir cannot be validated at config-parse time for ref-based
+			// MCPs because their transport type is only known here. Return a clear
+			// error rather than silently discarding the field.
+			if toolset.WorkingDir != "" {
+				return nil, fmt.Errorf("working_dir is not supported for MCP toolset %q: ref %q resolves to a remote server (no local subprocess)",
+					toolset.Name, toolset.Ref)
+			}
 			return mcp.NewRemoteToolset(toolset.Name, serverSpec.Remote.URL, serverSpec.Remote.TransportType, nil, nil), nil
+		}
+
+		// The ref resolves to a local subprocess — validate the working directory now.
+		if toolset.WorkingDir != "" {
+			if err := checkDirExists(cwd, "mcp"); err != nil {
+				return nil, err
+			}
 		}
 
 		env, err := environment.ExpandAll(ctx, environment.ToValues(toolset.Env), envProvider)
@@ -265,7 +353,8 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 			envProvider,
 		)
 
-		return mcp.NewGatewayToolset(ctx, toolset.Name, mcpServerName, serverSpec.Secrets, toolset.Config, envProvider, runConfig.WorkingDir)
+		// Pass the resolved cwd so gateway-based MCPs also honour working_dir.
+		return mcp.NewGatewayToolset(ctx, toolset.Name, mcpServerName, serverSpec.Secrets, toolset.Config, envProvider, cwd)
 
 	// STDIO MCP Server from shell command
 	case toolset.Command != "":
@@ -289,9 +378,11 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 		// Prepend tools bin dir to PATH so child processes can find installed tools
 		env = toolinstall.PrependBinDirToEnv(env)
 
-		return mcp.NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, runConfig.WorkingDir), nil
+		return mcp.NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, cwd), nil
 
-	// Remote MCP Server
+	// Remote MCP Server — working_dir is rejected at validation time for this
+	// branch (explicit remote.url in config). Ref-based MCPs that resolve to
+	// remote at runtime are handled with an explicit error in the Ref branch above.
 	case toolset.Remote.URL != "":
 		expander := js.NewJsExpander(envProvider)
 
@@ -329,7 +420,17 @@ func createLSPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 	// Prepend tools bin dir to PATH so child processes can find installed tools
 	env = toolinstall.PrependBinDirToEnv(env)
 
-	tool := builtin.NewLSPTool(resolvedCommand, toolset.Args, env, runConfig.WorkingDir)
+	cwd := resolveToolsetWorkingDir(toolset.WorkingDir, runConfig.WorkingDir)
+
+	// S1: validate the resolved directory exists (if one was specified) so we
+	// surface a clear error now rather than a cryptic exec failure later.
+	if toolset.WorkingDir != "" {
+		if err := checkDirExists(cwd, "lsp"); err != nil {
+			return nil, err
+		}
+	}
+
+	tool := builtin.NewLSPTool(resolvedCommand, toolset.Args, env, cwd)
 	if len(toolset.FileTypes) > 0 {
 		tool.SetFileTypes(toolset.FileTypes)
 	}

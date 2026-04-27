@@ -30,11 +30,24 @@ func DescribeToolSet(ts ToolSet) string {
 
 // StartableToolSet wraps a ToolSet with lazy, single-flight start semantics.
 // This is the canonical way to manage toolset lifecycle.
+//
+// Failure and recovery tracking:
+//   - freshFailure is set to true on the first Start() failure in a streak
+//     (i.e. when hasEverFailed transitions false→true). It is consumed by
+//     ShouldReportFailure() which returns true exactly once per streak.
+//   - hasEverFailed stays true for the duration of the failure streak.
+//   - pendingRecovery is set to true on the first successful Start() after a
+//     failure streak. It is consumed by ConsumeRecovery().
+//   - ConsumeRecovery() also resets hasEverFailed, so the next failure streak
+//     generates a fresh warning.
 type StartableToolSet struct {
 	ToolSet
 
-	mu      sync.Mutex
-	started bool
+	mu              sync.Mutex
+	started         bool
+	hasEverFailed   bool // true for the duration of a failure streak
+	freshFailure    bool // true only for the first failure in a streak; consumed by ShouldReportFailure
+	pendingRecovery bool // true when a recovery notice is pending; consumed by ConsumeRecovery
 }
 
 // NewStartable wraps a ToolSet for lazy initialization.
@@ -64,8 +77,19 @@ func (s *StartableToolSet) Start(ctx context.Context) error {
 
 	if startable, ok := As[Startable](s.ToolSet); ok {
 		if err := startable.Start(ctx); err != nil {
+			// Only set freshFailure on the very first failure in a streak so
+			// that repeated failed retries don't each emit a new warning.
+			if !s.hasEverFailed {
+				s.hasEverFailed = true
+				s.freshFailure = true
+			}
 			return err
 		}
+	}
+
+	// Successful start: if this followed a failure streak, signal recovery.
+	if s.hasEverFailed {
+		s.pendingRecovery = true
 	}
 	s.started = true
 	return nil
@@ -78,10 +102,43 @@ func (s *StartableToolSet) Stop(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	s.started = false
+	s.hasEverFailed = false
+	s.freshFailure = false
+	s.pendingRecovery = false
 	if startable, ok := As[Startable](s.ToolSet); ok {
 		return startable.Stop(ctx)
 	}
 	return nil
+}
+
+// ShouldReportFailure returns true the first time Start() fails in a new
+// failure streak — i.e. when hasEverFailed transitions from false to true.
+// It returns false for all subsequent failures in the same streak, preventing
+// repeated "start failed" warnings from flooding the user. It is safe to call
+// even when Start() did not return an error (it will return false).
+func (s *StartableToolSet) ShouldReportFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.freshFailure {
+		return false
+	}
+	s.freshFailure = false
+	return true
+}
+
+// ConsumeRecovery returns true exactly once after a Start() that succeeded
+// following a previously-reported failure streak. Calling it also resets
+// hasEverFailed and freshFailure so that a future failure generates a fresh warning.
+func (s *StartableToolSet) ConsumeRecovery() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.pendingRecovery {
+		return false
+	}
+	s.pendingRecovery = false
+	s.hasEverFailed = false
+	s.freshFailure = false
+	return true
 }
 
 // Unwrap returns the underlying ToolSet.

@@ -20,11 +20,16 @@ import (
 // runs in a child session using the current agent's model and tools, and
 // its final response is returned as the tool result.
 //
-// This implements the `context: fork` behaviour from the SKILL.md
-// frontmatter, following the same convention as Claude Code.
+// All skill-specific business rules (lookup, fork-mode validation, content
+// expansion) live in (*builtin.SkillsToolset).PrepareForkSubSession; this
+// handler keeps only the runtime-private orchestration: sub-session creation,
+// OpenTelemetry tracing, and event forwarding.
+//
+// This implements the `context: fork` behaviour from the SKILL.md frontmatter,
+// following the same convention as Claude Code.
 func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts chan Event) (*tools.ToolCallResult, error) {
-	var params builtin.RunSkillArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	var args builtin.RunSkillArgs
+	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
@@ -33,22 +38,9 @@ func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session
 		return tools.ResultError("no skills are available for the current agent"), nil
 	}
 
-	skill := st.FindSkill(params.Name)
-	if skill == nil {
-		return tools.ResultError(fmt.Sprintf("skill %q not found", params.Name)), nil
-	}
-
-	if !skill.IsFork() {
-		return tools.ResultError(fmt.Sprintf(
-			"skill %q is not configured for sub-agent execution (missing context: fork in SKILL.md frontmatter); use read_skill instead",
-			params.Name,
-		)), nil
-	}
-
-	// Load and expand the skill content for the system prompt.
-	skillContent, err := st.ReadSkillContent(ctx, params.Name)
-	if err != nil {
-		return tools.ResultError(fmt.Sprintf("failed to read skill content: %s", err)), nil
+	prepared, errResult := st.PrepareForkSubSession(ctx, args)
+	if errResult != nil {
+		return errResult, nil
 	}
 
 	a := r.CurrentAgent()
@@ -56,23 +48,41 @@ func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session
 
 	ctx, span := r.startSpan(ctx, "runtime.run_skill", trace.WithAttributes(
 		attribute.String("agent", ca),
-		attribute.String("skill", params.Name),
+		attribute.String("skill", prepared.SkillName),
 		attribute.String("session.id", sess.ID),
 	))
 	defer span.End()
 
 	slog.Debug("Running skill as sub-agent",
 		"agent", ca,
-		"skill", params.Name,
-		"task", params.Task,
+		"skill", prepared.SkillName,
+		"task", prepared.Task,
 	)
 
+	// If the skill declares a model override, apply it for the duration of
+	// the sub-session. WithAgentModel handles every accepted form (named
+	// model, alloy, inline provider/model, inline alloy) and returns a
+	// CAS-safe restore func that is always non-nil; on failure we log a
+	// warning and fall back to the agent's currently-active model.
+	if prepared.Model != "" {
+		restore, err := r.WithAgentModel(ctx, ca, prepared.Model)
+		defer restore()
+		if err != nil {
+			slog.Warn("Failed to apply skill model override; using current model",
+				"agent", ca,
+				"skill", prepared.SkillName,
+				"model", prepared.Model,
+				"error", err,
+			)
+		}
+	}
+
 	cfg := SubSessionConfig{
-		Task:                params.Task,
-		SystemMessage:       skillContent,
-		ImplicitUserMessage: params.Task,
+		Task:                prepared.Task,
+		SystemMessage:       prepared.Content,
+		ImplicitUserMessage: prepared.Task,
 		AgentName:           ca,
-		Title:               "Skill: " + params.Name,
+		Title:               "Skill: " + prepared.SkillName,
 		ToolsApproved:       sess.ToolsApproved,
 		ExcludedTools:       []string{builtin.ToolNameRunSkill},
 	}

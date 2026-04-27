@@ -4,90 +4,50 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
-// FromConfig converts a latest.HooksConfig to a hooks.Config
+// FromConfig converts a [latest.HooksConfig] into the runtime [Config].
 func FromConfig(cfg *latest.HooksConfig) *Config {
 	if cfg == nil {
 		return nil
 	}
+	return &Config{
+		PreToolUse:      convertMatchers(cfg.PreToolUse),
+		PostToolUse:     convertMatchers(cfg.PostToolUse),
+		SessionStart:    convertHooks(cfg.SessionStart),
+		TurnStart:       convertHooks(cfg.TurnStart),
+		BeforeLLMCall:   convertHooks(cfg.BeforeLLMCall),
+		AfterLLMCall:    convertHooks(cfg.AfterLLMCall),
+		SessionEnd:      convertHooks(cfg.SessionEnd),
+		OnUserInput:     convertHooks(cfg.OnUserInput),
+		Stop:            convertHooks(cfg.Stop),
+		Notification:    convertHooks(cfg.Notification),
+		OnError:         convertHooks(cfg.OnError),
+		OnMaxIterations: convertHooks(cfg.OnMaxIterations),
+	}
+}
 
-	result := &Config{}
+func convertMatchers(in []latest.HookMatcherConfig) []MatcherConfig {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]MatcherConfig, len(in))
+	for i, m := range in {
+		out[i] = MatcherConfig{Matcher: m.Matcher, Hooks: convertHooks(m.Hooks)}
+	}
+	return out
+}
 
-	// Convert PreToolUse
-	for _, matcher := range cfg.PreToolUse {
-		mc := MatcherConfig{
-			Matcher: matcher.Matcher,
-			Hooks:   make([]Hook, 0, len(matcher.Hooks)),
+func convertHooks(in []latest.HookDefinition) []Hook {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Hook, len(in))
+	for i, h := range in {
+		out[i] = Hook{
+			Type:    HookType(h.Type),
+			Command: h.Command,
+			Args:    h.Args,
+			Timeout: h.Timeout,
 		}
-		for _, h := range matcher.Hooks {
-			mc.Hooks = append(mc.Hooks, Hook{
-				Type:    HookType(h.Type),
-				Command: h.Command,
-				Timeout: h.Timeout,
-			})
-		}
-		result.PreToolUse = append(result.PreToolUse, mc)
 	}
-
-	// Convert PostToolUse
-	for _, matcher := range cfg.PostToolUse {
-		mc := MatcherConfig{
-			Matcher: matcher.Matcher,
-			Hooks:   make([]Hook, 0, len(matcher.Hooks)),
-		}
-		for _, h := range matcher.Hooks {
-			mc.Hooks = append(mc.Hooks, Hook{
-				Type:    HookType(h.Type),
-				Command: h.Command,
-				Timeout: h.Timeout,
-			})
-		}
-		result.PostToolUse = append(result.PostToolUse, mc)
-	}
-
-	// Convert SessionStart
-	for _, h := range cfg.SessionStart {
-		result.SessionStart = append(result.SessionStart, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert SessionEnd
-	for _, h := range cfg.SessionEnd {
-		result.SessionEnd = append(result.SessionEnd, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert OnUserInput
-	for _, h := range cfg.OnUserInput {
-		result.OnUserInput = append(result.OnUserInput, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert Stop
-	for _, h := range cfg.Stop {
-		result.Stop = append(result.Stop, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert Notification
-	for _, h := range cfg.Notification {
-		result.Notification = append(result.Notification, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	return result
+	return out
 }

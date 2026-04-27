@@ -15,18 +15,22 @@ Built-in tools are included with docker-agent and require no external dependenci
 | Type | Description | Page |
 | --- | --- | --- |
 | `filesystem` | Read, write, list, search, navigate | [Filesystem]({{ '/tools/filesystem/' | relative_url }}) |
-| `shell` | Execute shell commands | [Shell]({{ '/tools/shell/' | relative_url }}) |
+| `shell` | Execute shell commands (sync + background jobs) | [Shell]({{ '/tools/shell/' | relative_url }}) |
 | `think` | Reasoning scratchpad | [Think]({{ '/tools/think/' | relative_url }}) |
 | `todo` | Task list management | [Todo]({{ '/tools/todo/' | relative_url }}) |
+| `tasks` | Persistent task database shared across sessions | [Tasks]({{ '/tools/tasks/' | relative_url }}) |
 | `memory` | Persistent key-value storage (SQLite) | [Memory]({{ '/tools/memory/' | relative_url }}) |
-| `fetch` | HTTP requests | [Fetch]({{ '/tools/fetch/' | relative_url }}) |
+| `fetch` | HTTP `GET` requests with text/markdown/html output | [Fetch]({{ '/tools/fetch/' | relative_url }}) |
 | `script` | Custom shell scripts as tools | [Script]({{ '/tools/script/' | relative_url }}) |
 | `lsp` | Language Server Protocol integration | [LSP]({{ '/tools/lsp/' | relative_url }}) |
 | `api` | Custom HTTP API tools | [API]({{ '/tools/api/' | relative_url }}) |
+| `openapi` | Import every operation of an OpenAPI 3.x document as tools | [OpenAPI]({{ '/tools/openapi/' | relative_url }}) |
+| `rag` | Retrieval-augmented generation over indexed sources | [RAG]({{ '/features/rag/' | relative_url }}) |
+| `model_picker` | Let the agent pick between several models per turn | [Model Picker]({{ '/tools/model-picker/' | relative_url }}) |
 | `user_prompt` | Interactive user input | [User Prompt]({{ '/tools/user-prompt/' | relative_url }}) |
 | `transfer_task` | Delegate to sub-agents (auto-enabled) | [Transfer Task]({{ '/tools/transfer-task/' | relative_url }}) |
 | `background_agents` | Parallel sub-agent dispatch | [Background Agents]({{ '/tools/background-agents/' | relative_url }}) |
-| `handoff` | A2A remote agent delegation | [Handoff]({{ '/tools/handoff/' | relative_url }}) |
+| `handoff` | Local conversation handoff to another agent in the same config (auto-enabled by `handoffs:`) | [Handoff]({{ '/tools/handoff/' | relative_url }}) |
 | `a2a` | A2A remote agent connection | [A2A]({{ '/tools/a2a/' | relative_url }}) |
 
 **Example:**
@@ -65,6 +69,7 @@ Browse available tools at the [Docker MCP Catalog](https://hub.docker.com/search
 | `tools`       | array  | Optional: only expose these tools                                |
 | `instruction` | string | Custom instructions injected into the agent's context            |
 | `config`      | any    | MCP server-specific configuration (passed during initialization) |
+| `working_dir` | string | Working directory for the MCP gateway subprocess. Only applies when the catalog entry runs as a local process (not remote). Relative paths are resolved against the agent's working directory. |
 
 ### Local MCP (stdio)
 
@@ -86,6 +91,7 @@ toolsets:
 | `args` | array | Command arguments |
 | `tools` | array | Optional: only expose these tools |
 | `env` | object | Environment variables (key-value pairs) |
+| `working_dir` | string | Working directory for the MCP server process. Relative paths are resolved against the agent's working directory. Defaults to the agent's working directory when omitted. |
 | `instruction` | string | Custom instructions injected into the agent's context |
 | `version` | string | Package reference for [auto-installing](#auto-installing-tools) the command binary |
 

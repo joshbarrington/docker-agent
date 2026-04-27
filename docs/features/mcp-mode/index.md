@@ -27,7 +27,7 @@ The `docker agent serve mcp` command makes your agents available to any applicat
 ## Basic Usage
 
 ```bash
-# Expose a local config
+# Expose a local config (stdio transport, the default)
 $ docker agent serve mcp ./agent.yaml
 
 # Expose from a registry
@@ -36,6 +36,28 @@ $ docker agent serve mcp agentcatalog/pirate
 # Set the working directory
 $ docker agent serve mcp ./agent.yaml --working-dir /path/to/project
 ```
+
+## Transports
+
+By default, `serve mcp` uses the stdio transport — ideal for clients that spawn the server as a subprocess (Claude Desktop, Claude Code, Cursor, …).
+
+To expose the MCP server over streaming HTTP instead, pass `--http`:
+
+```bash
+# Streaming HTTP transport on the default 127.0.0.1:8081
+$ docker agent serve mcp ./agent.yaml --http
+
+# Override the listen address / port
+$ docker agent serve mcp ./agent.yaml --http --listen 0.0.0.0:9090
+```
+
+| Flag                   | Default            | Description                                                                   |
+| ---------------------- | ------------------ | ----------------------------------------------------------------------------- |
+| `--http`               | `false`            | Use streaming HTTP transport instead of stdio.                                |
+| `-l`, `--listen`       | `127.0.0.1:8081`   | Address to listen on when `--http` is enabled.                                |
+| `-a`, `--agent`        | all agents         | Expose a single named agent instead of every agent in the config.             |
+
+Runtime configuration flags such as `--working-dir`, `--env-from-file`, `--models-gateway`, and hook flags are also available — see the [CLI reference]({{ '/features/cli/' | relative_url }}).
 
 ## Using with Claude Desktop
 

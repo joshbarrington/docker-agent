@@ -312,7 +312,7 @@ func TestGithubToken_Empty(t *testing.T) {
 func TestSetGitHubAuth_WithToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp_test_token")
 
-	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/repos/test/test", http.NoBody)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://api.github.com/repos/test/test", http.NoBody)
 	require.NoError(t, err)
 
 	setGitHubAuth(req)
@@ -323,7 +323,7 @@ func TestSetGitHubAuth_WithoutToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("GH_TOKEN", "")
 
-	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/repos/test/test", http.NoBody)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://api.github.com/repos/test/test", http.NoBody)
 	require.NoError(t, err)
 
 	setGitHubAuth(req)

@@ -305,9 +305,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 					anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(contentBlocks...))
 				}
 			} else {
-				if txt := strings.TrimSpace(msg.Content); txt != "" {
-					anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(anthropic.NewTextBlock(txt)))
-				}
+				anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
 			}
 			continue
 		}
@@ -323,9 +321,8 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 
 			if len(msg.ToolCalls) > 0 {
 				blockLen := len(msg.ToolCalls)
-				msgContent := strings.TrimSpace(msg.Content)
 				offset := 0
-				if msgContent != "" {
+				if msg.Content != "" {
 					blockLen++
 				}
 				toolUseBlocks := make([]anthropic.ContentBlockParamUnion, blockLen)
@@ -333,8 +330,8 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 				if len(contentBlocks) > 0 {
 					toolUseBlocks = append(contentBlocks, toolUseBlocks...)
 				}
-				if msgContent != "" {
-					toolUseBlocks[len(contentBlocks)+offset] = anthropic.NewTextBlock(msgContent)
+				if msg.Content != "" {
+					toolUseBlocks[len(contentBlocks)+offset] = anthropic.NewTextBlock(msg.Content)
 					offset = 1
 				}
 				for j, toolCall := range msg.ToolCalls {
@@ -354,8 +351,8 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 				// Mark that we expect the very next message to be the grouped tool_result blocks.
 				pendingAssistantToolUse = true
 			} else {
-				if txt := strings.TrimSpace(msg.Content); txt != "" {
-					contentBlocks = append(contentBlocks, anthropic.NewTextBlock(txt))
+				if msg.Content != "" {
+					contentBlocks = append(contentBlocks, anthropic.NewTextBlock(msg.Content))
 				}
 				if len(contentBlocks) > 0 {
 					anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(contentBlocks...))
@@ -404,7 +401,13 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 func convertToolResultBlock(msg *chat.Message) anthropic.ContentBlockParamUnion {
 	// If there are no images in MultiContent, use the simple text-only format.
 	if !hasImageMultiContent(msg.MultiContent) {
-		return anthropic.NewToolResultBlock(msg.ToolCallID, strings.TrimSpace(msg.Content), msg.IsError)
+		// tool_result must be present for every preceding tool_use; we cannot skip
+		// it. Normalize whitespace-only content to empty string rather than skipping.
+		content := msg.Content
+		if strings.TrimSpace(content) == "" {
+			content = ""
+		}
+		return anthropic.NewToolResultBlock(msg.ToolCallID, content, msg.IsError)
 	}
 
 	// Build content blocks with text + images for the tool result.
@@ -412,11 +415,9 @@ func convertToolResultBlock(msg *chat.Message) anthropic.ContentBlockParamUnion 
 	for _, part := range msg.MultiContent {
 		switch part.Type {
 		case chat.MessagePartTypeText:
-			if txt := strings.TrimSpace(part.Text); txt != "" {
-				content = append(content, anthropic.ToolResultBlockParamContentUnion{
-					OfText: &anthropic.TextBlockParam{Text: txt},
-				})
-			}
+			content = append(content, anthropic.ToolResultBlockParamContentUnion{
+				OfText: &anthropic.TextBlockParam{Text: part.Text},
+			})
 		case chat.MessagePartTypeImageURL:
 			if part.ImageURL == nil {
 				continue
@@ -483,9 +484,7 @@ func (c *Client) convertUserMultiContent(_ context.Context, parts []chat.Message
 	for _, part := range parts {
 		switch part.Type {
 		case chat.MessagePartTypeText:
-			if txt := strings.TrimSpace(part.Text); txt != "" {
-				contentBlocks = append(contentBlocks, anthropic.NewTextBlock(txt))
-			}
+			contentBlocks = append(contentBlocks, anthropic.NewTextBlock(part.Text))
 
 		case chat.MessagePartTypeImageURL:
 			if part.ImageURL == nil {
@@ -582,6 +581,8 @@ func extractSystemBlocks(messages []chat.Message) []anthropic.TextBlockParam {
 				}
 			}
 		} else if txt := strings.TrimSpace(msg.Content); txt != "" {
+			// Trim system-message content: YAML literal blocks (instruction: |) always
+			// append a trailing newline, and we don't want that in API payloads.
 			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
 				Text: txt,
 			})

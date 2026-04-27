@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -767,4 +768,22 @@ func TestParseExternalAgentRef(t *testing.T) {
 			assert.Equal(t, tt.expectedRef, ref)
 		})
 	}
+}
+
+func TestResolveSources_URLEncodedKey(t *testing.T) {
+	t.Parallel()
+
+	testURL := "https://example.com/agent.yaml?agentTag=v1.0.0-dev&origin=cli"
+
+	sources, err := ResolveSources(testURL, nil)
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+
+	// The key should be the URL-encoded version of the URL
+	expectedKey := url.QueryEscape(testURL)
+	source, ok := sources[expectedKey]
+	require.True(t, ok, "expected source key '%s'", expectedKey)
+
+	// The source Name() should still return the original URL for fetching
+	assert.Equal(t, testURL, source.Name())
 }

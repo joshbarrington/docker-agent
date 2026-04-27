@@ -45,15 +45,21 @@ Named models let you configure temperature, token limits, thinking budgets, and 
 
 ## Supported Providers
 
-| Provider            | Key              | Example Models                       | API Key Env Var     |
-| ------------------- | ---------------- | ------------------------------------ | ------------------- |
-| OpenAI              | `openai`         | gpt-4o, gpt-5, gpt-5-mini            | `OPENAI_API_KEY`    |
-| Anthropic           | `anthropic`      | claude-sonnet-4-0, claude-sonnet-4-5 | `ANTHROPIC_API_KEY` |
-| Google              | `google`         | gemini-2.5-flash, gemini-3-pro       | `GOOGLE_API_KEY`    |
-| AWS Bedrock         | `amazon-bedrock` | Claude, Nova, Llama models           | AWS credentials     |
-| Docker Model Runner | `dmr`            | ai/qwen3, ai/llama3.2                | None (local)        |
-| Mistral             | `mistral`        | Mistral models                       | `MISTRAL_API_KEY`   |
-| xAI                 | `xai`            | Grok models                          | `XAI_API_KEY`       |
+| Provider            | Key              | Example Models                       | API Key Env Var                     |
+| ------------------- | ---------------- | ------------------------------------ | ----------------------------------- |
+| OpenAI              | `openai`         | gpt-4o, gpt-5, gpt-5-mini            | `OPENAI_API_KEY`                    |
+| Anthropic           | `anthropic`      | claude-sonnet-4-0, claude-sonnet-4-5 | `ANTHROPIC_API_KEY`                 |
+| Google              | `google`         | gemini-2.5-flash, gemini-3-pro       | `GOOGLE_API_KEY` / `GEMINI_API_KEY` |
+| AWS Bedrock         | `amazon-bedrock` | Claude, Nova, Llama models           | AWS credentials                     |
+| Docker Model Runner | `dmr`            | ai/qwen3, ai/llama3.2                | None (local)                        |
+| Mistral             | `mistral`        | Mistral models                       | `MISTRAL_API_KEY`                   |
+| xAI                 | `xai`            | Grok models                          | `XAI_API_KEY`                       |
+| Nebius              | `nebius`         | Open-source and specialised models   | `NEBIUS_API_KEY`                    |
+| MiniMax             | `minimax`        | MiniMax models                       | `MINIMAX_API_KEY`                   |
+| Requesty            | `requesty`       | Multi-provider gateway               | `REQUESTY_API_KEY`                  |
+| Azure OpenAI        | `azure`          | gpt-4o, gpt-5 on Azure               | `AZURE_OPENAI_API_KEY` + `base_url` |
+| Ollama              | `ollama`         | Any local Ollama model               | None (local; optional `base_url`)   |
+| GitHub Copilot      | `github-copilot` | Copilot-hosted OpenAI/Anthropic      | GitHub CLI auth (`gh auth login`)   |
 
 See the [Model Providers]({{ '/providers/overview/' | relative_url }}) section for detailed configuration guides.
 

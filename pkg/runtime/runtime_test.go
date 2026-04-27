@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -129,6 +130,17 @@ func (b *streamBuilder) AddStopWithUsage(input, output int64) *streamBuilder {
 		Choices: []chat.MessageStreamChoice{{
 			Index:        0,
 			FinishReason: chat.FinishReasonStop,
+		}},
+		Usage: &chat.Usage{InputTokens: input, OutputTokens: output},
+	})
+	return b
+}
+
+func (b *streamBuilder) AddToolCallStopWithUsage(input, output int64) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index:        0,
+			FinishReason: chat.FinishReasonToolCalls,
 		}},
 		Usage: &chat.Usage{InputTokens: input, OutputTokens: output},
 	})
@@ -763,7 +775,7 @@ func TestGetTools_WarningHandling(t *testing.T) {
 			sessionSpan := trace.SpanFromContext(t.Context())
 
 			// First call
-			tools1, err := rt.getTools(t.Context(), root, sessionSpan, events)
+			tools1, err := rt.getTools(t.Context(), root, sessionSpan, events, true)
 			require.NoError(t, err)
 			require.Len(t, tools1, tt.wantToolCount)
 
@@ -1980,4 +1992,781 @@ func TestRunStream_EmptyMessages_SendUserMessage(t *testing.T) {
 		events = append(events, ev)
 	}
 	require.NotEmpty(t, events)
+}
+
+// recordingProvider wraps a sequence of mock streams and records the tools
+// passed to each CreateChatCompletionStream call.
+type recordingProvider struct {
+	id      string
+	streams []*mockStream
+	callIdx int
+
+	mu            sync.Mutex
+	recordedCalls [][]tools.Tool // tools passed on each call
+}
+
+func (r *recordingProvider) ID() string { return r.id }
+
+func (r *recordingProvider) CreateChatCompletionStream(_ context.Context, _ []chat.Message, toolList []tools.Tool) (chat.MessageStream, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Record the tool names for this call.
+	r.recordedCalls = append(r.recordedCalls, append([]tools.Tool{}, toolList...))
+
+	if r.callIdx >= len(r.streams) {
+		return newStreamBuilder().AddStopWithUsage(1, 1).Build(), nil
+	}
+	s := r.streams[r.callIdx]
+	r.callIdx++
+	return s, nil
+}
+
+func (r *recordingProvider) BaseConfig() base.Config { return base.Config{} }
+func (r *recordingProvider) MaxTokens() int          { return 0 }
+
+// flappyRuntimeToolSet is a ToolSet+Startable that fails on the first N
+// Start() calls and succeeds on all subsequent ones, revealing a new tool
+// on success.
+type flappyRuntimeToolSet struct {
+	mu        sync.Mutex
+	attempts  int
+	failUntil int // fail while attempts <= failUntil
+	newTool   tools.Tool
+}
+
+func (f *flappyRuntimeToolSet) Start(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attempts++
+	if f.attempts <= f.failUntil {
+		return errors.New("server unavailable")
+	}
+	return nil
+}
+
+func (f *flappyRuntimeToolSet) Stop(_ context.Context) error { return nil }
+
+func (f *flappyRuntimeToolSet) Tools(_ context.Context) ([]tools.Tool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.attempts <= f.failUntil {
+		return nil, nil
+	}
+	return []tools.Tool{f.newTool}, nil
+}
+
+// TestReprobe_NewToolsAvailableAfterToolCall verifies that when a toolset
+// fails to start initially but succeeds after a tool call runs (simulating
+// an install step), the reprobe mechanism surfaces the new tool to the model
+// on its very next response — within the same user turn.
+func TestReprobe_NewToolsAvailableAfterToolCall(t *testing.T) {
+	t.Parallel()
+
+	mcpTool := tools.Tool{Name: "mcp_hello", Parameters: map[string]any{}}
+	installTool := tools.Tool{
+		Name:       "install_mcp",
+		Parameters: map[string]any{},
+		Handler: func(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("installed"), nil
+		},
+	}
+
+	// Turn 1: model calls install_mcp and keeps going (FinishReasonToolCall → loop continues).
+	// Turn 2: model sees mcp_hello in its tool list and stops.
+	turn1 := newStreamBuilder().
+		AddToolCallName("call_1", "install_mcp").
+		AddToolCallArguments("call_1", `{}`).
+		AddToolCallStopWithUsage(5, 5).
+		Build()
+	turn2 := newStreamBuilder().
+		AddContent("MCP is now available").
+		AddStopWithUsage(3, 3).
+		Build()
+
+	flappy := &flappyRuntimeToolSet{newTool: mcpTool, failUntil: 2}
+	installTS := newStubToolSet(nil, []tools.Tool{installTool}, nil)
+
+	prov := &recordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{turn1, turn2},
+	}
+
+	root := agent.New("root", "test",
+		agent.WithModel(prov),
+		agent.WithToolSets(installTS, flappy),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.registerDefaultTools()
+
+	sess := session.New(session.WithUserMessage("Install and use MCP"))
+	sess.Title = "reprobe test"
+	sess.ToolsApproved = true
+
+	evCh := rt.RunStream(t.Context(), sess)
+	var events []Event
+	for ev := range evCh {
+		events = append(events, ev)
+	}
+
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+
+	require.GreaterOrEqual(t, len(prov.recordedCalls), 2, "expected at least 2 model calls")
+
+	// First model call: only install_mcp available (mcp_hello not yet).
+	call1Names := toolNames(prov.recordedCalls[0])
+	assert.Contains(t, call1Names, "install_mcp", "turn 1 must include install_mcp")
+	assert.NotContains(t, call1Names, "mcp_hello", "turn 1 must NOT include mcp_hello before install")
+
+	// Second model call: mcp_hello must be visible.
+	call2Names := toolNames(prov.recordedCalls[1])
+	assert.Contains(t, call2Names, "mcp_hello", "turn 2 must include mcp_hello after reprobe")
+
+	// A ToolsetInfo event with the new count must have been emitted during reprobe.
+	var toolsetInfoCounts []int
+	for _, ev := range events {
+		if ti, ok := ev.(*ToolsetInfoEvent); ok {
+			toolsetInfoCounts = append(toolsetInfoCounts, ti.AvailableTools)
+		}
+	}
+	assert.Contains(t, toolsetInfoCounts, 2, "ToolsetInfo with count=2 expected after reprobe")
+}
+
+// TestReprobe_NoChangeMeansNoExtraEvents verifies that reprobe is a no-op
+// (no extra ToolsetInfo events, no panics) when no new tools appear after
+// a tool call.
+func TestReprobe_NoChangeMeansNoExtraEvents(t *testing.T) {
+	t.Parallel()
+
+	staticTool := tools.Tool{
+		Name:       "do_thing",
+		Parameters: map[string]any{},
+		Handler: func(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("done"), nil
+		},
+	}
+
+	stream1 := newStreamBuilder().
+		AddToolCallName("c1", "do_thing").
+		AddToolCallArguments("c1", `{}`).
+		AddStopWithUsage(5, 5).
+		Build()
+
+	prov := &recordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{stream1},
+	}
+
+	ts := newStubToolSet(nil, []tools.Tool{staticTool}, nil)
+	root := agent.New("root", "test", agent.WithModel(prov), agent.WithToolSets(ts))
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.registerDefaultTools()
+
+	sess := session.New(session.WithUserMessage("Do the thing"))
+	sess.Title = "no-change reprobe test"
+	sess.ToolsApproved = true
+
+	evCh := rt.RunStream(t.Context(), sess)
+	var events []Event
+	for ev := range evCh {
+		events = append(events, ev)
+	}
+
+	// Count ToolsetInfo events — reprobe should NOT emit an extra one.
+	var counts []int
+	for _, ev := range events {
+		if ti, ok := ev.(*ToolsetInfoEvent); ok {
+			counts = append(counts, ti.AvailableTools)
+		}
+	}
+	// All counts should be 1 (the static tool).
+	for _, c := range counts {
+		assert.Equal(t, 1, c, "unexpected ToolsetInfo count — reprobe emitted extra event when tools unchanged")
+	}
+}
+
+func toolNames(ts []tools.Tool) []string {
+	names := make([]string, len(ts))
+	for i, t := range ts {
+		names[i] = t.Name
+	}
+	return names
+}
+
+// messageRecordingProvider records the chat.Message slices passed to each
+// CreateChatCompletionStream call so tests can inspect what the model saw.
+type messageRecordingProvider struct {
+	id      string
+	mu      sync.Mutex
+	streams []*mockStream
+	callIdx int
+
+	recordedMessages [][]chat.Message // messages passed on each call
+}
+
+func (p *messageRecordingProvider) ID() string { return p.id }
+
+func (p *messageRecordingProvider) CreateChatCompletionStream(_ context.Context, msgs []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	snapshot := make([]chat.Message, len(msgs))
+	copy(snapshot, msgs)
+	p.recordedMessages = append(p.recordedMessages, snapshot)
+
+	if p.callIdx >= len(p.streams) {
+		// No stream configured for this call index. Return a plain stop so
+		// the caller surfaces this as a test failure via assertion rather
+		// than hanging, but also record the unexpected call so the test can
+		// detect it with require.Len / require.Equal.
+		return newStreamBuilder().AddStopWithUsage(1, 1).Build(), nil
+	}
+	s := p.streams[p.callIdx]
+	p.callIdx++
+	return s, nil
+}
+
+func (p *messageRecordingProvider) BaseConfig() base.Config { return base.Config{} }
+func (p *messageRecordingProvider) MaxTokens() int          { return 0 }
+
+// TestSteer_IdleWindowIsConsumedOnNextTurn verifies that a Steer call made
+// while no RunStream is active (i.e. in the idle window between turns) is
+// picked up by the very next RunStream iteration. Before the fix the steer
+// queue was only drained mid-loop (after tool calls), so a message enqueued
+// while idle was stranded and never seen by the model.
+func TestSteer_IdleWindowIsConsumedOnNextTurn(t *testing.T) {
+	t.Parallel()
+
+	// The model returns a plain-text stop (no tool calls) so we stay in the
+	// single-iteration path — this is the exact scenario where the old code
+	// would miss the steer message.
+	stream := newStreamBuilder().
+		AddContent("Got it").
+		AddStopWithUsage(5, 3).
+		Build()
+
+	prov := &messageRecordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{stream},
+	}
+
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	// Enqueue a steer message BEFORE calling RunStream — simulating the
+	// idle-window race where a Steer call lands between two RunStream
+	// invocations.
+	err = rt.Steer(QueuedMessage{Content: "urgent: change direction"})
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Do the task"))
+	sess.Title = "steer idle-window test"
+
+	evCh := rt.RunStream(t.Context(), sess)
+	var events []Event
+	for ev := range evCh {
+		events = append(events, ev)
+	}
+
+	// The run must complete normally (StreamStopped as the last event).
+	require.NotEmpty(t, events)
+	assert.IsType(t, &StreamStoppedEvent{}, events[len(events)-1],
+		"expected StreamStopped as the final event")
+
+	// A UserMessageEvent must have been emitted for the steer message.
+	var steerEventFound bool
+	for _, ev := range events {
+		if ue, ok := ev.(*UserMessageEvent); ok && strings.Contains(ue.Message, "urgent: change direction") {
+			steerEventFound = true
+			break
+		}
+	}
+	assert.True(t, steerEventFound, "expected a UserMessageEvent for the steer message")
+
+	// --- Session-message assertions ---
+	// Find the stored message for the steer injection and verify it was
+	// stored as a plain user message with NO system-reminder envelope.
+	var steerSessionMsg *session.Message
+	for _, item := range sess.Messages {
+		if item.IsMessage() &&
+			item.Message.Message.Role == chat.MessageRoleUser &&
+			strings.Contains(item.Message.Message.Content, "urgent: change direction") {
+			steerSessionMsg = item.Message
+			break
+		}
+	}
+	require.NotNil(t, steerSessionMsg, "expected a user-role session message containing the steer content")
+	assert.Equal(t, "urgent: change direction", steerSessionMsg.Message.Content,
+		"top-of-turn steer must be stored as plain content, not wrapped in system-reminder")
+	assert.NotContains(t, steerSessionMsg.Message.Content, "<system-reminder>",
+		"top-of-turn steer must NOT use the system-reminder envelope")
+
+	// --- Model-call assertions ---
+	// Verify the model received a message containing the raw steer content.
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+
+	require.NotEmpty(t, prov.recordedMessages, "expected at least one model call")
+	firstCallMsgs := prov.recordedMessages[0]
+
+	var foundSteer bool
+	for _, m := range firstCallMsgs {
+		if strings.Contains(m.Content, "urgent: change direction") {
+			// Also assert the model did NOT receive the system-reminder wrapper.
+			assert.NotContains(t, m.Content, "<system-reminder>",
+				"model must receive raw content, not system-reminder envelope, for top-of-turn steer")
+			foundSteer = true
+			break
+		}
+	}
+	assert.True(t, foundSteer,
+		"model should have received the steer message in its first turn; messages seen: %v",
+		firstCallMsgs)
+}
+
+// TestSteer_EmptySessionBootstrap verifies that when RunStream is started
+// with zero messages in the session but one or more messages already queued
+// via Steer, the model receives those messages as its initial context — i.e.
+// the run completes normally rather than erroring or producing a vacuous
+// response. The behaviour must be identical to a session where those messages
+// were added directly via session.WithUserMessage before the call.
+func TestSteer_EmptySessionBootstrap(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("Hello from the model").
+		AddStopWithUsage(5, 3).
+		Build()
+
+	prov := &messageRecordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{stream},
+	}
+
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	// Enqueue before RunStream — zero messages in the session.
+	err = rt.Steer(QueuedMessage{Content: "bootstrap message"})
+	require.NoError(t, err)
+
+	// Fresh session with NO messages (SendUserMessage defaults to true but
+	// there is nothing to send yet).
+	sess := session.New()
+	sess.Title = "steer bootstrap test"
+
+	evCh := rt.RunStream(t.Context(), sess)
+	var events []Event
+	for ev := range evCh {
+		events = append(events, ev)
+	}
+
+	// The run must complete normally.
+	require.NotEmpty(t, events)
+	assert.IsType(t, &StreamStoppedEvent{}, events[len(events)-1],
+		"expected StreamStopped as the final event; got %T", events[len(events)-1])
+
+	// A UserMessageEvent must have been emitted for the steer message.
+	var steerEventFound bool
+	for _, ev := range events {
+		if ue, ok := ev.(*UserMessageEvent); ok && strings.Contains(ue.Message, "bootstrap message") {
+			steerEventFound = true
+			break
+		}
+	}
+	assert.True(t, steerEventFound,
+		"expected a UserMessageEvent for the bootstrap steer message")
+
+	// --- Session-message assertions ---
+	// The stored session message must be plain — no system-reminder envelope.
+	var bootstrapMsg *session.Message
+	for _, item := range sess.Messages {
+		if item.IsMessage() &&
+			item.Message.Message.Role == chat.MessageRoleUser &&
+			strings.Contains(item.Message.Message.Content, "bootstrap message") {
+			bootstrapMsg = item.Message
+			break
+		}
+	}
+	require.NotNil(t, bootstrapMsg, "expected a user-role session message for the bootstrap steer")
+	assert.Equal(t, "bootstrap message", bootstrapMsg.Message.Content,
+		"bootstrap steer must be stored as plain content, not wrapped in system-reminder")
+	assert.NotContains(t, bootstrapMsg.Message.Content, "<system-reminder>",
+		"bootstrap steer must NOT use the system-reminder envelope")
+
+	// --- Model-call assertions ---
+	// The model must have received exactly one call and that call must
+	// contain the raw bootstrap message (not wrapped).
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+
+	require.Len(t, prov.recordedMessages, 1,
+		"expected exactly one model call for the bootstrap turn")
+
+	firstCallMsgs := prov.recordedMessages[0]
+
+	var foundBootstrap bool
+	for _, m := range firstCallMsgs {
+		if strings.Contains(m.Content, "bootstrap message") {
+			// The model must see raw content, not the system-reminder wrapper.
+			assert.NotContains(t, m.Content, "<system-reminder>",
+				"model must receive raw content, not system-reminder envelope, for bootstrap steer")
+			foundBootstrap = true
+			break
+		}
+	}
+	assert.True(t, foundBootstrap,
+		"model must receive the bootstrap steer message as its first (and only) user turn; messages: %v",
+		firstCallMsgs)
+}
+
+// hookStream wraps a mockStream and calls onStop synchronously when it
+// returns a chunk with FinishReasonStop. This lets a test inject a Steer()
+// call at the precise moment the stream signals completion — after the stop
+// chunk is read inside tryModelWithFallback but before the mid-loop steer
+// drain runs, exercising the end-of-iteration drain at res.Stopped.
+type hookStream struct {
+	*mockStream
+
+	onStop func()
+}
+
+func (h *hookStream) Recv() (chat.MessageStreamResponse, error) {
+	resp, err := h.mockStream.Recv()
+	if err == nil && len(resp.Choices) > 0 && resp.Choices[0].FinishReason == chat.FinishReasonStop {
+		if h.onStop != nil {
+			h.onStop()
+		}
+	}
+	return resp, err
+}
+
+// steerInjectProvider is a provider whose CreateChatCompletionStream calls a
+// hook just before returning the stream. The hook is used to inject a Steer
+// message synchronously while the stream response is being prepared — this
+// simulates the narrow end-of-iteration race where a Steer() call lands after
+// the mid-loop drain but before the res.Stopped break.
+type steerInjectProvider struct {
+	id      string
+	streams []chat.MessageStream
+	callIdx int
+	onCall  func(callIdx int) // called with the current callIdx before returning
+	mu      sync.Mutex
+}
+
+func (p *steerInjectProvider) ID() string { return p.id }
+
+func (p *steerInjectProvider) CreateChatCompletionStream(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+	p.mu.Lock()
+	idx := p.callIdx
+	p.callIdx++
+	var s chat.MessageStream
+	if idx < len(p.streams) {
+		s = p.streams[idx]
+	} else {
+		s = newStreamBuilder().AddStopWithUsage(1, 1).Build()
+	}
+	p.mu.Unlock()
+
+	if p.onCall != nil {
+		p.onCall(idx)
+	}
+	return s, nil
+}
+
+func (p *steerInjectProvider) BaseConfig() base.Config { return base.Config{} }
+func (p *steerInjectProvider) MaxTokens() int          { return 0 }
+
+// TestSteer_EndOfIterationRaceIsConsumedInCurrentRunStream verifies that a
+// Steer() call arriving in the narrow window between the mid-loop drain and
+// the res.Stopped break is consumed within the same RunStream invocation
+// rather than being stranded until the next call.
+//
+// The hookStream fires the injection synchronously inside Recv() when it
+// yields the FinishReasonStop chunk. At that point tryModelWithFallback has
+// not yet returned; the steer lands in the queue and is guaranteed to be
+// drained by one of the three drain points (mid-loop, end-of-iteration, or
+// top-of-next-turn). The test asserts the key invariant: consumed within
+// this RunStream (2 model calls, UserMessageEvent present).
+func TestSteer_EndOfIterationRaceIsConsumedInCurrentRunStream(t *testing.T) {
+	t.Parallel()
+
+	var rt *LocalRuntime // set after NewLocalRuntime
+
+	// Turn 1: plain-text stop. The hookStream injects a Steer() when the
+	// stop chunk is returned by Recv(), simulating a race in that window.
+	turn1Base := newStreamBuilder().
+		AddContent("Here is my response").
+		AddStopWithUsage(5, 3).
+		Build()
+	turn1 := &hookStream{
+		mockStream: turn1Base,
+		onStop: func() {
+			_ = rt.Steer(QueuedMessage{Content: "end-of-iter steer"})
+		},
+	}
+	// Turn 2: the loop re-entered after the steer was consumed; model acks.
+	turn2 := newStreamBuilder().
+		AddContent("Got your steer, changing direction").
+		AddStopWithUsage(5, 3).
+		Build()
+
+	prov := &steerInjectProvider{
+		id:      "test/mock-model",
+		streams: []chat.MessageStream{turn1, turn2},
+	}
+
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+
+	var err error
+	rt, err = NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Do the task"))
+	sess.Title = "steer end-of-iter race test"
+
+	evCh := rt.RunStream(t.Context(), sess)
+	var events []Event
+	for ev := range evCh {
+		events = append(events, ev)
+	}
+
+	// The run must complete normally.
+	require.NotEmpty(t, events)
+	assert.IsType(t, &StreamStoppedEvent{}, events[len(events)-1],
+		"expected StreamStopped as the final event")
+
+	// The steer message must have been emitted as a UserMessageEvent
+	// within this RunStream (not deferred to a future one).
+	var steerEventFound bool
+	for _, ev := range events {
+		if ue, ok := ev.(*UserMessageEvent); ok && strings.Contains(ue.Message, "end-of-iter steer") {
+			steerEventFound = true
+			break
+		}
+	}
+	assert.True(t, steerEventFound,
+		"expected a UserMessageEvent for the end-of-iteration steer within the same RunStream")
+
+	// The provider must have been called twice: once for the original turn
+	// and once for the follow-on turn triggered by the steer injection.
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	assert.Equal(t, 2, prov.callIdx,
+		"expected exactly 2 model calls: original turn + steer follow-on turn")
+
+	// Find the stored session message for the steer and verify it was
+	// consumed within this RunStream.
+	var steerSessionMsg *session.Message
+	for _, item := range sess.Messages {
+		if item.IsMessage() &&
+			item.Message.Message.Role == chat.MessageRoleUser &&
+			strings.Contains(item.Message.Message.Content, "end-of-iter steer") {
+			steerSessionMsg = item.Message
+			break
+		}
+	}
+	require.NotNil(t, steerSessionMsg, "expected a session message for the end-of-iteration steer")
+	// All steer drain sites inject plain user messages; no wrapping occurs
+	// regardless of which drain (mid-loop or end-of-iteration) fires first.
+	assert.Equal(t, "end-of-iter steer", steerSessionMsg.Message.Content,
+		"end-of-iteration steer must be stored as plain content")
+	assert.NotContains(t, steerSessionMsg.Message.Content, "<system-reminder>",
+		"end-of-iteration steer must NOT use the system-reminder envelope")
+}
+
+func TestAppendNewlineToQueuedMessage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("plain-text message gets newline appended to Content", func(t *testing.T) {
+		sm := QueuedMessage{Content: "hello"}
+		got := appendNewlineToQueuedMessage(sm)
+		assert.Equal(t, "hello\n", got.Content)
+		assert.Nil(t, got.MultiContent)
+	})
+
+	t.Run("multi-content message with last part text gets newline on that part", func(t *testing.T) {
+		sm := QueuedMessage{
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "https://example.com/img.png"}},
+				{Type: chat.MessagePartTypeText, Text: "and this"},
+			},
+		}
+		got := appendNewlineToQueuedMessage(sm)
+		// Last part is text — \n appended to it.
+		assert.Equal(t, "and this\n", got.MultiContent[1].Text)
+		// Image part unchanged.
+		assert.Equal(t, chat.MessagePartTypeImageURL, got.MultiContent[0].Type)
+	})
+
+	t.Run("multi-content message with last part non-text is returned unchanged", func(t *testing.T) {
+		sm := QueuedMessage{
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: "look at this"},
+				{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "https://example.com/img.png"}},
+			},
+		}
+		got := appendNewlineToQueuedMessage(sm)
+		// Last part is image — non-text parts have their own envelope separator;
+		// return unchanged.
+		assert.Equal(t, "look at this", got.MultiContent[0].Text)
+		assert.Equal(t, chat.MessagePartTypeImageURL, got.MultiContent[1].Type)
+	})
+
+	t.Run("multi-content message with no text part is returned unchanged", func(t *testing.T) {
+		sm := QueuedMessage{
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "https://example.com/img.png"}},
+			},
+		}
+		got := appendNewlineToQueuedMessage(sm)
+		// Image-only messages have no text part to append \n to; they are immune to
+		// the run-on tokenisation problem because non-text parts carry their own
+		// envelope that acts as a separator. Return unchanged.
+		require.Len(t, got.MultiContent, 1)
+		assert.Equal(t, chat.MessagePartTypeImageURL, got.MultiContent[0].Type)
+	})
+
+	t.Run("original QueuedMessage is not mutated", func(t *testing.T) {
+		parts := []chat.MessagePart{
+			{Type: chat.MessagePartTypeText, Text: "original"},
+		}
+		sm := QueuedMessage{MultiContent: parts}
+		_ = appendNewlineToQueuedMessage(sm)
+		assert.Equal(t, "original", parts[0].Text, "original slice must not be mutated")
+	})
+
+	t.Run("plain-text original not mutated", func(t *testing.T) {
+		sm := QueuedMessage{Content: "x"}
+		_ = appendNewlineToQueuedMessage(sm)
+		assert.Equal(t, "x", sm.Content)
+	})
+}
+
+// TestDrainAndEmitSteered_MultipleMessages verifies that when multiple messages
+// are drained from the steer queue, each is emitted as a separate session
+// message and non-last messages have "\n" appended to their content, preventing
+// the LLM from tokenising adjacent words across message boundaries as a run-on
+// string.
+func TestDrainAndEmitSteered_MultipleMessages(t *testing.T) {
+	t.Parallel()
+
+	// Use a stream that never gets called — we only exercise drainAndEmitSteered directly.
+	prov := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	// Enqueue three plain-text steer messages before draining.
+	require.NoError(t, rt.Steer(QueuedMessage{Content: "first"}))
+	require.NoError(t, rt.Steer(QueuedMessage{Content: "second"}))
+	require.NoError(t, rt.Steer(QueuedMessage{Content: "third"}))
+
+	sess := session.New()
+	events := make(chan Event, 16)
+
+	drained, _ := rt.drainAndEmitSteered(t.Context(), sess, events)
+	close(events)
+
+	assert.True(t, drained, "should report messages were drained")
+
+	// Three separate session messages must have been added.
+	var userMsgs []string
+	for _, item := range sess.Messages {
+		if item.IsMessage() && item.Message.Message.Role == chat.MessageRoleUser {
+			userMsgs = append(userMsgs, item.Message.Message.Content)
+		}
+	}
+	require.Len(t, userMsgs, 3, "expected 3 independent user messages")
+
+	// Non-last messages must have "\n" appended; the last must not.
+	assert.Equal(t, "first\n", userMsgs[0])
+	assert.Equal(t, "second\n", userMsgs[1])
+	assert.Equal(t, "third", userMsgs[2])
+
+	// The UserMessageEvent contents must mirror the session messages.
+	var eventMsgs []string
+	for ev := range events {
+		if ue, ok := ev.(*UserMessageEvent); ok {
+			eventMsgs = append(eventMsgs, ue.Message)
+		}
+	}
+	require.Len(t, eventMsgs, 3)
+	assert.Equal(t, "first\n", eventMsgs[0])
+	assert.Equal(t, "second\n", eventMsgs[1])
+	assert.Equal(t, "third", eventMsgs[2])
+}
+
+// TestDrainAndEmitSteered_MultiContent verifies that the "\n" separator is
+// correctly appended to multi-content messages: specifically to the last text
+// part rather than the Content field.
+func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	// Two multi-content messages.
+	require.NoError(t, rt.Steer(QueuedMessage{
+		Content: "first",
+		MultiContent: []chat.MessagePart{
+			{Type: chat.MessagePartTypeText, Text: "first"},
+			{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "https://example.com/a.png"}},
+			{Type: chat.MessagePartTypeText, Text: "first-text-after-img"},
+		},
+	}))
+	require.NoError(t, rt.Steer(QueuedMessage{
+		Content: "second",
+		MultiContent: []chat.MessagePart{
+			{Type: chat.MessagePartTypeText, Text: "second"},
+		},
+	}))
+
+	sess := session.New()
+	events := make(chan Event, 16)
+
+	drained, _ := rt.drainAndEmitSteered(t.Context(), sess, events)
+	close(events)
+
+	assert.True(t, drained)
+
+	// Two session messages.
+	var items []session.Item
+	for _, item := range sess.Messages {
+		if item.IsMessage() && item.Message.Message.Role == chat.MessageRoleUser {
+			items = append(items, item)
+		}
+	}
+	require.Len(t, items, 2)
+
+	// First message: last text part must have "\n" appended.
+	firstParts := items[0].Message.Message.MultiContent
+	require.Len(t, firstParts, 3)
+	assert.Equal(t, "first-text-after-img\n", firstParts[2].Text, "last text part of non-last message should have \\n")
+	assert.Equal(t, "first", firstParts[0].Text, "other text parts must be unchanged")
+
+	// Second (last) message: no modification.
+	secondParts := items[1].Message.Message.MultiContent
+	require.Len(t, secondParts, 1)
+	assert.Equal(t, "second", secondParts[0].Text, "last message must not be modified")
 }

@@ -77,7 +77,7 @@ func (d *chunkedVectorDB) createSchema() error {
 	);
 	`, d.filesTable, d.tablePrefix, d.filesTable, d.chunksTable, d.filesTable)
 
-	_, err := d.db.Exec(schema)
+	_, err := d.db.ExecContext(context.Background(), schema)
 	return err
 }
 
@@ -244,8 +244,5 @@ func (d *chunkedVectorDB) DeleteFileMetadata(ctx context.Context, sourcePath str
 }
 
 func (d *chunkedVectorDB) Close() error {
-	if _, err := d.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		slog.Warn("Failed to checkpoint WAL before close", "error", err)
-	}
-	return d.db.Close()
+	return sqliteutil.CheckpointAndClose(d.db)
 }

@@ -385,15 +385,32 @@ type AgentConfig struct {
 
 const SkillSourceLocal = "local"
 
-// SkillsConfig controls skill discovery sources for an agent.
+// errSkillsFormat is returned when the `skills` value is neither a boolean nor
+// a list of strings.
+var errSkillsFormat = errors.New("skills must be a boolean or a list of skill sources and/or names")
+
+// SkillsConfig controls skill discovery sources and filtering for an agent.
 // Supports three YAML formats:
 //   - Boolean: `skills: true` (equivalent to ["local"]) or `skills: false` (disabled)
-//   - List:    `skills: ["local", "http://example.com"]`
+//   - List:    `skills: ["local", "http://example.com"]` — sources to load from
+//   - List:    `skills: ["git", "docker"]`               — names of skills to include
+//   - List:    `skills: ["local", "git"]`                — mix of sources and names
+//
+// Items in the list are classified automatically:
+//   - "local" or any HTTP/HTTPS URL → a skill source (added to Sources)
+//   - any other string             → a skill name filter (added to Include)
+//
+// When Include is non-empty but no explicit sources are provided, Sources defaults
+// to ["local"] so that `skills: ["git"]` loads local skills and keeps only "git".
 //
 // The special source "local" loads skills from the filesystem (standard locations).
 // HTTP/HTTPS URLs load skills from remote servers per the well-known skills discovery spec.
 type SkillsConfig struct { //nolint:recvcheck // MarshalYAML/MarshalJSON must use value receiver, UnmarshalYAML/UnmarshalJSON must use pointer
+	// Sources lists where to load skills from: "local" and/or HTTP/HTTPS URLs.
 	Sources []string
+	// Include optionally filters loaded skills by name. When non-empty, only
+	// skills whose Name matches an entry in this list are exposed to the agent.
+	Include []string
 }
 
 func (s SkillsConfig) Enabled() bool {
@@ -407,69 +424,111 @@ func (s SkillsConfig) HasLocal() bool {
 func (s SkillsConfig) RemoteURLs() []string {
 	var urls []string
 	for _, src := range s.Sources {
-		if strings.HasPrefix(src, "http://") || strings.HasPrefix(src, "https://") {
+		if isRemoteURL(src) {
 			urls = append(urls, src)
 		}
 	}
 	return urls
 }
 
+// isRemoteURL reports whether s looks like an HTTP or HTTPS URL.
+func isRemoteURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// isSkillSource reports whether a list item should be treated as a skill source
+// (the special value "local" or an HTTP/HTTPS URL) rather than a skill name.
+func isSkillSource(item string) bool {
+	return item == SkillSourceLocal || isRemoteURL(item)
+}
+
+// setFromBool is the shared "boolean shorthand" logic for YAML and JSON
+// unmarshaling: `true` means load local skills, `false` disables skills.
+func (s *SkillsConfig) setFromBool(b bool) {
+	s.Include = nil
+	if b {
+		s.Sources = []string{SkillSourceLocal}
+	} else {
+		s.Sources = nil
+	}
+}
+
+// setFromList splits items into Sources ("local" + URLs) and Include (skill
+// name filters). When Include is non-empty and Sources is empty, Sources
+// defaults to ["local"] so that `skills: ["git"]` filters local skills
+// without requiring the user to spell out the source.
+func (s *SkillsConfig) setFromList(items []string) {
+	s.Sources = nil
+	s.Include = nil
+	for _, item := range items {
+		if isSkillSource(item) {
+			s.Sources = append(s.Sources, item)
+		} else {
+			s.Include = append(s.Include, item)
+		}
+	}
+	if len(s.Sources) == 0 && len(s.Include) > 0 {
+		s.Sources = []string{SkillSourceLocal}
+	}
+}
+
+// marshalValue returns the canonical encoded representation: `false` when
+// disabled, `true` when only the default local source is set, otherwise a
+// flat []string combining Sources and Include. The default local source is
+// omitted from the list when Include is non-empty so the output round-trips
+// back through setFromList.
+func (s SkillsConfig) marshalValue() any {
+	switch {
+	case len(s.Sources) == 0 && len(s.Include) == 0:
+		return false
+	case len(s.Include) == 0 && len(s.Sources) == 1 && s.Sources[0] == SkillSourceLocal:
+		return true
+	}
+
+	sources := s.Sources
+	if len(s.Include) > 0 && len(sources) == 1 && sources[0] == SkillSourceLocal {
+		sources = nil
+	}
+	out := make([]string, 0, len(sources)+len(s.Include))
+	out = append(out, sources...)
+	out = append(out, s.Include...)
+	return out
+}
+
 func (s *SkillsConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	var b bool
 	if err := unmarshal(&b); err == nil {
-		if b {
-			s.Sources = []string{SkillSourceLocal}
-		} else {
-			s.Sources = nil
-		}
+		s.setFromBool(b)
 		return nil
 	}
-
-	var sources []string
-	if err := unmarshal(&sources); err != nil {
-		return errors.New("skills must be a boolean or a list of sources")
+	var items []string
+	if err := unmarshal(&items); err != nil {
+		return errSkillsFormat
 	}
-	s.Sources = sources
+	s.setFromList(items)
 	return nil
 }
 
 func (s SkillsConfig) MarshalYAML() (any, error) {
-	if len(s.Sources) == 0 {
-		return false, nil
-	}
-	if len(s.Sources) == 1 && s.Sources[0] == SkillSourceLocal {
-		return true, nil
-	}
-	return s.Sources, nil
+	return s.marshalValue(), nil
 }
 
 func (s *SkillsConfig) UnmarshalJSON(data []byte) error {
 	var b bool
 	if err := json.Unmarshal(data, &b); err == nil {
-		if b {
-			s.Sources = []string{SkillSourceLocal}
-		} else {
-			s.Sources = nil
-		}
+		s.setFromBool(b)
 		return nil
 	}
-
-	var sources []string
-	if err := json.Unmarshal(data, &sources); err != nil {
-		return errors.New("skills must be a boolean or a list of sources")
+	var items []string
+	if err := json.Unmarshal(data, &items); err != nil {
+		return errSkillsFormat
 	}
-	s.Sources = sources
+	s.setFromList(items)
 	return nil
 }
 
 func (s SkillsConfig) MarshalJSON() ([]byte, error) {
-	if len(s.Sources) == 0 {
-		return json.Marshal(false)
-	}
-	if len(s.Sources) == 1 && s.Sources[0] == SkillSourceLocal {
-		return json.Marshal(true)
-	}
-	return json.Marshal(s.Sources)
+	return json.Marshal(s.marshalValue())
 }
 
 // GetFallbackModels returns the fallback models from the config.
@@ -741,6 +800,11 @@ type Toolset struct {
 
 	// For the `model_picker` tool
 	Models []string `json:"models,omitempty"`
+
+	// For `mcp` and `lsp` tools - optional working directory override.
+	// When set, the toolset process is started from this directory.
+	// Relative paths are resolved relative to the agent's working directory.
+	WorkingDir string `json:"working_dir,omitempty"`
 }
 
 func (t *Toolset) UnmarshalYAML(unmarshal func(any) error) error {
@@ -767,6 +831,20 @@ type RemoteOAuthConfig struct {
 	ClientSecret string   `json:"clientSecret,omitempty"`
 	CallbackPort int      `json:"callbackPort,omitempty"`
 	Scopes       []string `json:"scopes,omitempty"`
+	// CallbackRedirectURL, when set, is used as the OAuth redirect URI
+	// instead of the default http://127.0.0.1:{callbackPort}/callback.
+	// This allows inserting a public-facing proxy (e.g. a URL shortener or
+	// a pre-registered static redirect) in front of the local callback
+	// server — useful for authorization servers that require the redirect
+	// URI to be HTTPS or pre-registered.
+	//
+	// The literal placeholder ${callbackPort} is replaced with the actual
+	// port the local callback server is listening on (either CallbackPort
+	// when set, or a random free port otherwise). The external URL is
+	// expected to redirect the browser back to
+	// http://127.0.0.1:{callbackPort}/callback preserving the OAuth query
+	// parameters.
+	CallbackRedirectURL string `json:"callbackRedirectURL,omitempty"`
 }
 
 // DeferConfig represents the deferred loading configuration for a toolset.
@@ -1552,6 +1630,25 @@ type HooksConfig struct {
 	// SessionStart hooks run when a session begins
 	SessionStart []HookDefinition `json:"session_start,omitempty" yaml:"session_start,omitempty"`
 
+	// TurnStart hooks run at the start of every agent turn (each model
+	// call). Their AdditionalContext is appended as transient system
+	// messages for that turn only — it is NOT persisted to the session,
+	// so per-turn signals (date, prompt files, ...) are recomputed every
+	// turn instead of bloating the message history on every resume.
+	TurnStart []HookDefinition `json:"turn_start,omitempty" yaml:"turn_start,omitempty"`
+
+	// BeforeLLMCall hooks run just before each model call (after
+	// turn_start). Use this for observability, cost guardrails, or
+	// auditing without contributing system messages — turn_start is the
+	// right event for the latter.
+	BeforeLLMCall []HookDefinition `json:"before_llm_call,omitempty" yaml:"before_llm_call,omitempty"`
+
+	// AfterLLMCall hooks run just after each successful model call,
+	// before the response is recorded into the session and tool calls
+	// are dispatched. Receives the assistant text content in
+	// stop_response.
+	AfterLLMCall []HookDefinition `json:"after_llm_call,omitempty" yaml:"after_llm_call,omitempty"`
+
 	// SessionEnd hooks run when a session ends
 	SessionEnd []HookDefinition `json:"session_end,omitempty" yaml:"session_end,omitempty"`
 
@@ -1563,6 +1660,16 @@ type HooksConfig struct {
 
 	// Notification hooks run when the agent sends a notification (error, warning) to the user
 	Notification []HookDefinition `json:"notification,omitempty" yaml:"notification,omitempty"`
+
+	// OnError hooks run when the runtime hits an error during a turn
+	// (model failures, repetitive tool-call loops). Fires alongside
+	// Notification with level="error".
+	OnError []HookDefinition `json:"on_error,omitempty" yaml:"on_error,omitempty"`
+
+	// OnMaxIterations hooks run when the runtime reaches its configured
+	// max_iterations limit. Fires alongside Notification with
+	// level="warning".
+	OnMaxIterations []HookDefinition `json:"on_max_iterations,omitempty" yaml:"on_max_iterations,omitempty"`
 }
 
 // IsEmpty returns true if no hooks are configured
@@ -1573,10 +1680,15 @@ func (h *HooksConfig) IsEmpty() bool {
 	return len(h.PreToolUse) == 0 &&
 		len(h.PostToolUse) == 0 &&
 		len(h.SessionStart) == 0 &&
+		len(h.TurnStart) == 0 &&
+		len(h.BeforeLLMCall) == 0 &&
+		len(h.AfterLLMCall) == 0 &&
 		len(h.SessionEnd) == 0 &&
 		len(h.OnUserInput) == 0 &&
 		len(h.Stop) == 0 &&
-		len(h.Notification) == 0
+		len(h.Notification) == 0 &&
+		len(h.OnError) == 0 &&
+		len(h.OnMaxIterations) == 0
 }
 
 // HookMatcherConfig represents a hook matcher with its hooks.
@@ -1592,11 +1704,24 @@ type HookMatcherConfig struct {
 
 // HookDefinition represents a single hook configuration
 type HookDefinition struct {
-	// Type specifies the hook type (currently only "command" is supported)
+	// Type specifies the hook type. Supported values:
+	//   - "command":  run a shell command (default)
+	//   - "builtin":  invoke a named, in-process Go function (the name
+	//                 lives in Command). The set of registered builtins
+	//                 is owned by the runtime; the docker-agent runtime
+	//                 ships add_date, add_environment_info, and
+	//                 add_prompt_files.
 	Type string `json:"type" yaml:"type"`
 
-	// Command is the shell command to execute
+	// Command is the shell command (Type==command) or the builtin name
+	// (Type==builtin) to invoke.
 	Command string `json:"command,omitempty" yaml:"command,omitempty"`
+
+	// Args are arbitrary string arguments passed to the hook handler.
+	// Builtin handlers receive them as the args parameter; future handler
+	// kinds (http, mcp, ...) can adopt the same field. Empty for command
+	// hooks today (the shell command stays self-contained).
+	Args []string `json:"args,omitempty" yaml:"args,omitempty"`
 
 	// Timeout is the execution timeout in seconds (default: 60)
 	Timeout int `json:"timeout,omitempty" yaml:"timeout,omitempty"`
@@ -1621,6 +1746,27 @@ func (h *HooksConfig) validate() error {
 	// Validate SessionStart hooks
 	for i, hook := range h.SessionStart {
 		if err := hook.validate("session_start", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate TurnStart hooks
+	for i, hook := range h.TurnStart {
+		if err := hook.validate("turn_start", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate BeforeLLMCall hooks
+	for i, hook := range h.BeforeLLMCall {
+		if err := hook.validate("before_llm_call", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate AfterLLMCall hooks
+	for i, hook := range h.AfterLLMCall {
+		if err := hook.validate("after_llm_call", i); err != nil {
 			return err
 		}
 	}
@@ -1653,6 +1799,20 @@ func (h *HooksConfig) validate() error {
 		}
 	}
 
+	// Validate OnError hooks
+	for i, hook := range h.OnError {
+		if err := hook.validate("on_error", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate OnMaxIterations hooks
+	for i, hook := range h.OnMaxIterations {
+		if err := hook.validate("on_max_iterations", i); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1677,12 +1837,17 @@ func (h *HookDefinition) validate(prefix string, index int) error {
 		return fmt.Errorf("hooks.%s[%d]: type is required", prefix, index)
 	}
 
-	if h.Type != "command" {
-		return fmt.Errorf("hooks.%s[%d]: unsupported hook type '%s' (only 'command' is supported)", prefix, index, h.Type)
-	}
-
-	if h.Command == "" {
-		return fmt.Errorf("hooks.%s[%d]: command is required for command hooks", prefix, index)
+	switch h.Type {
+	case "command":
+		if h.Command == "" {
+			return fmt.Errorf("hooks.%s[%d]: command is required for command hooks", prefix, index)
+		}
+	case "builtin":
+		if h.Command == "" {
+			return fmt.Errorf("hooks.%s[%d]: command must name the builtin to invoke", prefix, index)
+		}
+	default:
+		return fmt.Errorf("hooks.%s[%d]: unsupported hook type '%s' (supported: 'command', 'builtin')", prefix, index, h.Type)
 	}
 
 	return nil

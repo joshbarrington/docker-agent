@@ -54,6 +54,30 @@ func TestSkillsConfig_UnmarshalYAML(t *testing.T) {
 				"http://internal.corp",
 			}},
 		},
+		{
+			name:  "list of skill names implies local source",
+			input: "[git, docker]",
+			expected: SkillsConfig{
+				Sources: []string{"local"},
+				Include: []string{"git", "docker"},
+			},
+		},
+		{
+			name:  "list mixing local source and skill names",
+			input: "[local, git]",
+			expected: SkillsConfig{
+				Sources: []string{"local"},
+				Include: []string{"git"},
+			},
+		},
+		{
+			name:  "list mixing remote source and skill names",
+			input: "[\"https://skills.example.com\", git]",
+			expected: SkillsConfig{
+				Sources: []string{"https://skills.example.com"},
+				Include: []string{"git"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -92,6 +116,22 @@ func TestSkillsConfig_MarshalYAML(t *testing.T) {
 			input:    SkillsConfig{Sources: []string{"https://example.com"}},
 			expected: "- https://example.com\n",
 		},
+		{
+			name: "include with default local source omits local",
+			input: SkillsConfig{
+				Sources: []string{"local"},
+				Include: []string{"git", "docker"},
+			},
+			expected: "- git\n- docker\n",
+		},
+		{
+			name: "include with explicit remote keeps both",
+			input: SkillsConfig{
+				Sources: []string{"https://example.com"},
+				Include: []string{"git"},
+			},
+			expected: "- https://example.com\n- git\n",
+		},
 	}
 
 	for _, tt := range tests {
@@ -129,6 +169,22 @@ func TestSkillsConfig_UnmarshalJSON(t *testing.T) {
 			input:    `["local", "https://skills.example.com"]`,
 			expected: SkillsConfig{Sources: []string{"local", "https://skills.example.com"}},
 		},
+		{
+			name:  "list with skill names defaults to local",
+			input: `["git", "docker"]`,
+			expected: SkillsConfig{
+				Sources: []string{"local"},
+				Include: []string{"git", "docker"},
+			},
+		},
+		{
+			name:  "list mixing source and names",
+			input: `["local", "git"]`,
+			expected: SkillsConfig{
+				Sources: []string{"local"},
+				Include: []string{"git"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -161,6 +217,22 @@ func TestSkillsConfig_MarshalJSON(t *testing.T) {
 			name:     "list with remote",
 			input:    SkillsConfig{Sources: []string{"local", "https://example.com"}},
 			expected: `["local","https://example.com"]`,
+		},
+		{
+			name: "include with default local source omits local",
+			input: SkillsConfig{
+				Sources: []string{"local"},
+				Include: []string{"git", "docker"},
+			},
+			expected: `["git","docker"]`,
+		},
+		{
+			name: "include with remote source keeps both",
+			input: SkillsConfig{
+				Sources: []string{"https://example.com"},
+				Include: []string{"git"},
+			},
+			expected: `["https://example.com","git"]`,
 		},
 	}
 
@@ -267,4 +339,73 @@ toolsets:
 	assert.True(t, agent.Skills.Enabled())
 	assert.True(t, agent.Skills.HasLocal())
 	assert.Empty(t, agent.Skills.RemoteURLs())
+}
+
+func TestSkillsConfig_InAgentConfigIncludeOnly(t *testing.T) {
+	yamlInput := `
+model: openai/gpt-4
+skills:
+  - git
+  - docker
+toolsets:
+  - type: filesystem
+`
+	var agent AgentConfig
+	err := yaml.Unmarshal([]byte(yamlInput), &agent)
+	require.NoError(t, err)
+	assert.True(t, agent.Skills.Enabled())
+	assert.True(t, agent.Skills.HasLocal())
+	assert.Equal(t, []string{"git", "docker"}, agent.Skills.Include)
+}
+
+func TestSkillsConfig_InAgentConfigMixedSourcesAndIncludes(t *testing.T) {
+	yamlInput := `
+model: openai/gpt-4
+skills:
+  - local
+  - https://skills.example.com
+  - git
+toolsets:
+  - type: filesystem
+`
+	var agent AgentConfig
+	err := yaml.Unmarshal([]byte(yamlInput), &agent)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"local", "https://skills.example.com"}, agent.Skills.Sources)
+	assert.Equal(t, []string{"git"}, agent.Skills.Include)
+}
+
+func TestSkillsConfig_EmptyListIsDisabled(t *testing.T) {
+	// An empty list (no sources and no names) means disabled, like `skills: false`.
+	var s SkillsConfig
+	require.NoError(t, yaml.Unmarshal([]byte("[]"), &s))
+	assert.False(t, s.Enabled())
+	assert.Empty(t, s.Include)
+
+	s = SkillsConfig{}
+	require.NoError(t, json.Unmarshal([]byte("[]"), &s))
+	assert.False(t, s.Enabled())
+	assert.Empty(t, s.Include)
+}
+
+func TestSkillsConfig_UnmarshalResetsReceiver(t *testing.T) {
+	// Unmarshaling into an already-populated receiver must not leak previous state.
+	t.Run("bool into populated receiver", func(t *testing.T) {
+		s := SkillsConfig{Sources: []string{"https://old"}, Include: []string{"old"}}
+		require.NoError(t, yaml.Unmarshal([]byte("true"), &s))
+		assert.Equal(t, []string{"local"}, s.Sources)
+		assert.Nil(t, s.Include)
+	})
+	t.Run("list into populated receiver", func(t *testing.T) {
+		s := SkillsConfig{Sources: []string{"https://old"}, Include: []string{"old"}}
+		require.NoError(t, yaml.Unmarshal([]byte("[git]"), &s))
+		assert.Equal(t, []string{"local"}, s.Sources)
+		assert.Equal(t, []string{"git"}, s.Include)
+	})
+	t.Run("false into populated receiver", func(t *testing.T) {
+		s := SkillsConfig{Sources: []string{"https://old"}, Include: []string{"old"}}
+		require.NoError(t, json.Unmarshal([]byte("false"), &s))
+		assert.Nil(t, s.Sources)
+		assert.Nil(t, s.Include)
+	})
 }

@@ -121,19 +121,46 @@ func TestValidSkillsConfiguration(t *testing.T) {
 	}
 }
 
-func TestInvalidSkillsSources(t *testing.T) {
+func TestSkillsConfigRejectsEmptyEntry(t *testing.T) {
 	t.Parallel()
 
+	// Empty entries in the skills list should be rejected.
 	cfgStr := `version: "5"
 agents:
   root:
     model: openai/gpt-4o
     skills:
-      - invalid_source
+      - local
+      - ""
     toolsets:
       - type: filesystem
 `
 	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr)))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unknown skills source")
+	assert.Contains(t, err.Error(), "empty skills entry")
+}
+
+func TestSkillsNameFilter(t *testing.T) {
+	t.Parallel()
+
+	// A string that is not "local" and not a URL is interpreted as a skill
+	// name to include. This must load successfully — the filter simply keeps
+	// only matching skills at runtime.
+	cfgStr := `version: "7"
+agents:
+  root:
+    model: openai/gpt-4o
+    skills:
+      - git
+      - docker
+    toolsets:
+      - type: filesystem
+`
+	cfg, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr)))
+	require.NoError(t, err)
+	agent, ok := cfg.Agents.Lookup("root")
+	require.True(t, ok)
+	require.True(t, agent.Skills.Enabled())
+	require.True(t, agent.Skills.HasLocal())
+	assert.Equal(t, []string{"git", "docker"}, agent.Skills.Include)
 }

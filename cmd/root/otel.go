@@ -12,21 +12,14 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 )
 
 const AppName = "cagent"
 
 // initOTelSDK initializes OpenTelemetry SDK with OTLP exporter
 func initOTelSDK(ctx context.Context) (err error) {
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceName(AppName),
-			semconv.ServiceVersion("dev"), // TODO: use actual version
-		),
-	)
+	res, err := newOTelResource()
 	if err != nil {
 		return fmt.Errorf("failed to create resource: %w", err)
 	}
@@ -36,11 +29,18 @@ func initOTelSDK(ctx context.Context) (err error) {
 
 	// Only initialize if endpoint is configured
 	if endpoint != "" {
-		opts := []otlptracehttp.Option{
-			otlptracehttp.WithEndpoint(endpoint),
-		}
-		if isLocalhostEndpoint(endpoint) {
-			opts = append(opts, otlptracehttp.WithInsecure())
+		var opts []otlptracehttp.Option
+		// An endpoint with an http:// or https:// scheme goes through
+		// WithEndpointURL so the SDK picks the transport from the scheme
+		// (per the OTLP/HTTP spec). Bare host:port still flows through
+		// WithEndpoint with the loopback-insecure shortcut preserved.
+		if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+			opts = []otlptracehttp.Option{otlptracehttp.WithEndpointURL(endpoint)}
+		} else {
+			opts = []otlptracehttp.Option{otlptracehttp.WithEndpoint(endpoint)}
+			if isLocalhostEndpoint(endpoint) {
+				opts = append(opts, otlptracehttp.WithInsecure())
+			}
 		}
 		traceExporter, err = otlptracehttp.New(ctx, opts...)
 		if err != nil {
@@ -73,6 +73,17 @@ func initOTelSDK(ctx context.Context) (err error) {
 	}()
 
 	return nil
+}
+
+func newOTelResource() (*resource.Resource, error) {
+	return resource.Merge(
+		resource.Default(),
+		resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceName(AppName),
+			semconv.ServiceVersion("dev"), // TODO: use actual version
+		),
+	)
 }
 
 // isLocalhostEndpoint reports whether the given endpoint refers to a

@@ -18,8 +18,7 @@ agents:
     description: string # Required: what this agent does
     instruction: string # Required: system prompt
     sub_agents: [list] # Optional: local or external sub-agent references
-    toolsets: [list] # Optional: tool configurations
-    rag: [list] # Optional: RAG source references
+    toolsets: [list] # Optional: tool configurations (use `type: rag` for RAG sources)
     fallback: # Optional: fallback config
       models: [list]
       retries: 2
@@ -33,7 +32,7 @@ agents:
     max_consecutive_tool_calls: int # Optional: max identical consecutive tool calls
     max_old_tool_call_tokens: int # Optional: token budget for old tool call content
     num_history_items: int # Optional: limit conversation history
-    skills: boolean # Optional: enable skill discovery
+    skills: boolean | [list] # Optional: enable skill discovery (true/false or list of names and/or sources)
     commands: # Optional: named prompts
       name: "prompt text"
     welcome_message: string # Optional: message shown at session start
@@ -78,7 +77,7 @@ agents:
 | `max_old_tool_call_tokens`  | int     | ✗        | Maximum number of tokens to keep from old tool call arguments and results. Older tool calls beyond this budget have their content replaced with a placeholder, saving context space. Tokens are approximated as `len/4`. Set to `-1` to disable truncation (unlimited). Default: `40000`. |
 | `num_history_items`         | int     | ✗        | Limit the number of conversation history messages sent to the model. Useful for managing context window size with long conversations. Default: unlimited (all messages sent). |
 | `rag`                       | array   | ✗        | List of RAG source names to attach to this agent. References sources defined in the top-level `rag` section. See [RAG]({{ '/features/rag/' | relative_url }}).                                       |
-| `skills`                    | boolean | ✗        | Enable automatic skill discovery from standard directories.                                                                                                                   |
+| `skills`                    | bool/array | ✗     | Enable automatic skill discovery. `true` loads all discovered local skills, `false` disables them. A list can mix skill sources (`local` or `https://…` URLs) and skill names to include — see [Skills]({{ '/features/skills/' | relative_url }}).                                                     |
 | `commands`                  | object  | ✗        | Named prompts that can be run with `docker agent run config.yaml /command_name`.                                                                                              |
 | `welcome_message`           | string  | ✗        | Message displayed to the user when a session starts. Useful for providing context or instructions.                                                                            |
 | `handoffs`                  | array   | ✗        | List of agent names this agent can hand off the conversation to. Enables the `handoff` tool. See [Handoffs Routing]({{ '/concepts/multi-agent/#handoffs-routing' | relative_url }}).                  |

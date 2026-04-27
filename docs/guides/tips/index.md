@@ -18,7 +18,7 @@ Don't have a config file? docker-agent can automatically detect your available A
 # Automatically uses the best available provider
 $ docker agent run
 
-# Provider priority: OpenAI → Anthropic → Google → Mistral → DMR
+# Provider priority: Anthropic → OpenAI → Google → Mistral → Amazon Bedrock → DMR
 ```
 
 The special `auto` model value also works in configs:

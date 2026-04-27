@@ -34,6 +34,40 @@ agents:
 
 </div>
 
+## Filtering Skills
+
+The `skills` field also accepts a list, letting you restrict the agent to a specific subset of skills instead of exposing every discovered one. List items are classified automatically:
+
+- `"local"` or any `http://` / `https://` URL → a **source** to load skills from
+- any other string → the **name** of a skill to include
+
+When only names are given, local sources are used by default.
+
+```yaml
+agents:
+  # Load every discovered local skill (same as `skills: true`).
+  full:
+    skills: true
+
+  # Load local skills, but only expose "commit" and "poem".
+  scoped:
+    skills:
+      - commit
+      - poem
+
+  # Combine an explicit source with a name filter.
+  remote_filtered:
+    skills:
+      - https://skills.example.com
+      - commit
+
+  # Disable skills entirely.
+  none:
+    skills: false
+```
+
+A name that doesn't match any discovered skill is logged as a warning at startup but is otherwise ignored.
+
 ## SKILL.md Format
 
 <!-- yaml-lint:skip -->
@@ -64,6 +98,7 @@ When asked to create a Dockerfile:
 | `name`           | Yes      | Unique skill identifier                                                     |
 | `description`    | Yes      | Short description shown to the agent for skill matching                     |
 | `context`        | No       | Set to `fork` to run the skill as an isolated sub-agent (see below)         |
+| `model`          | No       | Override the model used while running the skill as a sub-agent (fork only)  |
 | `allowed-tools`  | No       | List of tools the skill needs (YAML list or comma-separated string)         |
 | `license`        | No       | License identifier (e.g. `Apache-2.0`)                                      |
 | `compatibility`  | No       | Free-text compatibility notes                                               |
@@ -103,6 +138,45 @@ When the agent encounters a task that matches a `context: fork` skill, it uses t
   <p>Use <code>context: fork</code> for skills that involve many steps, heavy tool usage, or that should not clutter the main conversation — for example dependency bumping, large refactors, or code generation pipelines.</p>
 
 </div>
+
+### Overriding the model for a fork skill
+
+Fork skills can declare a `model` field in their frontmatter to use a
+different model than the parent agent for the duration of the sub-session.
+This is useful when a skill is best handled by a faster, cheaper, or more
+specialised model — for example a powerful reasoning model for refactors,
+or a fast model for routine bookkeeping work. The override only applies
+while the skill is running; the parent agent keeps its own model.
+
+The `model` value accepts either a named model from the agent config or
+an inline `provider/model` reference (and the same comma-separated alloy
+syntax as the rest of the agent config):
+
+<!-- yaml-lint:skip -->
+```yaml
+---
+name: bump-go-dependencies
+description: Update Go module dependencies one by one
+context: fork
+model: openai/gpt-4o-mini
+---
+
+# Bump Dependencies
+
+1. ...
+```
+
+If the model reference cannot be resolved (unknown name, missing
+credentials, runtime not configured for model switching, …) the skill
+falls back to the agent's currently-active model (its configured
+default, or any override the user previously set via the model picker)
+and a warning is logged.
+
+When the skill completes, the agent's previous model is restored — but
+only if no one else changed the model in the meantime. If the user
+switches the model via the TUI model picker while the fork skill is
+running, their choice is preserved (the deferred restore becomes a
+no-op).
 
 ## Search Paths
 
@@ -171,11 +245,11 @@ When asked to create a Dockerfile:
 EOF
 ```
 
-The skill will automatically be available to any agent with `skills: true`.
+The skill will automatically be available to any agent with skills enabled (`skills: true`, or a list that targets its name — see [Filtering Skills](#filtering-skills)).
 
 <div class="callout callout-info" markdown="1">
 <div class="callout-title">ℹ️ See also
 </div>
-  <p>Skills are enabled in the <a href="{{ '/configuration/agents/' | relative_url }}">Agent Config</a> with the <code>skills: true</code> property. For tool-based capabilities, see <a href="{{ '/concepts/tools/' | relative_url }}">Tools</a>.</p>
+  <p>Skills are enabled in the <a href="{{ '/configuration/agents/' | relative_url }}">Agent Config</a> with the <code>skills</code> property (boolean or list). For tool-based capabilities, see <a href="{{ '/concepts/tools/' | relative_url }}">Tools</a>.</p>
 
 </div>

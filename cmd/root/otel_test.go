@@ -4,7 +4,17 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 )
+
+func TestNewOTelResourceUsesCurrentSchemaURL(t *testing.T) {
+	t.Parallel()
+
+	res, err := newOTelResource()
+	require.NoError(t, err)
+	assert.Equal(t, semconv.SchemaURL, res.SchemaURL())
+}
 
 func TestIsLocalhostEndpoint(t *testing.T) {
 	t.Parallel()

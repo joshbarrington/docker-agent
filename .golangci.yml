@@ -41,6 +41,7 @@ linters:
     - mirror
     - modernize
     - nakedret
+    - noctx
     - nolintlint
     - nosprintfhostport
     - nilnesserr

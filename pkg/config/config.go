@@ -247,5 +247,10 @@ func validateSkillsConfiguration(_ string, agent *latest.AgentConfig) error {
 			return fmt.Errorf("agent '%s' has unknown skills source '%s' (must be 'local' or an HTTP/HTTPS URL)", agent.Name, source)
 		}
 	}
+	for _, name := range agent.Skills.Include {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("agent '%s' has an empty skills entry", agent.Name)
+		}
+	}
 	return nil
 }

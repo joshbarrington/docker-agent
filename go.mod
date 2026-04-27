@@ -1,6 +1,6 @@
 module github.com/docker/docker-agent
 
-go 1.26.1
+go 1.26.2
 
 require (
 	charm.land/bubbles/v2 v2.1.0
@@ -28,7 +28,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0
 	github.com/clipperhouse/uax29/v2 v2.7.0
 	github.com/coder/acp-go-sdk v0.6.3
-	github.com/docker/cli v29.4.0+incompatible
+	github.com/docker/cli v29.4.1+incompatible
 	github.com/docker/go-units v0.5.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
 	github.com/fatih/color v1.19.0
@@ -75,6 +75,7 @@ require (
 )
 
 require (
+	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.23 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
@@ -85,6 +86,8 @@ require (
 	github.com/mtibben/percent v0.2.1 // indirect
 	github.com/pb33f/jsonpath v0.8.2 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
+	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0 // indirect
+	google.golang.org/api v0.252.0 // indirect
 )
 
 require (

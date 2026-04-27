@@ -51,7 +51,7 @@ func TestGetEnvironmentInfo(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			dir := tt.setupFunc()
-			info := getEnvironmentInfo(dir)
+			info := GetEnvironmentInfo(dir)
 
 			gitStatus := "No"
 			if tt.expectGit {
@@ -80,7 +80,7 @@ func TestGetEnvironmentInfoIntegration(t *testing.T) {
 	wd, err := os.Getwd()
 	require.NoError(t, err)
 
-	info := getEnvironmentInfo(wd)
+	info := GetEnvironmentInfo(wd)
 
 	assert.Contains(t, info, "Here is useful information about the environment you are running in:")
 	assert.Contains(t, info, "<env>")

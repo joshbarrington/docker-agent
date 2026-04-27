@@ -43,10 +43,11 @@ agents:
 
 The `user_prompt` tool takes these parameters:
 
-| Parameter | Type   | Required | Description                                      |
-| --------- | ------ | -------- | ------------------------------------------------ |
-| `message` | string | ✓        | The question or prompt to display                |
-| `schema`  | object | ✗        | JSON Schema defining expected response structure |
+| Parameter | Type   | Required | Description                                                                                        |
+| --------- | ------ | -------- | -------------------------------------------------------------------------------------------------- |
+| `message` | string | ✓        | The question or prompt to display.                                                                 |
+| `title`   | string | ✗        | Optional title for the dialog window in the TUI. Defaults to `"Question"` when not provided.       |
+| `schema`  | object | ✗        | JSON Schema defining the expected response structure (object or primitive).                        |
 
 ## Response Format
 

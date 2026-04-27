@@ -136,3 +136,25 @@ func TestMCPDefinitions_EnvMerge(t *testing.T) {
 	// Toolset-only key is preserved
 	assert.Equal(t, "from_toolset", ts.Env["EXTRA"])
 }
+
+func TestMCPDefinitions_WorkingDir(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_working_dir.yaml"))
+	require.NoError(t, err)
+
+	// WorkingDir from the definition is inherited by the referencing toolset.
+	root, ok := cfg.Agents.Lookup("root")
+	require.True(t, ok)
+	require.Len(t, root.Toolsets, 1)
+	ts := root.Toolsets[0]
+	assert.Equal(t, "my-mcp-server", ts.Command)
+	assert.Equal(t, "./tools/mcp", ts.WorkingDir)
+
+	// A toolset-level working_dir overrides the definition's value.
+	override, ok := cfg.Agents.Lookup("override")
+	require.True(t, ok)
+	require.Len(t, override.Toolsets, 1)
+	tsOverride := override.Toolsets[0]
+	assert.Equal(t, "./override/path", tsOverride.WorkingDir)
+}

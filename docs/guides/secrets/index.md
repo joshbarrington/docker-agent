@@ -10,16 +10,20 @@ _How to securely provide API keys and credentials to docker-agent._
 
 ## Overview
 
-docker-agent needs API keys to talk to model providers (OpenAI, Anthropic, etc.) and MCP tool servers (GitHub, Slack, etc.). These keys are **never stored in config files**. Instead, docker-agent resolves them at runtime through a chain of secret providers, checked in order:
+docker-agent needs API keys to talk to model providers (OpenAI, Anthropic, etc.) and MCP tool servers (GitHub, Slack, etc.). These keys are **never stored in config files**. Instead, docker-agent resolves them at runtime through a chain of secret providers, checked in order (see `pkg/environment/default.go`):
 
 | Priority | Provider | Description |
 | --- | --- | --- |
 | 1 | [Environment variables](#environment-variables) | `export OPENAI_API_KEY=sk-...` |
-| 2 | [Docker secrets](#docker-compose-secrets) | Files in `/run/secrets/` |
-| 3 | [`pass` password manager](#pass-password-manager) | `pass insert OPENAI_API_KEY` |
-| 4 | [macOS Keychain](#macos-keychain) | `security add-generic-password` |
+| 2 | [Docker Compose secrets](#docker-compose-secrets) | Files in `/run/secrets/` |
+| 3 | [Credential helper](#credential-helper) | Custom command declared in `~/.config/cagent/config.yaml` under `credential_helper:` |
+| 4 | [Docker Desktop](#docker-desktop) | Secrets stored by the Docker Desktop backend (no setup on a Desktop install) |
+| 5 | [`pass` password manager](#pass-password-manager) | `pass insert OPENAI_API_KEY` |
+| 6 | [macOS Keychain](#macos-keychain) | `security add-generic-password` |
 
 The first provider that has a value wins. You can mix and match — for example, use environment variables for one key and Keychain for another.
+
+When docker-agent runs inside a Docker sandbox (detected via `SANDBOX_VM_ID`), a sandbox token provider is prepended to the chain so that `DOCKER_TOKEN` is read from a continuously-refreshed file instead of a stale environment variable.
 
 ## Environment Variables
 
@@ -146,6 +150,25 @@ secrets:
 | Storage | In memory, visible via `docker inspect` | Mounted as tmpfs files under `/run/secrets/` |
 | Visibility | Shown in process list and inspect output | Not exposed in `docker inspect` |
 | Best for | Development | Production and CI/CD |
+
+## Credential Helper
+
+docker-agent can shell out to an external credential helper you define in your user config. This is useful when your organisation already has a secrets daemon you want to reuse (HashiCorp Vault, 1Password CLI, `bitwarden-cli`, etc.).
+
+Declare the helper in `~/.config/cagent/config.yaml`:
+
+```yaml
+# ~/.config/cagent/config.yaml
+credential_helper:
+  command: op
+  args: ["read", "op://Personal/docker-agent"]
+```
+
+The command is invoked with the variable name appended as the final argument, and must print the secret value to stdout.
+
+## Docker Desktop
+
+On machines where Docker Desktop is installed, docker-agent queries Docker Desktop's backend for secrets stored against your signed-in Docker account. This is transparent — no extra configuration — and it is how signed-in Docker users get provider API keys without setting any environment variables.
 
 ## `pass` Password Manager
 

@@ -57,12 +57,16 @@ _docker-agent supports multiple AI model providers. Choose the right one for you
 
 docker-agent also includes built-in aliases for these providers:
 
-| Provider   | API Key Variable  |
-| ---------- | ----------------- |
-| Mistral    | `MISTRAL_API_KEY` |
-| xAI (Grok) | `XAI_API_KEY`     |
-| Nebius     | `NEBIUS_API_KEY`  |
-| MiniMax    | `MINIMAX_API_KEY` |
+| Provider       | Alias            | API Key / Env Variable              |
+| -------------- | ---------------- | ----------------------------------- |
+| Mistral        | `mistral`        | `MISTRAL_API_KEY`                   |
+| xAI (Grok)     | `xai`            | `XAI_API_KEY`                       |
+| Nebius         | `nebius`         | `NEBIUS_API_KEY`                    |
+| MiniMax        | `minimax`        | `MINIMAX_API_KEY`                   |
+| Requesty       | `requesty`       | `REQUESTY_API_KEY`                  |
+| Azure OpenAI   | `azure`          | `AZURE_OPENAI_API_KEY` + `base_url` |
+| Ollama         | `ollama`         | None (local; optional `base_url`)   |
+| GitHub Copilot | `github-copilot` | GitHub CLI auth (`gh auth login`)   |
 
 ```bash
 # Use built-in providers inline

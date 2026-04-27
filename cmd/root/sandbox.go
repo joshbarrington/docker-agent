@@ -41,8 +41,6 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 
 	configDir := paths.GetConfigDir()
 	dockerAgentArgs := dockerAgentArgs(cmd, args, configDir)
-	dockerAgentArgs = append(dockerAgentArgs, args...)
-	dockerAgentArgs = append(dockerAgentArgs, "--config-dir", configDir)
 
 	stopTokenWriter := sandbox.StartTokenWriterIfNeeded(ctx, configDir, runConfig.ModelsGateway)
 	defer stopTokenWriter()

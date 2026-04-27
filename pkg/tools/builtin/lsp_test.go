@@ -275,7 +275,7 @@ func TestLSPHandler_GetDiagnostics_NoDiagnostics(t *testing.T) {
 	tool.handler.initialized.Store(true)
 	// Pretend we have a running server by setting a non-nil cmd
 	// We use exec.Command which creates a valid *exec.Cmd without running anything
-	tool.handler.cmd = exec.Command("true")
+	tool.handler.cmd = exec.CommandContext(t.Context(), "true")
 
 	ctx := t.Context()
 
@@ -295,7 +295,7 @@ func TestLSPHandler_GetDiagnostics_WithDiagnostics(t *testing.T) {
 	// Mark as initialized to test the diagnostics retrieval path
 	tool.handler.initialized.Store(true)
 	// Pretend we have a running server
-	tool.handler.cmd = exec.Command("true")
+	tool.handler.cmd = exec.CommandContext(t.Context(), "true")
 
 	// Manually set some diagnostics
 	tool.handler.diagnostics["file:///test.go"] = []lspDiagnostic{
@@ -756,7 +756,7 @@ func TestLSPHandler_Workspace(t *testing.T) {
 
 	// Mark as initialized and set server info/capabilities
 	tool.handler.initialized.Store(true)
-	tool.handler.cmd = exec.Command("true")
+	tool.handler.cmd = exec.CommandContext(t.Context(), "true")
 	tool.handler.serverInfo = &lspServerInfo{
 		Name:    "gopls",
 		Version: "v0.14.0",

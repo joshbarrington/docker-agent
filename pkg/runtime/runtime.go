@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -197,6 +199,22 @@ type LocalRuntime struct {
 	env                         []string // Environment variables for hooks execution
 	modelSwitcherCfg            *ModelSwitcherConfig
 
+	// hooksRegistry is the runtime-private hooks.Registry used to build
+	// every Executor. It carries the runtime-owned builtin hooks
+	// (add_date, add_environment_info) registered once during
+	// NewLocalRuntime, so they're available to every agent without
+	// touching any process-wide state.
+	hooksRegistry *hooks.Registry
+
+	// hooksExecByAgent caches the per-agent [hooks.Executor], keyed by
+	// agent name. Building one requires translating agent flags into
+	// implicit builtin hook entries and compiling matchers — work we
+	// don't want to repeat on every dispatch within a turn. Entries are
+	// stable for the runtime's lifetime; a nil value caches the
+	// "no hooks configured" verdict so repeat lookups stay cheap.
+	hooksExecByAgent map[string]*hooks.Executor
+	hooksExecMu      sync.RWMutex
+
 	// retryOnRateLimit enables retry-with-backoff for HTTP 429 (rate limit) errors
 	// when no fallback models are configured. When false (default), 429 errors are
 	// treated as non-retryable and immediately fail or skip to the next model.
@@ -317,6 +335,11 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		return nil, err
 	}
 
+	hooksRegistry := hooks.NewRegistry()
+	if err := builtins.Register(hooksRegistry); err != nil {
+		return nil, fmt.Errorf("register builtin hooks: %w", err)
+	}
+
 	r := &LocalRuntime{
 		toolMap:              make(map[string]ToolHandlerFunc),
 		team:                 agents,
@@ -329,11 +352,22 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		managedOAuth:         true,
 		sessionStore:         session.NewInMemorySessionStore(),
 		fallbackCooldowns:    make(map[string]*fallbackCooldownState),
+		hooksRegistry:        hooksRegistry,
 	}
 	r.bgAgents = agenttool.NewHandler(r)
 
 	for _, opt := range opts {
 		opt(r)
+	}
+
+	// Default the runtime's working directory to the process CWD when no
+	// caller supplied one. This matches the session's default and ensures
+	// builtin hooks that look up files (add_prompt_files) can find them
+	// without the embedder having to remember to call WithWorkingDir.
+	if r.workingDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			r.workingDir = cwd
+		}
 	}
 
 	if r.modelsStore == nil {
@@ -562,150 +596,6 @@ func (r *LocalRuntime) TitleGenerator() *sessiontitle.Generator {
 		return nil
 	}
 	return sessiontitle.New(model, a.FallbackModels()...)
-}
-
-// getHooksExecutor creates a hooks executor for the given agent
-func (r *LocalRuntime) getHooksExecutor(a *agent.Agent) *hooks.Executor {
-	hooksCfg := hooks.FromConfig(a.Hooks())
-	if hooksCfg == nil || hooksCfg.IsEmpty() {
-		return nil
-	}
-	return hooks.NewExecutor(hooksCfg, r.workingDir, r.env)
-}
-
-// executeSessionStartHooks executes session start hooks for the given agent.
-// It logs the hook output as additional context and emits warnings for system messages.
-func (r *LocalRuntime) executeSessionStartHooks(ctx context.Context, sess *session.Session, a *agent.Agent, events chan Event) {
-	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasSessionStartHooks() {
-		return
-	}
-
-	slog.Debug("Executing session start hooks", "agent", a.Name(), "session_id", sess.ID)
-	input := &hooks.Input{
-		SessionID: sess.ID,
-		Cwd:       r.workingDir,
-		Source:    "startup",
-	}
-
-	result, err := hooksExec.ExecuteSessionStart(ctx, input)
-	if err != nil {
-		slog.Warn("Session start hook execution failed", "agent", a.Name(), "error", err)
-		return
-	}
-
-	if result.SystemMessage != "" {
-		events <- Warning(result.SystemMessage, a.Name())
-	}
-	if result.AdditionalContext != "" {
-		slog.Debug("Session start hook provided additional context", "context", result.AdditionalContext)
-		sess.AddMessage(session.SystemMessage(result.AdditionalContext))
-	}
-}
-
-// executeSessionEndHooks executes session end hooks for the given agent.
-func (r *LocalRuntime) executeSessionEndHooks(ctx context.Context, sess *session.Session, a *agent.Agent) {
-	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasSessionEndHooks() {
-		return
-	}
-
-	slog.Debug("Executing session end hooks", "agent", a.Name(), "session_id", sess.ID)
-	input := &hooks.Input{
-		SessionID: sess.ID,
-		Cwd:       r.workingDir,
-		Reason:    "stream_ended",
-	}
-
-	_, err := hooksExec.ExecuteSessionEnd(ctx, input)
-	if err != nil {
-		slog.Error("Session end hook execution failed", "agent", a.Name(), "error", err)
-	}
-}
-
-// executeStopHooks executes stop hooks when the model finishes responding.
-// The stop hook receives the model's final response content.
-func (r *LocalRuntime) executeStopHooks(ctx context.Context, sess *session.Session, a *agent.Agent, responseContent string, events chan Event) {
-	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasStopHooks() {
-		return
-	}
-
-	slog.Debug("Executing stop hooks", "agent", a.Name(), "session_id", sess.ID)
-	input := &hooks.Input{
-		SessionID:    sess.ID,
-		Cwd:          r.workingDir,
-		StopResponse: responseContent,
-	}
-
-	result, err := hooksExec.ExecuteStop(ctx, input)
-	if err != nil {
-		slog.Warn("Stop hook execution failed", "agent", a.Name(), "error", err)
-		return
-	}
-
-	if result.SystemMessage != "" {
-		events <- Warning(result.SystemMessage, a.Name())
-	}
-}
-
-// executeNotificationHooks executes notification hooks when the agent emits a user-facing
-// notification (e.g., errors or warnings). Hook output is logged but does not affect the
-// notification itself. Individual hooks are subject to their configured timeout.
-func (r *LocalRuntime) executeNotificationHooks(ctx context.Context, a *agent.Agent, sessionID, level, message string) {
-	if a == nil {
-		return
-	}
-
-	if level != "error" && level != "warning" {
-		slog.Error("Invalid notification level", "level", level, "expected", "error|warning")
-		return
-	}
-
-	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasNotificationHooks() {
-		return
-	}
-
-	slog.Debug("Executing notification hooks", "level", level, "session_id", sessionID)
-	input := &hooks.Input{
-		SessionID:           sessionID,
-		Cwd:                 r.workingDir,
-		NotificationLevel:   level,
-		NotificationMessage: message,
-	}
-
-	_, err := hooksExec.ExecuteNotification(ctx, input)
-	if err != nil {
-		slog.Warn("Notification hook execution failed", "error", err)
-	}
-}
-
-// executeOnUserInputHooks executes on-user-input hooks for the current agent
-func (r *LocalRuntime) executeOnUserInputHooks(ctx context.Context, sessionID, logContext string) {
-	a, _ := r.team.Agent(r.CurrentAgentName())
-	if a == nil {
-		return
-	}
-
-	hooksExec := r.getHooksExecutor(a)
-	if hooksExec == nil || !hooksExec.HasOnUserInputHooks() {
-		return
-	}
-
-	slog.Debug("Executing on-user-input hooks", "context", logContext)
-	input := &hooks.Input{
-		SessionID: sessionID,
-		Cwd:       r.workingDir,
-	}
-
-	result, err := hooksExec.ExecuteOnUserInput(ctx, input)
-	if err != nil {
-		slog.Warn("On-user-input hook execution failed", "error", err)
-	} else {
-		slog.Debug("On-user-input hooks executed successfully")
-	}
-	_ = result // Hook result not used
 }
 
 // getAgentModelID returns the model ID for an agent, or empty string if no model is set.

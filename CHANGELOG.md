@@ -3,6 +3,222 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.52.0] - 2026-04-27
+
+This release adds file picker hotkeys, improves message handling consistency, and introduces an extensible hooks system with new lifecycle events.
+
+## What's New
+
+- Adds Alt+H and Alt+I hotkeys in file picker to toggle hidden and ignored file visibility
+- Adds extensible hooks system with 5 new lifecycle events and 3 builtin hooks
+
+## Improvements
+
+- Makes user prompt elicitation dialog scrollable to prevent content overflow in terminal
+
+## Bug Fixes
+
+- Fixes message trimming behavior to be consistent across all model providers
+- Fixes steer message handling by appending newlines between queued messages to prevent word fragments from being concatenated
+
+## Technical Changes
+
+- Refactors hooks architecture for better extensibility with pluggable registry system
+- Centralizes whitespace-only message filtering in session.GetMessages
+
+### Pull Requests
+
+- [#2501](https://github.com/docker/docker-agent/pull/2501) - hotkeys to toggle filepicker hidden/ignored files
+- [#2509](https://github.com/docker/docker-agent/pull/2509) - fix(tui): make user_prompt elicitation dialog scrollable
+- [#2514](https://github.com/docker/docker-agent/pull/2514) - docs: update CHANGELOG.md for v1.51.0
+- [#2516](https://github.com/docker/docker-agent/pull/2516) - fix: normalize message trimming behavior across all model providers
+- [#2518](https://github.com/docker/docker-agent/pull/2518) - runtime: append newline to non-last steer messages on multi-drain
+- [#2519](https://github.com/docker/docker-agent/pull/2519) - feat(hooks): refactor for extensibility, add 5 events and 3 builtins
+
+
+## [v1.51.0] - 2026-04-27
+
+This release improves Anthropic model support on Vertex AI, enhances the model picker interface, and includes several bug fixes.
+
+## What's New
+- Adds pricing and capabilities information to the /model picker interface with a detailed comparison table
+
+## Improvements
+- Routes Anthropic models on Vertex AI through the native endpoint instead of OpenAI-compatible endpoint to fix compatibility issues
+
+## Bug Fixes
+- Fixes race condition in session cleanup that could cause spurious "session busy" errors
+- Fixes OTLP endpoint URL handling to properly support http/https schemes
+
+## Technical Changes
+- Enables noctx linter and adds context threading through HTTP, SQL, exec and net APIs
+
+### Pull Requests
+
+- [#2476](https://github.com/docker/docker-agent/pull/2476) - Route Anthropic models on Vertex AI through the native endpoint
+- [#2489](https://github.com/docker/docker-agent/pull/2489) - ci: bump golangci-lint from v2.9 to v2.11
+- [#2499](https://github.com/docker/docker-agent/pull/2499) - docs: update CHANGELOG.md for v1.50.0
+- [#2503](https://github.com/docker/docker-agent/pull/2503) - fix(session): prevent race condition in session cleanup
+- [#2504](https://github.com/docker/docker-agent/pull/2504) - fix(otel): support http/https scheme in OTLP endpoint URL
+- [#2508](https://github.com/docker/docker-agent/pull/2508) - lint: enable noctx and deduplicate touched code
+- [#2511](https://github.com/docker/docker-agent/pull/2511) - feat(tui): show pricing & capabilities in /model picker
+
+
+## [v1.50.0] - 2026-04-23
+
+This release fixes several runtime issues with message steering and sandbox argument handling, along with TUI improvements for user prompts and speech commands.
+
+## What's New
+
+- Adds support for custom OAuth callback redirect URLs for remote MCP toolsets, allowing public-facing proxies for authentication
+
+## Improvements
+
+- Adds custom component for user_prompt tool calls in TUI that shows only status and name without exposing internal details
+
+## Bug Fixes
+
+- Fixes sandbox mode incorrectly interpreting agent file path as first chat message due to duplicate argument handling
+- Fixes runtime race conditions where steer messages could be silently dropped during idle windows or first turns
+- Fixes /speak slash command not dispatching immediately in TUI
+
+## Technical Changes
+
+- Updates Go to version 1.26.2
+- Refactors runtime steer message injection to remove system-reminder envelope
+
+### Pull Requests
+
+- [#2486](https://github.com/docker/docker-agent/pull/2486) - docs: update CHANGELOG.md for v1.49.2
+- [#2487](https://github.com/docker/docker-agent/pull/2487) - fix(sandbox): don't duplicate agent file and --config-dir args
+- [#2488](https://github.com/docker/docker-agent/pull/2488) - chore: bump Go to 1.26.2
+- [#2492](https://github.com/docker/docker-agent/pull/2492) - fix(runtime): drain steerQueue at top of RunStream loop to close idle-window race
+- [#2494](https://github.com/docker/docker-agent/pull/2494) - feat(mcp): support custom OAuth callbackRedirectURL for remote toolsets
+- [#2496](https://github.com/docker/docker-agent/pull/2496) - fix(tui): make /speak slash command dispatch immediately
+- [#2497](https://github.com/docker/docker-agent/pull/2497) - tui: add custom component for user_prompt tool calls
+
+
+## [v1.49.2] - 2026-04-21
+
+This release fixes an issue with the --pull-interval flag when using URL gordon references.
+
+## Bug Fixes
+- Fixes blocking of --pull-interval flag when using URL gordon reference
+
+## Technical Changes
+- Updates CHANGELOG.md for v1.49.1
+
+### Pull Requests
+
+- [#2484](https://github.com/docker/docker-agent/pull/2484) - docs: update CHANGELOG.md for v1.49.1
+- [#2485](https://github.com/docker/docker-agent/pull/2485) - Do not block --pull-interval flag when using URL gordon ref
+
+
+## [v1.49.1] - 2026-04-21
+
+This release improves the shell tool's command handling and fixes documentation inconsistencies.
+
+## Improvements
+- Accepts "command" as an alias for "cmd" in shell tool calls to improve compatibility with different AI models
+- Improves error messaging when shell commands are empty or blank
+
+## Bug Fixes
+- Fixes documentation and code divergences reported in issue #2464 with 36 targeted corrections
+- Prevents blank "cmd" parameters from interfering with "command" alias functionality
+
+## Technical Changes
+- Updates configuration schema version to 8 in documentation
+- Updates CHANGELOG.md for v1.49.0 release
+
+### Pull Requests
+
+- [#2464](https://github.com/docker/docker-agent/pull/2464) - docs: fix doc-code divergences reported in issue #2464
+- [#2479](https://github.com/docker/docker-agent/pull/2479) - docs: fix doc-code divergences reported in #2464
+- [#2481](https://github.com/docker/docker-agent/pull/2481) - shell: accept `command` as alias for `cmd` and improve empty-arg error
+- [#2483](https://github.com/docker/docker-agent/pull/2483) - docs: update CHANGELOG.md for v1.49.0
+
+
+## [v1.49.0] - 2026-04-21
+
+This release improves DMR support, adds skill filtering capabilities, and includes several bug fixes for OpenTelemetry and security hardening.
+
+## What's New
+- Adds support for filtering skills by name in agent YAML configuration
+- Improves DMR support with better context size handling and structured configuration
+
+## Bug Fixes
+- Fixes OpenTelemetry service resource schema alignment
+- Fixes path traversal vulnerability and other security issues in artifact store, skills loader, hooks, shell and agent warnings
+- Fixes OpenTelemetry import ordering in tests
+
+## Technical Changes
+- Encodes agent source URL when using it as agent name and key for proper conversation handling in `serve api`
+- Moves localhost helper comment in OpenTelemetry code
+
+### Pull Requests
+
+- [#2351](https://github.com/docker/docker-agent/pull/2351) - Improve DMR support
+- [#2404](https://github.com/docker/docker-agent/pull/2404) - Merge pull request #2474 from dgageot/board/support-boolean-or-array-skills-in-yaml-f97b09f6
+- [#2442](https://github.com/docker/docker-agent/pull/2442) - fix(otel): align service resource schema
+- [#2470](https://github.com/docker/docker-agent/pull/2470) - docs: update CHANGELOG.md for v1.48.0
+- [#2472](https://github.com/docker/docker-agent/pull/2472) - bump github.com/docker/cli from v29.4.0+incompatible to v29.4.1+incompatible
+- [#2473](https://github.com/docker/docker-agent/pull/2473) - Encode agent source URL when using it as agent name and key, so that it can be used properly in conversations when using `serve api`
+- [#2474](https://github.com/docker/docker-agent/pull/2474) - Support filtering skills by name in agent YAML (#2404)
+- [#2480](https://github.com/docker/docker-agent/pull/2480) - fix: harden artifact store, skills loader, hooks, shell and agent warnings
+
+
+## [v1.48.0] - 2026-04-20
+
+This release adds working directory configuration for MCP and LSP toolsets and improves toolset reliability with better retry handling.
+
+## What's New
+- Adds optional `working_dir` field to MCP and LSP toolset configurations to launch processes from a specific directory
+
+## Bug Fixes
+- Fixes retry behavior for MCP toolsets after tool calls within the same turn
+- Stops retrying SQLITE_CANTOPEN (14) errors that cannot be resolved
+- Fixes filepath handling to satisfy gocritic filepathJoin lint rule
+- Returns explicit error when ref-based MCP resolves to remote server with working_dir
+
+## Technical Changes
+- Documents working_dir field for MCP and LSP toolsets in configuration
+
+### Pull Requests
+
+- [#2457](https://github.com/docker/docker-agent/pull/2457) - fix(#2457): retry MCP toolsets after tool calls within the same turn
+- [#2458](https://github.com/docker/docker-agent/pull/2458) - fix: retry LSP/MCP toolsets after tool calls, covering env-wrapped commands (fixes #2457)
+- [#2460](https://github.com/docker/docker-agent/pull/2460) - feat: add optional working_dir to MCP and LSP toolset configs
+- [#2466](https://github.com/docker/docker-agent/pull/2466) - Don't retry SQLITE_CANTOPEN (14) errors
+- [#2468](https://github.com/docker/docker-agent/pull/2468) - docs: update CHANGELOG.md for v1.47.0
+
+
+## [v1.47.0] - 2026-04-20
+
+This release fixes several issues with AI model interactions, including title generation failures with reasoning models and shell command hangs.
+
+## Bug Fixes
+- Fixes title generation failures with OpenAI reasoning models by using low reasoning effort instead of omitting it
+- Fixes shell command hangs when a tool command backgrounds a child process
+- Repairs malformed JSON in edit_file tool call arguments that was causing parsing failures
+- Moves reasoning token budget floor to OpenAI provider for better token management
+
+## Improvements
+- Increases title generation token budget for reasoning models to ensure adequate output space
+- Adds thinking_display provider option for Anthropic models to control visibility of thinking blocks
+
+## Technical Changes
+- Adds test assertion for non-empty title in end-to-end title generation tests
+
+### Pull Requests
+
+- [#2412](https://github.com/docker/docker-agent/pull/2412) - fix: title generation fails with OpenAI reasoning models
+- [#2451](https://github.com/docker/docker-agent/pull/2451) - Add thinking_display provider_opt for Anthropic models
+- [#2452](https://github.com/docker/docker-agent/pull/2452) - fix: repair malformed JSON in edit_file tool call arguments
+- [#2455](https://github.com/docker/docker-agent/pull/2455) - docs: update CHANGELOG.md for v1.46.0
+- [#2462](https://github.com/docker/docker-agent/pull/2462) - shell: fix hang when a tool command backgrounds a child process
+- [#2463](https://github.com/docker/docker-agent/pull/2463) - bump direct Go dependencies
+
+
 ## [v1.46.0] - 2026-04-16
 
 This release adds OAuth credential configuration for MCP servers, evaluation testing improvements, and numerous stability fixes.
@@ -2009,3 +2225,19 @@ This release improves the terminal user interface with better error handling and
 [v1.45.0]: https://github.com/docker/docker-agent/releases/tag/v1.45.0
 
 [v1.46.0]: https://github.com/docker/docker-agent/releases/tag/v1.46.0
+
+[v1.47.0]: https://github.com/docker/docker-agent/releases/tag/v1.47.0
+
+[v1.48.0]: https://github.com/docker/docker-agent/releases/tag/v1.48.0
+
+[v1.49.0]: https://github.com/docker/docker-agent/releases/tag/v1.49.0
+
+[v1.49.1]: https://github.com/docker/docker-agent/releases/tag/v1.49.1
+
+[v1.49.2]: https://github.com/docker/docker-agent/releases/tag/v1.49.2
+
+[v1.50.0]: https://github.com/docker/docker-agent/releases/tag/v1.50.0
+
+[v1.51.0]: https://github.com/docker/docker-agent/releases/tag/v1.51.0
+
+[v1.52.0]: https://github.com/docker/docker-agent/releases/tag/v1.52.0

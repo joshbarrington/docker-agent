@@ -27,18 +27,28 @@ $ docker agent run [config] [message...] [flags]
 
 | Flag                                    | Description                                                                                                                               |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `-a, --agent &lt;name&gt;`              | Run a specific agent from the config                                                                                                      |
+| `-a, --agent <name>`                    | Run a specific agent from the config                                                                                                      |
 | `--yolo`                                | Auto-approve all tool calls                                                                                                               |
-| `--model &lt;ref&gt;`                   | Override model(s). Use `provider/model` for all agents, or `agent=provider/model` for specific agents. Comma-separate multiple overrides. |
-| `--session &lt;id&gt;`                  | Resume a previous session. Supports relative refs (`-1` = last, `-2` = second to last)                                                    |
-| `--prompt-file &lt;path&gt;`            | Include file contents as additional system context (repeatable)                                                                           |
-| `--hook-pre-tool-use &lt;cmd&gt;`       | Add a pre-tool-use hook command (repeatable). See [Hooks]({{ '/configuration/hooks/' | relative_url }}).                                  |
-| `--hook-post-tool-use &lt;cmd&gt;`      | Add a post-tool-use hook command (repeatable)                                                                                             |
-| `--hook-session-start &lt;cmd&gt;`      | Add a session-start hook command (repeatable)                                                                                             |
-| `--hook-session-end &lt;cmd&gt;`        | Add a session-end hook command (repeatable)                                                                                               |
-| `--hook-on-user-input &lt;cmd&gt;`      | Add an on-user-input hook command (repeatable)                                                                                            |
+| `--model <ref>`                         | Override model(s). Use `provider/model` for all agents, or `agent=provider/model` for specific agents. Comma-separate multiple overrides. |
+| `--session <id>`                        | Resume a previous session. Supports relative refs (`-1` = last, `-2` = second to last)                                                    |
+| `-s, --session-db <path>`               | Path to the SQLite session database (default: `~/.cagent/session.db`)                                                                     |
+| `--prompt-file <path>`                  | Include file contents as additional system context (repeatable)                                                                           |
+| `--attach <path>`                       | Attach an image file to the initial message                                                                                               |
+| `--dry-run`                             | Initialize the agent without executing anything (useful for validating a config)                                                          |
+| `--lean`                                | Use a simplified TUI with minimal chrome                                                                                                  |
+| `--json`                                | Output results as newline-delimited JSON (use with `--exec`)                                                                              |
+| `--hide-tool-calls`                     | Hide tool calls in the output                                                                                                             |
+| `--hide-tool-results`                   | Hide tool call results in the output                                                                                                      |
+| `--sandbox`                             | Run the agent inside a Docker sandbox (see [Sandbox]({{ '/configuration/sandbox/' | relative_url }}))                                     |
+| `--template <image>`                    | Template image for the sandbox (default: `docker/sandbox-templates:docker-agent`)                                                         |
+| `--sbx`                                 | Prefer the `sbx` CLI backend when available (default `true`; set `--sbx=false` to force `docker sandbox`)                                 |
+| `--hook-pre-tool-use <cmd>`             | Add a pre-tool-use hook command (repeatable). See [Hooks]({{ '/configuration/hooks/' | relative_url }}).                                  |
+| `--hook-post-tool-use <cmd>`            | Add a post-tool-use hook command (repeatable)                                                                                             |
+| `--hook-session-start <cmd>`            | Add a session-start hook command (repeatable)                                                                                             |
+| `--hook-session-end <cmd>`              | Add a session-end hook command (repeatable)                                                                                               |
+| `--hook-on-user-input <cmd>`            | Add an on-user-input hook command (repeatable)                                                                                            |
 | `-d, --debug`                           | Enable debug logging                                                                                                                      |
-| `--log-file &lt;path&gt;`               | Custom debug log location                                                                                                                 |
+| `--log-file <path>`                     | Custom debug log location                                                                                                                 |
 | `-o, --otel`                            | Enable OpenTelemetry tracing                                                                                                              |
 
 ```bash
@@ -89,6 +99,28 @@ $ docker agent new [flags]
 $ docker agent new
 $ docker agent new --model openai/gpt-5-mini
 $ docker agent new --model dmr/ai/gemma3-qat:12B --max-iterations 15
+```
+
+### `docker agent models`
+
+List models available for use with `--model`. By default only shows models for providers you have credentials for. Aliases: `docker agent models list`, `docker agent models ls`.
+
+```bash
+$ docker agent models [flags]
+```
+
+| Flag                   | Default | Description                                                                        |
+| ---------------------- | ------- | ---------------------------------------------------------------------------------- |
+| `-p, --provider <id>`  | (none)  | Filter models by provider name (e.g. `openai`, `anthropic`, `dmr`, `ollama`, …).   |
+| `--format <fmt>`       | `table` | Output format: `table` or `json`.                                                  |
+| `-a, --all`            | `false` | Include models from all providers, not just those you have credentials for.        |
+
+```bash
+# Examples
+$ docker agent models                                 # only providers you can use
+$ docker agent models --all                           # every provider the catalog knows about
+$ docker agent models --provider openai
+$ docker agent models --format json | jq
 ```
 
 ### `docker agent serve api`

@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 )
 
-// readPromptFiles looks for a prompt file in the working directory hierarchy
+// ReadPromptFiles looks for a prompt file in the working directory hierarchy
 // and in the user's home folder. If found in both locations, both contents are returned.
 // The working directory content is returned first, followed by the home folder content.
-func readPromptFiles(workDir, filename string) ([]string, error) {
+func ReadPromptFiles(workDir, filename string) ([]string, error) {
 	var results []string
 
 	// Look in the working directory hierarchy

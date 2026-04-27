@@ -10,23 +10,29 @@ _Connect to remote agents via the Agent-to-Agent protocol._
 
 ## Overview
 
-The A2A tool connects to remote agents via the A2A (Agent-to-Agent) protocol. Similar to the [handoff tool]({{ '/tools/handoff/' | relative_url }}) but configured as a toolset.
+The A2A tool connects to a remote agent exposed over the A2A (Agent-to-Agent) protocol. Unlike [`handoff`]({{ '/tools/handoff/' | relative_url }}), which only targets local agents declared in the same config, `a2a` reaches out to an agent running on the network.
 
 ## Configuration
 
 ```yaml
 toolsets:
   - type: a2a
-    name: research_agent
     url: "http://localhost:8080/a2a"
+    # Optional: custom tool name (defaults to a sanitized form of the URL / agent card name)
+    name: research_agent
+    # Optional: custom HTTP headers (typically for auth)
+    headers:
+      Authorization: "Bearer ${A2A_TOKEN}"
+      X-Tenant: "acme"
 ```
 
 ## Properties
 
-| Property | Type   | Required | Description                    |
-| -------- | ------ | -------- | ------------------------------ |
-| `name`   | string | ✓        | Tool name for the remote agent |
-| `url`    | string | ✓        | A2A server endpoint URL        |
+| Property   | Type             | Required | Description                                                                                              |
+| ---------- | ---------------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `url`      | string           | ✓        | A2A server endpoint URL (must include scheme).                                                           |
+| `name`     | string           | ✗        | Tool name registered for the remote agent. Defaults to a name derived from the server's agent card.     |
+| `headers`  | map\[string\]string | ✗     | Extra HTTP headers sent with every request (useful for `Authorization`, tenant selection, tracing, \u2026). |
 
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">💡 See also

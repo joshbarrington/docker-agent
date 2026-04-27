@@ -76,7 +76,7 @@ func doRequest(t *testing.T, opts ...Opt) http.Header {
 	defer srv.Close()
 
 	client := NewHTTPClient(t.Context(), opts...)
-	req, err := http.NewRequest(http.MethodGet, srv.URL, http.NoBody)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)

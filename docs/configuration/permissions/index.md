@@ -46,12 +46,19 @@ permissions:
     - "read_*" # Glob patterns
     - "shell:cmd=ls*" # With argument matching
 
+  # Always ask before running these tools, even if an allow pattern would match
+  ask:
+    - "shell:cmd=git push*"
+    - "write_file:path=/home/user/important/*"
+
   # Block these tools entirely
   deny:
     - "shell:cmd=sudo*"
     - "shell:cmd=rm*-rf*"
     - "dangerous_tool"
 ```
+
+The three lists are evaluated in order `deny` → `allow` → `ask`, so an `ask:` entry lets you add a confirmation layer on top of an otherwise-allowed tool.
 
 ## Global Permissions
 

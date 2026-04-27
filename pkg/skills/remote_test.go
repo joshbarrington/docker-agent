@@ -312,3 +312,67 @@ func TestIsValidFilePath(t *testing.T) {
 		})
 	}
 }
+
+func TestIsValidSkillName(t *testing.T) {
+	tests := []struct {
+		name  string
+		valid bool
+	}{
+		{"docker-build", true},
+		{"k8s_deploy", true},
+		{"My.Skill", true},
+		{"abc123", true},
+		{"", false},
+		{".", false},
+		{"..", false},
+		{".hidden", false},
+		{"../escape", false},
+		{"with/slash", false},
+		{"with\\slash", false},
+		{"with space", false},
+		{"with:colon", false},
+		{"evil?name", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.valid, isValidSkillName(tt.name))
+		})
+	}
+}
+
+// TestLoadRemoteSkills_RejectsSkillNameTraversal ensures a hostile remote
+// index cannot use the skill name to place cache files outside the cache
+// directory.
+func TestLoadRemoteSkills_RejectsSkillNameTraversal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/skills/index.json":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"skills": [
+				{"name": "../evil",   "description": "d", "files": ["SKILL.md"]},
+				{"name": "a/b",      "description": "d", "files": ["SKILL.md"]},
+				{"name": ".hidden",  "description": "d", "files": ["SKILL.md"]},
+				{"name": "ok-skill", "description": "d", "files": ["SKILL.md"]}
+			]}`)
+		default:
+			// Any per-file request succeeds so we can detect it happening.
+			fmt.Fprint(w, "# payload")
+		}
+	}))
+	defer srv.Close()
+
+	cacheBase := t.TempDir()
+	cache := newDiskCache(cacheBase)
+	skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, cache)
+
+	require.Len(t, skills, 1)
+	assert.Equal(t, "ok-skill", skills[0].Name)
+
+	// Nothing should have been written outside the cache base directory.
+	parent := filepath.Dir(cacheBase)
+	entries, err := os.ReadDir(parent)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.NotEqual(t, "evil", e.Name(), "cache escape via skill name")
+	}
+}

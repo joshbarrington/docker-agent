@@ -14,7 +14,10 @@ _Complete reference for defining models with providers, parameters, and reasonin
 ```yaml
 models:
   model_name:
-    provider: string # Required: openai, anthropic, google, amazon-bedrock, dmr
+    provider: string # Required. One of: openai, anthropic, google, amazon-bedrock,
+                     # dmr, mistral, xai, nebius, minimax, requesty, azure, ollama,
+                     # github-copilot, or a named provider defined under the top-level
+                     # `providers:` section.
     model: string # Required: model identifier
     temperature: float # Optional: 0.0–1.0
     max_tokens: integer # Optional: response length limit
@@ -65,7 +68,7 @@ models:
   gpt:
     provider: openai
     model: gpt-5-mini
-    thinking_budget: low # minimal | low | medium | high
+    thinking_budget: low # minimal | low | medium | high | xhigh | max | adaptive/<level>
 ```
 
 ### Anthropic
@@ -101,7 +104,7 @@ models:
   gemini3:
     provider: google
     model: gemini-3-flash
-    thinking_budget: medium # minimal | low | medium | high
+    thinking_budget: medium # minimal | low | medium | high | xhigh | max | adaptive/<level>
 ```
 
 ### Disabling Thinking
@@ -193,6 +196,29 @@ models:
 ```
 
 See the [Anthropic provider page](/providers/anthropic/#thinking-display) for details.
+
+## Custom HTTP Headers
+
+For OpenAI-compatible providers (`openai`, `github-copilot`, `mistral`, `xai`,
+`nebius`, `minimax`, `ollama`, and any custom provider using the OpenAI API),
+`provider_opts.http_headers` adds arbitrary HTTP headers to every outgoing
+request:
+
+```yaml
+models:
+  my_model:
+    provider: openai
+    model: gpt-4o
+    provider_opts:
+      http_headers:
+        X-Request-Source: docker-agent
+        X-Tenant-Id: my-team
+```
+
+Header names are matched case-insensitively. The `github-copilot` provider
+automatically sets `Copilot-Integration-Id: copilot-developer-cli` — see the
+[GitHub Copilot provider page]({{ '/providers/github-copilot/' | relative_url }})
+for details.
 
 ## Examples by Provider
 

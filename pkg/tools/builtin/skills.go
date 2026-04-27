@@ -232,6 +232,58 @@ type RunSkillArgs struct {
 	Task string `json:"task" jsonschema:"A clear description of the task the skill sub-agent should achieve"`
 }
 
+// PreparedSkillFork carries the validated and expanded data needed to launch a
+// skill as an isolated sub-agent. Callers (typically the runtime) use it to
+// build the child session; this lets the skill-specific business rules
+// (lookup, fork validation, content expansion) live with the toolset rather
+// than the runtime.
+type PreparedSkillFork struct {
+	// SkillName is the validated skill name, suitable for span attributes,
+	// log fields, and sub-session titles ("Skill: <name>").
+	SkillName string
+	// Task is the caller-supplied task description, intended to be used as
+	// the implicit user message of the child session.
+	Task string
+	// Content is the expanded SKILL.md content, intended to be used as the
+	// system message of the child session.
+	Content string
+	// Model is the optional model override declared in the SKILL.md
+	// frontmatter. Empty means "use the parent agent's current model".
+	Model string
+}
+
+// PrepareForkSubSession validates a run_skill request and loads the expanded
+// skill content. It returns either a populated PreparedSkillFork, or a
+// ToolCallResult describing why the call cannot proceed (skill missing,
+// skill not configured for fork mode, content read failure). The caller is
+// responsible for the runtime-specific orchestration (sub-session creation,
+// tracing, event forwarding).
+func (s *SkillsToolset) PrepareForkSubSession(ctx context.Context, args RunSkillArgs) (*PreparedSkillFork, *tools.ToolCallResult) {
+	skill := s.findSkill(args.Name)
+	if skill == nil {
+		return nil, tools.ResultError(fmt.Sprintf("skill %q not found", args.Name))
+	}
+
+	if !skill.IsFork() {
+		return nil, tools.ResultError(fmt.Sprintf(
+			"skill %q is not configured for sub-agent execution (missing context: fork in SKILL.md frontmatter); use read_skill instead",
+			args.Name,
+		))
+	}
+
+	content, err := s.ReadSkillContent(ctx, args.Name)
+	if err != nil {
+		return nil, tools.ResultError(fmt.Sprintf("failed to read skill content: %s", err))
+	}
+
+	return &PreparedSkillFork{
+		SkillName: args.Name,
+		Task:      args.Task,
+		Content:   content,
+		Model:     skill.Model,
+	}, nil
+}
+
 func (s *SkillsToolset) Tools(context.Context) ([]tools.Tool, error) {
 	if len(s.skills) == 0 {
 		return nil, nil

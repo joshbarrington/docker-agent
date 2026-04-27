@@ -231,12 +231,12 @@ func TestNewExecutor(t *testing.T) {
 
 	exec := NewExecutor(config, "/tmp", []string{"FOO=bar"})
 	require.NotNil(t, exec)
-	assert.True(t, exec.HasPreToolUseHooks())
-	assert.False(t, exec.HasPostToolUseHooks())
-	assert.False(t, exec.HasSessionStartHooks())
-	assert.False(t, exec.HasSessionEndHooks())
-	assert.False(t, exec.HasStopHooks())
-	assert.False(t, exec.HasNotificationHooks())
+	assert.True(t, exec.Has(EventPreToolUse))
+	assert.False(t, exec.Has(EventPostToolUse))
+	assert.False(t, exec.Has(EventSessionStart))
+	assert.False(t, exec.Has(EventSessionEnd))
+	assert.False(t, exec.Has(EventStop))
+	assert.False(t, exec.Has(EventNotification))
 }
 
 func TestExecutorNilConfig(t *testing.T) {
@@ -244,7 +244,7 @@ func TestExecutorNilConfig(t *testing.T) {
 
 	exec := NewExecutor(nil, "/tmp", nil)
 	require.NotNil(t, exec)
-	assert.False(t, exec.HasPreToolUseHooks())
+	assert.False(t, exec.Has(EventPreToolUse))
 }
 
 func TestCompiledMatcherMatchTool(t *testing.T) {
@@ -322,8 +322,9 @@ func TestCompiledMatcherMatchTool(t *testing.T) {
 				},
 			}
 			exec := NewExecutor(config, "/tmp", nil)
-			require.Len(t, exec.preToolUseMatchers, 1)
-			assert.Equal(t, tt.expected, exec.preToolUseMatchers[0].matchTool(tt.toolName))
+			matchers := exec.events[EventPreToolUse]
+			require.Len(t, matchers, 1)
+			assert.Equal(t, tt.expected, matchers[0].matches(tt.toolName))
 		})
 	}
 }
@@ -349,7 +350,7 @@ func TestExecutePreToolUseWithEchoCommand(t *testing.T) {
 		ToolUseID: "test-id",
 	}
 
-	result, err := exec.ExecutePreToolUse(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventPreToolUse, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 }
@@ -375,7 +376,7 @@ func TestExecutePreToolUseBlockingExitCode(t *testing.T) {
 		ToolUseID: "test-id",
 	}
 
-	result, err := exec.ExecutePreToolUse(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventPreToolUse, input)
 	require.NoError(t, err)
 	assert.False(t, result.Allowed)
 	assert.Equal(t, 2, result.ExitCode)
@@ -402,7 +403,7 @@ func TestExecutePreToolUseNoMatchingHooks(t *testing.T) {
 		ToolUseID: "test-id",
 	}
 
-	result, err := exec.ExecutePreToolUse(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventPreToolUse, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed) // Should be allowed since no hooks matched
 }
@@ -429,7 +430,7 @@ func TestExecutePreToolUseWithJSONOutput(t *testing.T) {
 		ToolUseID: "test-id",
 	}
 
-	result, err := exec.ExecutePreToolUse(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventPreToolUse, input)
 	require.NoError(t, err)
 	assert.False(t, result.Allowed)
 	assert.Contains(t, result.Message, "Tool not allowed")
@@ -457,7 +458,7 @@ func TestExecutePostToolUse(t *testing.T) {
 		ToolResponse: "command output",
 	}
 
-	result, err := exec.ExecutePostToolUse(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventPostToolUse, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 }
@@ -477,7 +478,7 @@ func TestExecuteSessionStart(t *testing.T) {
 		Source:    "startup",
 	}
 
-	result, err := exec.ExecuteSessionStart(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventSessionStart, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 	assert.Contains(t, result.AdditionalContext, "session starting")
@@ -498,7 +499,7 @@ func TestExecuteSessionEnd(t *testing.T) {
 		Reason:    "logout",
 	}
 
-	result, err := exec.ExecuteSessionEnd(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventSessionEnd, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 }
@@ -517,7 +518,7 @@ func TestExecuteOnUserInput(t *testing.T) {
 		SessionID: "test-session",
 	}
 
-	result, err := exec.ExecuteOnUserInput(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventOnUserInput, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 }
@@ -537,7 +538,7 @@ func TestExecuteStop(t *testing.T) {
 		StopResponse: "Here is the answer to your question.",
 	}
 
-	result, err := exec.ExecuteStop(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventStop, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 	assert.Contains(t, result.AdditionalContext, "model stopped")
@@ -558,7 +559,7 @@ func TestExecuteStopReceivesResponseContent(t *testing.T) {
 		StopResponse: "final answer content",
 	}
 
-	result, err := exec.ExecuteStop(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventStop, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 	assert.Contains(t, result.AdditionalContext, "final answer content")
@@ -580,7 +581,7 @@ func TestExecuteNotification(t *testing.T) {
 		NotificationMessage: "Something went wrong",
 	}
 
-	result, err := exec.ExecuteNotification(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventNotification, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 }
@@ -601,7 +602,7 @@ func TestExecuteNotificationReceivesLevel(t *testing.T) {
 		NotificationMessage: "Watch out",
 	}
 
-	result, err := exec.ExecuteNotification(t.Context(), input)
+	result, err := exec.Dispatch(t.Context(), EventNotification, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
 }
@@ -630,8 +631,157 @@ func TestExecuteHooksWithContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 
-	result, err := exec.ExecutePreToolUse(ctx, input)
+	result, err := exec.Dispatch(ctx, EventPreToolUse, input)
 	require.NoError(t, err)
-	// Should be allowed because the hook timed out (non-blocking error)
+	// PreToolUse is a security boundary: when the hook fails to run to
+	// completion (here, the parent context was cancelled before the hook
+	// could report a verdict), the tool call must be denied rather than
+	// silently allowed.
+	assert.False(t, result.Allowed)
+	assert.Equal(t, -1, result.ExitCode)
+	assert.Contains(t, result.Message, "PreToolUse hook failed to execute")
+}
+
+// A hook that exits with a non-zero, non-2 code is a non-blocking error:
+// it is reported as such in the result but does not deny the tool call.
+// Pair this with TestExecuteHooksWithContextCancellation, which asserts the
+// opposite for execution failures (timeout, spawn error).
+func TestExecutePreToolUseAllowsNonBlockingExitCode(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		PreToolUse: []MatcherConfig{
+			{
+				Matcher: "*",
+				Hooks: []Hook{
+					{Type: HookTypeCommand, Command: "exit 1", Timeout: 5},
+				},
+			},
+		},
+	}
+
+	exec := NewExecutor(config, t.TempDir(), nil)
+	input := &Input{
+		SessionID: "test-session",
+		ToolName:  "shell",
+		ToolUseID: "test-id",
+	}
+
+	result, err := exec.Dispatch(t.Context(), EventPreToolUse, input)
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+}
+
+// TestPlainStdoutBecomesAdditionalContext pins the contract that a
+// command hook on a context-injection event (session_start, turn_start,
+// post_tool_use, stop) can write plain text to stdout and have it
+// appear as Result.AdditionalContext, without having to wrap in JSON.
+//
+// Observational events (before/after LLM call, on_error, ...) MUST
+// drop plain stdout: their runtime emit sites do not surface
+// AdditionalContext, so silently routing it there would let hook
+// authors think their output mattered when it would actually be
+// thrown away. Those hooks should structure their output as JSON if
+// they want to communicate with the executor.
+func TestPlainStdoutBecomesAdditionalContext(t *testing.T) {
+	t.Parallel()
+
+	contextEvents := []EventType{
+		EventSessionStart, EventTurnStart, EventPostToolUse, EventStop,
+	}
+	observationalEvents := []EventType{
+		EventBeforeLLMCall, EventAfterLLMCall, EventOnError,
+		EventOnMaxIterations, EventNotification, EventOnUserInput, EventSessionEnd,
+	}
+
+	for _, ev := range contextEvents {
+		t.Run(string(ev), func(t *testing.T) {
+			t.Parallel()
+			cfg := configWithFlatHook(ev, Hook{Type: HookTypeCommand, Command: "echo plain-text-context", Timeout: 5})
+			exec := NewExecutor(cfg, t.TempDir(), nil)
+			res, err := exec.Dispatch(t.Context(), ev, &Input{SessionID: "s", ToolName: "shell"})
+			require.NoError(t, err)
+			assert.True(t, res.Allowed)
+			assert.Contains(t, res.AdditionalContext, "plain-text-context",
+				"%s should route plain stdout into AdditionalContext", ev)
+		})
+	}
+
+	for _, ev := range observationalEvents {
+		t.Run(string(ev), func(t *testing.T) {
+			t.Parallel()
+			cfg := configWithFlatHook(ev, Hook{Type: HookTypeCommand, Command: "echo would-be-dropped", Timeout: 5})
+			exec := NewExecutor(cfg, t.TempDir(), nil)
+			res, err := exec.Dispatch(t.Context(), ev, &Input{SessionID: "s", ToolName: "shell"})
+			require.NoError(t, err)
+			assert.True(t, res.Allowed)
+			assert.Empty(t, res.AdditionalContext,
+				"%s must NOT surface plain stdout as AdditionalContext (the runtime’s emit site doesn’t consume it)", ev)
+		})
+	}
+}
+
+// configWithFlatHook builds a Config that wires the given hook into the
+// flat slice for ev. Tool-matched events go through their MatcherConfig
+// shape; everything else uses the bare []Hook field.
+func configWithFlatHook(ev EventType, h Hook) *Config {
+	cfg := &Config{}
+	switch ev {
+	case EventPreToolUse:
+		cfg.PreToolUse = []MatcherConfig{{Matcher: "*", Hooks: []Hook{h}}}
+	case EventPostToolUse:
+		cfg.PostToolUse = []MatcherConfig{{Matcher: "*", Hooks: []Hook{h}}}
+	case EventSessionStart:
+		cfg.SessionStart = []Hook{h}
+	case EventTurnStart:
+		cfg.TurnStart = []Hook{h}
+	case EventBeforeLLMCall:
+		cfg.BeforeLLMCall = []Hook{h}
+	case EventAfterLLMCall:
+		cfg.AfterLLMCall = []Hook{h}
+	case EventSessionEnd:
+		cfg.SessionEnd = []Hook{h}
+	case EventOnUserInput:
+		cfg.OnUserInput = []Hook{h}
+	case EventStop:
+		cfg.Stop = []Hook{h}
+	case EventNotification:
+		cfg.Notification = []Hook{h}
+	case EventOnError:
+		cfg.OnError = []Hook{h}
+	case EventOnMaxIterations:
+		cfg.OnMaxIterations = []Hook{h}
+	}
+	return cfg
+}
+
+func TestExecutePostToolUseDoesNotFailClosedOnError(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		PostToolUse: []MatcherConfig{
+			{
+				Matcher: "*",
+				Hooks: []Hook{
+					{Type: HookTypeCommand, Command: "sleep 10", Timeout: 30},
+				},
+			},
+		},
+	}
+
+	exec := NewExecutor(config, t.TempDir(), nil)
+	input := &Input{
+		SessionID: "test-session",
+		ToolName:  "shell",
+		ToolUseID: "test-id",
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	result, err := exec.Dispatch(ctx, EventPostToolUse, input)
+	require.NoError(t, err)
+	// Post-tool-use is observational only: a failed hook must not block
+	// the already-completed tool call.
 	assert.True(t, result.Allowed)
 }

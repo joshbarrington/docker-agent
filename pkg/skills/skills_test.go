@@ -160,6 +160,42 @@ Body`,
 			wantOK: true,
 		},
 		{
+			name: "model override (named)",
+			content: `---
+name: model-skill
+description: A skill that overrides the model
+context: fork
+model: my_fast_model
+---
+
+Body`,
+			want: Skill{
+				Name:        "model-skill",
+				Description: "A skill that overrides the model",
+				Context:     "fork",
+				Model:       "my_fast_model",
+			},
+			wantOK: true,
+		},
+		{
+			name: "model override (inline provider/model)",
+			content: `---
+name: inline-model-skill
+description: Skill with inline provider/model override
+context: fork
+model: openai/gpt-4o-mini
+---
+
+Body`,
+			want: Skill{
+				Name:        "inline-model-skill",
+				Description: "Skill with inline provider/model override",
+				Context:     "fork",
+				Model:       "openai/gpt-4o-mini",
+			},
+			wantOK: true,
+		},
+		{
 			name:    "allowed-tools list with quoted items",
 			content: "---\nname: quoted-tools\ndescription: Skill with quoted tool items\nallowed-tools:\n  - \"Bash(git:*)\"\n  - 'Read'\n---\n\nBody",
 			want: Skill{
@@ -192,6 +228,7 @@ Body`,
 				assert.Equal(t, tt.want.Metadata, got.Metadata)
 				assert.Equal(t, tt.want.AllowedTools, got.AllowedTools)
 				assert.Equal(t, tt.want.Context, got.Context)
+				assert.Equal(t, tt.want.Model, got.Model)
 			}
 		})
 	}

@@ -26,6 +26,11 @@ type Skill struct {
 	Metadata      map[string]string
 	AllowedTools  []string
 	Context       string // "fork" to run the skill as an isolated sub-agent
+	// Model is an optional model override applied while the skill runs as
+	// a sub-agent (context: fork). It accepts either a named model from the
+	// agent config or an inline "provider/model" reference (e.g.
+	// "openai/gpt-4o-mini"). It is ignored for non-fork skills.
+	Model string
 }
 
 // IsFork returns true when the skill should be executed in an isolated
@@ -358,6 +363,8 @@ func parseFrontmatter(content string) (Skill, bool) {
 			skill.Compatibility = unquote(value)
 		case "context":
 			skill.Context = unquote(value)
+		case "model":
+			skill.Model = unquote(value)
 		case "metadata":
 			currentKey = "metadata"
 		case "allowed-tools":

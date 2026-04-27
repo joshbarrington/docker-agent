@@ -5,9 +5,9 @@ import (
 	"runtime"
 )
 
-// getEnvironmentInfo returns formatted environment information including
+// GetEnvironmentInfo returns formatted environment information including
 // working directory, git repository status, and platform information
-func getEnvironmentInfo(workingDir string) string {
+func GetEnvironmentInfo(workingDir string) string {
 	return fmt.Sprintf(`Here is useful information about the environment you are running in:
 	<env>
 	Working directory: %s

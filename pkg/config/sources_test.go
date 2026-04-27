@@ -3,6 +3,7 @@ package config
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -200,10 +201,10 @@ func TestURLSource_Read_FallsBackToCacheOnNetworkError(t *testing.T) {
 	// Not parallel - uses shared cache directory
 
 	// Pre-populate cache for a non-existent server
-	url := "http://invalid.invalid:12345/config-network-error.yaml"
+	agentURL := "http://invalid.invalid:12345/config-network-error.yaml"
 	urlCacheDir := getURLCacheDir()
 	require.NoError(t, os.MkdirAll(urlCacheDir, 0o755))
-	urlHash := hashURL(url)
+	urlHash := hashURL(agentURL)
 	cachePath := filepath.Join(urlCacheDir, urlHash)
 	require.NoError(t, os.WriteFile(cachePath, []byte("cached content network error"), 0o644))
 
@@ -212,7 +213,7 @@ func TestURLSource_Read_FallsBackToCacheOnNetworkError(t *testing.T) {
 		_ = os.Remove(cachePath)
 	})
 
-	source := NewURLSource(url, nil)
+	source := NewURLSource(agentURL, nil)
 
 	// Read should fall back to cached content
 	data, err := source.Read(t.Context())
@@ -336,14 +337,16 @@ func TestResolve_URLReference(t *testing.T) {
 func TestResolveSources_URLReference(t *testing.T) {
 	t.Parallel()
 
-	url := "https://example.com/agent.yaml"
-	sources, err := ResolveSources(url, nil)
+	testURL := "https://example.com/agent.yaml"
+	sources, err := ResolveSources(testURL, nil)
 	require.NoError(t, err)
 	require.Len(t, sources, 1)
 
-	source, ok := sources[url]
+	// The key should be the URL-encoded version
+	expectedKey := url.QueryEscape(testURL)
+	source, ok := sources[expectedKey]
 	require.True(t, ok)
-	assert.Equal(t, url, source.Name())
+	assert.Equal(t, testURL, source.Name())
 }
 
 func TestURLSource_Read_WithGitHubAuth(t *testing.T) {
@@ -500,12 +503,14 @@ func TestResolveSources_URLReference_WithEnvProvider(t *testing.T) {
 		"GITHUB_TOKEN": "test-token",
 	})
 
-	url := "https://github.com/owner/repo/raw/main/agent.yaml"
-	sources, err := ResolveSources(url, envProvider)
+	testURL := "https://github.com/owner/repo/raw/main/agent.yaml"
+	sources, err := ResolveSources(testURL, envProvider)
 	require.NoError(t, err)
 	require.Len(t, sources, 1)
 
-	source, ok := sources[url]
+	// The key should be the URL-encoded version
+	expectedKey := url.QueryEscape(testURL)
+	source, ok := sources[expectedKey]
 	require.True(t, ok)
 
 	// Verify the source has the env provider set

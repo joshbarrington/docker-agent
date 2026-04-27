@@ -8,10 +8,12 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 // ModelChoice represents a model available for selection in the TUI picker.
@@ -32,6 +34,31 @@ type ModelChoice struct {
 	IsCustom bool
 	// IsCatalog indicates this is a model from the models.dev catalog
 	IsCatalog bool
+
+	// The fields below are populated (best-effort) from the models.dev
+	// catalog. They are optional and may all be zero/empty when no
+	// catalog entry is found for the model.
+
+	// Family is the model family (e.g., "claude", "gpt").
+	Family string
+	// InputCost is the price (in USD) per 1M input tokens.
+	InputCost float64
+	// OutputCost is the price (in USD) per 1M output tokens.
+	OutputCost float64
+	// CacheReadCost is the price (in USD) per 1M cached input tokens.
+	CacheReadCost float64
+	// CacheWriteCost is the price (in USD) per 1M cache-write tokens.
+	CacheWriteCost float64
+	// ContextLimit is the maximum context window size in tokens.
+	ContextLimit int
+	// OutputLimit is the maximum number of tokens the model can produce
+	// in a single response.
+	OutputLimit int64
+	// InputModalities lists the input modalities supported by the model
+	// (e.g., "text", "image", "audio").
+	InputModalities []string
+	// OutputModalities lists the output modalities the model can produce.
+	OutputModalities []string
 }
 
 // ModelSwitcher is an optional interface for runtimes that support changing the model
@@ -67,20 +94,34 @@ type ModelSwitcherConfig struct {
 
 // SetAgentModel implements ModelSwitcher for LocalRuntime.
 func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef string) error {
+	_, err := r.setAgentModelInternal(ctx, agentName, modelRef)
+	return err
+}
+
+// setAgentModelInternal applies modelRef as the agent's model override and
+// returns a snapshot of the value that was just stored. The snapshot is
+// captured atomically with the store (it is the pointer returned by
+// SetModelOverride itself), so there is no window where another caller
+// could intervene and the snapshot would refer to a different value.
+//
+// SetAgentModel is a thin wrapper that discards the snapshot; callers that
+// want to do a CAS-based restore (see WithAgentModel) use this method
+// directly to keep the snapshot.
+func (r *LocalRuntime) setAgentModelInternal(ctx context.Context, agentName, modelRef string) (agent.ModelOverrideSnapshot, error) {
 	if r.modelSwitcherCfg == nil {
-		return errors.New("model switching not configured for this runtime")
+		return agent.ModelOverrideSnapshot{}, errors.New("model switching not configured for this runtime")
 	}
 
 	a, err := r.team.Agent(agentName)
 	if err != nil {
-		return fmt.Errorf("agent not found: %w", err)
+		return agent.ModelOverrideSnapshot{}, fmt.Errorf("agent not found: %w", err)
 	}
 
 	// Empty modelRef means clear the override (use agent's default)
 	if modelRef == "" {
-		a.SetModelOverride()
+		snap := a.SetModelOverride()
 		slog.Info("Cleared agent model override (using default)", "agent", agentName)
-		return nil
+		return snap, nil
 	}
 
 	// Check if modelRef is a named model from config
@@ -90,20 +131,20 @@ func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef st
 		if isAlloyModelConfig(modelConfig) {
 			providers, err := r.resolveModelRefs(ctx, modelConfig.Model)
 			if err != nil {
-				return fmt.Errorf("failed to create alloy model from config: %w", err)
+				return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create alloy model from config: %w", err)
 			}
-			a.SetModelOverride(providers...)
+			snap := a.SetModelOverride(providers...)
 			slog.Info("Set agent model override (alloy)", "agent", agentName, "config_name", modelRef, "model_count", len(providers))
-			return nil
+			return snap, nil
 		}
 
 		prov, err := r.createProviderFromConfig(ctx, &modelConfig)
 		if err != nil {
-			return fmt.Errorf("failed to create model from config: %w", err)
+			return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create model from config: %w", err)
 		}
-		a.SetModelOverride(prov)
+		snap := a.SetModelOverride(prov)
 		slog.Info("Set agent model override", "agent", agentName, "model", prov.ID(), "config_name", modelRef)
-		return nil
+		return snap, nil
 	}
 
 	// Check if this is an inline alloy spec (comma-separated provider/model specs)
@@ -111,21 +152,47 @@ func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef st
 	if isInlineAlloySpec(modelRef) {
 		providers, err := r.resolveModelRefs(ctx, modelRef)
 		if err != nil {
-			return fmt.Errorf("failed to create inline alloy model: %w", err)
+			return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to create inline alloy model: %w", err)
 		}
-		a.SetModelOverride(providers...)
+		snap := a.SetModelOverride(providers...)
 		slog.Info("Set agent model override (inline alloy)", "agent", agentName, "model_count", len(providers))
-		return nil
+		return snap, nil
 	}
 
 	// Try single inline spec (provider/model)
 	prov, err := r.resolveModelRef(ctx, modelRef)
 	if err != nil {
-		return fmt.Errorf("failed to resolve model %q: %w", modelRef, err)
+		return agent.ModelOverrideSnapshot{}, fmt.Errorf("failed to resolve model %q: %w", modelRef, err)
 	}
-	a.SetModelOverride(prov)
+	snap := a.SetModelOverride(prov)
 	slog.Info("Set agent model override (inline)", "agent", agentName, "model", prov.ID())
-	return nil
+	return snap, nil
+}
+
+// WithAgentModel applies modelRef as a model override on the named agent
+// and returns a function that restores the previous override safely.
+//
+// The returned restore func is always non-nil. On success it uses
+// pointer-identity compare-and-swap on the agent's override, so a
+// concurrent change made between the apply and the restore (e.g. by the
+// TUI model picker) is preserved instead of being clobbered. The post-
+// apply snapshot is captured atomically with the store inside
+// SetModelOverride, so there is no window where a concurrent change
+// could be misattributed to this scope. On error the agent is left
+// untouched and restore is a no-op, so callers can always defer it
+// without nil-checking.
+func (r *LocalRuntime) WithAgentModel(ctx context.Context, agentName, modelRef string) (restore func(), err error) {
+	noop := func() {}
+	a, err := r.team.Agent(agentName)
+	if err != nil {
+		return noop, fmt.Errorf("agent not found: %w", err)
+	}
+	prev := a.SnapshotModelOverride()
+	ours, err := r.setAgentModelInternal(ctx, agentName, modelRef)
+	if err != nil {
+		return noop, err
+	}
+	return func() { a.RestoreModelOverride(prev, ours) }, nil
 }
 
 // resolveModelRef resolves a model reference to a single provider.
@@ -240,13 +307,18 @@ func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
 
 	// Add all configured models, marking the current agent's default
 	for name, cfg := range r.modelSwitcherCfg.Models {
-		choices = append(choices, ModelChoice{
+		choice := ModelChoice{
 			Name:      name,
 			Ref:       name,
 			Provider:  cfg.Provider,
 			Model:     cfg.DisplayOrModel(),
 			IsDefault: name == currentAgentDefault,
-		})
+		}
+		// Best-effort lookup of pricing / context information from models.dev.
+		if cfg.Provider != "" && cfg.Model != "" {
+			r.populateCatalogMetadata(ctx, &choice, cfg.Provider, cfg.Model)
+		}
+		choices = append(choices, choice)
 	}
 
 	// Append models.dev catalog entries filtered by available credentials
@@ -308,13 +380,15 @@ func (r *LocalRuntime) buildCatalogChoices(ctx context.Context) []ModelChoice {
 			}
 			existingRefs[ref] = true
 
-			choices = append(choices, ModelChoice{
+			choice := ModelChoice{
 				Name:      model.Name,
 				Ref:       ref,
 				Provider:  dockerAgentProvider,
 				Model:     modelID,
 				IsCatalog: true,
-			})
+			}
+			applyCatalogMetadata(&choice, &model)
+			choices = append(choices, choice)
 		}
 	}
 
@@ -331,6 +405,38 @@ func mapModelsDevProvider(providerID string) (string, bool) {
 		return providerID, true
 	}
 	return "", false
+}
+
+// populateCatalogMetadata fetches models.dev metadata for the given
+// provider/model pair and copies it onto choice. It silently does
+// nothing when the lookup fails or when the runtime has no models store.
+func (r *LocalRuntime) populateCatalogMetadata(ctx context.Context, choice *ModelChoice, providerID, modelID string) {
+	if r.modelsStore == nil {
+		return
+	}
+	m, err := r.modelsStore.GetModel(ctx, providerID+"/"+modelID)
+	if err == nil {
+		applyCatalogMetadata(choice, m)
+	}
+}
+
+// applyCatalogMetadata copies pricing/limit/modality information from a
+// models.dev Model entry onto a ModelChoice.
+func applyCatalogMetadata(choice *ModelChoice, m *modelsdev.Model) {
+	if m == nil {
+		return
+	}
+	choice.Family = m.Family
+	if m.Cost != nil {
+		choice.InputCost = m.Cost.Input
+		choice.OutputCost = m.Cost.Output
+		choice.CacheReadCost = m.Cost.CacheRead
+		choice.CacheWriteCost = m.Cost.CacheWrite
+	}
+	choice.ContextLimit = m.Limit.Context
+	choice.OutputLimit = m.Limit.Output
+	choice.InputModalities = slices.Clone(m.Modalities.Input)
+	choice.OutputModalities = slices.Clone(m.Modalities.Output)
 }
 
 // isEmbeddingModel returns true if the model is an embedding model

@@ -119,6 +119,8 @@
       url: /providers/nebius/
     - title: MiniMax
       url: /providers/minimax/
+    - title: GitHub Copilot
+      url: /providers/github-copilot/
     - title: Local Models
       url: /providers/local/
     - title: Provider Definitions

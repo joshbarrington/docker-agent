@@ -16,6 +16,7 @@ func speakCommand() *Item {
 		SlashCommand: "/speak",
 		Description:  "Start speech-to-text transcription (press Enter or Escape to stop)",
 		Category:     "Session",
+		Immediate:    true,
 		Execute: func(string) tea.Cmd {
 			return core.CmdHandler(messages.StartSpeakMsg{})
 		},

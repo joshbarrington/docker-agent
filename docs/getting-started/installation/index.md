@@ -15,7 +15,7 @@ _Get docker-agent running on your system in minutes._
 
 ## Docker Desktop (Pre-installed)
 
-Starting with [Docker Desktop 4.49.0](https://docs.docker.com/desktop/release-notes/#4490), **docker-agent is already available**. No separate installation needed — just open a terminal and run:
+Starting with [Docker Desktop 4.63](https://docs.docker.com/desktop/release-notes/#4630), **docker-agent is already available**. No separate installation needed — just open a terminal and run:
 
 ```bash
 $ docker agent version

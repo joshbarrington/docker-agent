@@ -56,7 +56,7 @@ models:
   gpt-thinking:
     provider: openai
     model: gpt-5-mini
-    thinking_budget: low # minimal | low | medium (default) | high
+    thinking_budget: low # minimal | low | medium (default) | high | xhigh | max | none | adaptive/<level>
 ```
 
 <div class="callout callout-tip" markdown="1">

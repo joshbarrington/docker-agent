@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
 	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -24,6 +25,13 @@ const (
 	defaultCharLimit = 500
 	numberCharLimit  = 50
 	defaultWidth     = 50
+
+	// elicitationHeaderLines is the count of fixed header lines above the
+	// scrollable body (title + separator).
+	elicitationHeaderLines = 2
+	// elicitationOverhead is the dialog height not available to the body:
+	// header (2) + footer blank+help (2) + frame border+padding (4).
+	elicitationOverhead = 8
 )
 
 // ElicitationField represents a form field extracted from a JSON schema.
@@ -43,6 +51,10 @@ type ElicitationField struct {
 // When a schema is provided, fields are rendered as a form.
 // When no schema is provided, a single free-form text input (responseInput)
 // is shown so the user can type an answer.
+//
+// The body region (message + fields, or message + free-form input) is
+// rendered inside a scrollview so long content remains accessible when it
+// would otherwise overflow the terminal.
 type ElicitationDialog struct {
 	BaseDialog
 
@@ -56,6 +68,13 @@ type ElicitationDialog struct {
 	keyMap        elicitationKeyMap
 	fieldErrors   map[int]string  // validation error messages per field
 	responseInput textinput.Model // free-form text input used when len(fields) == 0
+
+	scrollview *scrollview.Model
+	// fieldStarts[i] is the line offset of field i's label inside the
+	// scrollable body. Populated by View() / Position().
+	fieldStarts []int
+	// scrollableRow is the absolute screen row of the first scrollable line.
+	scrollableRow int
 }
 
 type elicitationKeyMap struct {
@@ -97,6 +116,9 @@ func NewElicitationDialog(message string, schema any, meta map[string]any) Dialo
 			Escape:   key.NewBinding(key.WithKeys("esc")),
 			Space:    key.NewBinding(key.WithKeys("space")),
 		},
+		// Up/Down stay reserved for selection inside enum/boolean fields;
+		// the scrollview consumes mouse wheel/scrollbar plus PgUp/PgDn/Home/End.
+		scrollview: scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
 	}
 
 	// If no schema fields, add a free-form text input for the response
@@ -123,6 +145,12 @@ func (d *ElicitationDialog) Init() tea.Cmd {
 }
 
 func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	// Let the scrollview consume mouse wheel/scrollbar drag and the
+	// PgUp/PgDn/Home/End keys before falling through to dialog handling.
+	if handled, cmd := d.scrollview.Update(msg); handled {
+		return d, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
@@ -186,27 +214,23 @@ func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, t
 
 // moveSelection moves the selection up/down within a boolean or enum field.
 func (d *ElicitationDialog) moveSelection(delta int) {
+	if d.currentField >= len(d.fields) {
+		return
+	}
 	delete(d.fieldErrors, d.currentField)
 
-	switch d.currentFieldType() {
+	switch field := d.fields[d.currentField]; field.Type {
 	case "boolean":
 		// Boolean only has two options: toggle
 		d.boolValues[d.currentField] = !d.boolValues[d.currentField]
 	case "enum":
-		field := d.fields[d.currentField]
 		n := len(field.EnumValues)
 		if n == 0 {
 			return
 		}
 		d.enumIndexes[d.currentField] = (d.enumIndexes[d.currentField] + delta + n) % n
 	}
-}
-
-func (d *ElicitationDialog) currentFieldType() string {
-	if d.currentField < len(d.fields) {
-		return d.fields[d.currentField].Type
-	}
-	return ""
+	d.ensureFocusVisible()
 }
 
 func (d *ElicitationDialog) submit() (layout.Model, tea.Cmd) {
@@ -269,6 +293,38 @@ func (d *ElicitationDialog) focusField(idx int) {
 	// Only focus text input for fields that use it
 	if d.isTextInputField() {
 		d.inputs[d.currentField].Focus()
+	}
+	d.ensureFocusVisible()
+}
+
+// ensureFocusVisible scrolls so that the focused field's active line stays
+// in view. No-op before the first View() populates fieldStarts.
+func (d *ElicitationDialog) ensureFocusVisible() {
+	if line := d.focusLine(); line >= 0 {
+		d.scrollview.EnsureLineVisible(line)
+	}
+}
+
+// focusLine returns the line offset (within the scrollable body) of the
+// focused field's active line — the selected option for enums/booleans, the
+// input line for text fields. Returns -1 if no field is focused or layouts
+// haven't been computed yet.
+func (d *ElicitationDialog) focusLine() int {
+	if d.currentField < 0 || d.currentField >= len(d.fieldStarts) {
+		return -1
+	}
+	start := d.fieldStarts[d.currentField]
+	switch f := d.fields[d.currentField]; f.Type {
+	case "boolean":
+		if d.boolValues[d.currentField] {
+			return start + 1 // "Yes"
+		}
+		return start + 2 // "No"
+	case "enum":
+		idx := max(0, min(d.enumIndexes[d.currentField], len(f.EnumValues)-1))
+		return start + 1 + idx
+	default:
+		return start + 1 // input line
 	}
 }
 
@@ -373,41 +429,131 @@ func (d *ElicitationDialog) parseAndValidateField(val string, field ElicitationF
 	}
 }
 
-func (d *ElicitationDialog) View() string {
+// elicitationLayout captures the geometry computed once per render. View()
+// and Position() share it so layout math lives in exactly one place.
+type elicitationLayout struct {
+	dialogWidth  int
+	contentWidth int      // inside dialog frame
+	viewport     int      // height of the scrollable region in lines
+	bodyLines    []string // pre-rendered body, one entry per line
+	fieldStarts  []int    // line offset of each field's label
+}
+
+// dialogHeight is the total rendered height of the dialog, including frame.
+func (l elicitationLayout) dialogHeight() int { return l.viewport + elicitationOverhead }
+
+func (d *ElicitationDialog) layout() elicitationLayout {
 	dialogWidth := d.ComputeDialogWidth(70, 60, 90)
 	contentWidth := d.ContentWidth(dialogWidth, 2)
+	innerWidth := max(1, contentWidth-d.scrollview.ReservedCols())
 
-	content := NewContent(contentWidth)
-	content.AddTitle(d.title)
-	content.AddSeparator()
-	content.AddContent(renderMarkdownMessage(d.message, contentWidth))
+	bodyLines, fieldStarts := d.buildBody(innerWidth)
+	maxViewport := max(1, min(d.Height()*80/100, 40)-elicitationOverhead)
+	viewport := max(1, min(len(bodyLines), maxViewport))
 
-	if len(d.fields) > 0 {
-		content.AddSeparator()
+	return elicitationLayout{
+		dialogWidth:  dialogWidth,
+		contentWidth: contentWidth,
+		viewport:     viewport,
+		bodyLines:    bodyLines,
+		fieldStarts:  fieldStarts,
+	}
+}
+
+// buildBody renders the scrollable body using the existing Content-based
+// helpers and records the line offset of every field's label. Tracks line
+// count incrementally to keep buildBody O(N) in the number of fields.
+func (d *ElicitationDialog) buildBody(width int) (lines []string, fieldStarts []int) {
+	body := NewContent(width)
+	lineCount := 0
+
+	if d.message != "" {
+		msgRendered := renderMarkdownMessage(d.message, width)
+		body.AddContent(msgRendered)
+		lineCount += lipgloss.Height(msgRendered)
+	}
+
+	switch {
+	case len(d.fields) > 0:
+		body.AddSeparator()
+		lineCount++ // separator adds 1 line
+
+		fieldStarts = make([]int, len(d.fields))
 		for i, field := range d.fields {
-			d.renderField(content, i, field, contentWidth)
+			// Record the current line count as this field's start position.
+			// This avoids O(N²) by tracking line count incrementally instead
+			// of calling body.Build() in the loop.
+			fieldStarts[i] = lineCount
+
+			// Render the field into a temporary Content to measure its height
+			// without rebuilding the entire body.
+			tempContent := NewContent(width)
+			d.renderField(tempContent, i, field, width)
+			fieldRendered := tempContent.Build()
+			fieldHeight := lipgloss.Height(fieldRendered)
+
+			// Add the pre-rendered field to the main body
+			body.AddContent(fieldRendered)
+			lineCount += fieldHeight
+
 			if i < len(d.fields)-1 {
-				content.AddSpace()
+				body.AddSpace()
+				lineCount++ // blank line separator
 			}
 		}
-	} else if d.hasFreeFormInput() {
-		content.AddSeparator()
-		d.responseInput.SetWidth(contentWidth)
-		content.AddContent(d.responseInput.View())
+
+	case d.hasFreeFormInput():
+		body.AddSeparator()
+		d.responseInput.SetWidth(width)
+		body.AddContent(d.responseInput.View())
 	}
 
-	content.AddSpace()
+	return strings.Split(body.Build(), "\n"), fieldStarts
+}
+
+func (d *ElicitationDialog) View() string {
+	l := d.layout()
+	d.fieldStarts = l.fieldStarts
+
+	// Configure the scrollview viewport, give it the body, and scroll so the
+	// focused field stays visible.
+	d.scrollview.SetSize(l.contentWidth, l.viewport)
+	d.scrollview.SetContent(l.bodyLines, len(l.bodyLines))
+	d.ensureFocusVisible()
+
+	// Tell the scrollview where it lives on screen (for scrollbar drag) and
+	// remember the body's top row for our own mouse click hit-testing.
+	row, col := CenterPosition(d.Width(), d.Height(), l.dialogWidth, l.dialogHeight())
+	frameTop := styles.DialogStyle.GetBorderTopSize() + styles.DialogStyle.GetPaddingTop()
+	frameLeft := styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
+	d.scrollableRow = row + frameTop + elicitationHeaderLines
+	d.scrollview.SetPosition(col+frameLeft, d.scrollableRow)
+
+	parts := []string{
+		RenderTitle(d.title, l.contentWidth, styles.DialogTitleStyle),
+		RenderSeparator(l.contentWidth),
+	}
+	parts = append(parts, strings.Split(d.scrollview.View(), "\n")...)
+	parts = append(parts, "", RenderHelpKeys(l.contentWidth, d.helpPairs()...))
+
+	return styles.DialogStyle.Width(l.dialogWidth).Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+}
+
+// helpPairs returns key/description pairs for the dialog's bottom help line,
+// in left-to-right display order.
+func (d *ElicitationDialog) helpPairs() []string {
+	var pairs []string
+	if d.hasSelectionFields() {
+		pairs = append(pairs, "↑/↓", "select")
+	}
 	if len(d.fields) > 0 {
-		if d.hasSelectionFields() {
-			content.AddHelpKeys("↑/↓", "select", "tab", "next field", "enter", "submit", "esc", "cancel")
-		} else {
-			content.AddHelpKeys("tab", "next field", "enter", "submit", "esc", "cancel")
-		}
-	} else {
-		content.AddHelpKeys("enter", "submit", "esc", "cancel")
+		pairs = append(pairs, "tab", "next field")
 	}
-
-	return styles.DialogStyle.Width(dialogWidth).Render(content.Build())
+	pairs = append(pairs, "enter", "submit", "esc", "cancel")
+	if d.scrollview.NeedsScrollbar() {
+		pairs = append(pairs, "pgup/pgdn", "scroll")
+	}
+	return pairs
 }
 
 // hasSelectionFields returns true if any field uses selection-based input (boolean or enum).
@@ -499,74 +645,43 @@ func capitalizeFirst(s string) string {
 
 // handleMouseClick handles mouse click events for field focus and selection toggling.
 func (d *ElicitationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
-	if len(d.fields) == 0 {
+	if len(d.fieldStarts) == 0 || d.scrollableRow == 0 {
 		return d, nil
 	}
-
-	dialogRow, _ := d.Position()
-	dialogWidth := d.ComputeDialogWidth(70, 60, 90)
-	contentWidth := d.ContentWidth(dialogWidth, 2)
-
-	// Compute the Y offset where fields start by measuring the rendered header.
-	header := lipgloss.JoinVertical(lipgloss.Left,
-		styles.DialogTitleStyle.Width(contentWidth).Render(d.title),
-		RenderSeparator(contentWidth),
-		renderMarkdownMessage(d.message, contentWidth),
-		RenderSeparator(contentWidth),
-	)
-	y := ContentStartRow(dialogRow, header)
-
-	// Now iterate through fields to find which field/option was clicked.
-	clickY := msg.Y
-	for i, field := range d.fields {
-		labelY := y
-		y++ // label line
-
-		switch field.Type {
-		case "boolean":
-			if clickY >= y && clickY < y+2 {
-				d.focusField(i)
-				d.boolValues[i] = clickY == y // first option = Yes
-				delete(d.fieldErrors, i)
-				return d, nil
-			}
-			y += 2
-		case "enum":
-			numOptions := len(field.EnumValues)
-			if clickY >= y && clickY < y+numOptions {
-				d.focusField(i)
-				d.enumIndexes[i] = clickY - y
-				delete(d.fieldErrors, i)
-				return d, nil
-			}
-			y += numOptions
-		default:
-			if clickY == y {
-				d.focusField(i)
-				return d, nil
-			}
-			y++
-		}
-
-		// Click on the label line focuses the field
-		if clickY == labelY {
-			d.focusField(i)
-			return d, nil
-		}
-
-		if d.fieldErrors[i] != "" {
-			y++
-		}
-		if i < len(d.fields)-1 {
-			y++
-		}
+	relY := msg.Y - d.scrollableRow
+	if relY < 0 || relY >= d.scrollview.VisibleHeight() {
+		return d, nil
 	}
+	line := d.scrollview.ScrollOffset() + relY
 
+	// Walk backwards: the field whose start is just at or above `line` owns it.
+	// Clicks on the blank separator after a field still focus that field.
+	for i := len(d.fieldStarts) - 1; i >= 0; i-- {
+		start := d.fieldStarts[i]
+		if line < start {
+			continue
+		}
+		offset := line - start
+		d.focusField(i)
+		delete(d.fieldErrors, i)
+		switch f := d.fields[i]; f.Type {
+		case "boolean":
+			if offset == 1 || offset == 2 {
+				d.boolValues[i] = offset == 1
+			}
+		case "enum":
+			if offset >= 1 && offset <= len(f.EnumValues) {
+				d.enumIndexes[i] = offset - 1
+			}
+		}
+		return d, nil
+	}
 	return d, nil
 }
 
 func (d *ElicitationDialog) Position() (row, col int) {
-	return d.CenterDialog(d.View())
+	l := d.layout()
+	return CenterPosition(d.Width(), d.Height(), l.dialogWidth, l.dialogHeight())
 }
 
 // --- Input initialization ---

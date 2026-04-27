@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -104,7 +105,8 @@ func resolveOne(resolvedPath string, envProvider environment.Provider) (string, 
 	case builtinAgents[resolvedPath] != nil:
 		return resolvedPath, NewBytesSource(resolvedPath, builtinAgents[resolvedPath])
 	case IsURLReference(resolvedPath):
-		return resolvedPath, NewURLSource(resolvedPath, envProvider)
+		// URL-encode the URL to make it safe for use as a map key
+		return url.QueryEscape(resolvedPath), NewURLSource(resolvedPath, envProvider)
 	case isLocalFile(resolvedPath):
 		return fileNameWithoutExt(resolvedPath), NewFileSource(resolvedPath)
 	default:

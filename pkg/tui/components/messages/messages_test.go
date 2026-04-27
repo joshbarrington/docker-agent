@@ -1184,3 +1184,88 @@ func TestBindingsExcludesEditKeyWhenAssistantMessageSelected(t *testing.T) {
 	}
 	assert.False(t, foundE, "Bindings should NOT include 'e' key when assistant message is selected")
 }
+
+func TestKeyGAndShiftGScrollMessagesView(t *testing.T) {
+	t.Parallel()
+
+	sessionState := &service.SessionState{}
+	m := NewScrollableView(80, 10, sessionState).(*model)
+	m.SetSize(80, 10)
+
+	// Add enough messages to require scrolling.
+	for i := range 20 {
+		content := "Message " + strconv.Itoa(i) + ": " + strings.Repeat("line\n", 5)
+		msg := types.Agent(types.MessageTypeAssistant, "root", content)
+		m.messages = append(m.messages, msg)
+		m.views = append(m.views, m.createMessageView(msg))
+	}
+
+	// Select the messages view.
+	m.Focus()
+
+	// Render once to compute layout (auto-scrolls to the bottom).
+	m.View()
+	require.Positive(t, m.scrollOffset, "precondition: should not start at the top")
+
+	// 'g' jumps to the very top of the view.
+	m.Update(tea.KeyPressMsg{Code: 'g'})
+	assert.Equal(t, 0, m.scrollOffset, "g should scroll to the top")
+
+	// 'G' jumps back to the very bottom of the view.
+	m.Update(tea.KeyPressMsg{Code: 'G'})
+	m.View() // apply scroll clamp
+	wantOffset := max(0, m.totalScrollableHeight()-m.height)
+	assert.Equal(t, wantOffset, m.scrollOffset, "G should scroll to the bottom")
+}
+
+func TestKeyGAndGWithEmptyMessages(t *testing.T) {
+	t.Parallel()
+
+	sessionState := &service.SessionState{}
+	m := NewScrollableView(80, 10, sessionState).(*model)
+	m.SetSize(80, 10)
+
+	// No messages - should not panic
+	m.Update(tea.KeyPressMsg{Code: 'g'})
+	assert.Equal(t, 0, m.scrollOffset, "g with empty messages should set offset to 0")
+
+	m.Update(tea.KeyPressMsg{Code: 'G'})
+	assert.Equal(t, 0, m.scrollOffset, "G with empty messages should set offset to 0")
+}
+
+func TestKeyGAndGDuringInlineEdit(t *testing.T) {
+	t.Parallel()
+
+	sessionState := &service.SessionState{}
+	m := NewScrollableView(80, 10, sessionState).(*model)
+	m.SetSize(80, 10)
+
+	sessionPos := 0
+	userMsg := &types.Message{
+		Type:            types.MessageTypeUser,
+		Content:         "test",
+		SessionPosition: &sessionPos,
+	}
+	m.messages = append(m.messages, userMsg)
+	m.views = append(m.views, m.createMessageView(userMsg))
+
+	// Start inline edit
+	m.StartInlineEdit(0, 0, "test")
+	require.Equal(t, 0, m.inlineEditMsgIndex, "should be in inline edit mode")
+
+	initialValue := m.inlineEditTextarea.Value()
+	initialOffset := m.scrollOffset
+
+	// 'g' should be forwarded to textarea, not trigger scroll
+	m.Update(tea.KeyPressMsg(tea.Key{Code: 'g', Text: "g"}))
+	assert.Contains(t, m.inlineEditTextarea.Value(), "g", "g should be typed into textarea during inline edit")
+	assert.NotEqual(t, initialValue, m.inlineEditTextarea.Value(), "textarea value should change")
+
+	// Scroll offset should not change
+	assert.Equal(t, initialOffset, m.scrollOffset, "scroll offset should not change during inline edit")
+
+	// 'G' should also be forwarded to textarea
+	m.Update(tea.KeyPressMsg(tea.Key{Code: 'G', Text: "G"}))
+	assert.Contains(t, m.inlineEditTextarea.Value(), "G", "G should be typed into textarea during inline edit")
+	assert.Equal(t, initialOffset, m.scrollOffset, "scroll offset should not change during inline edit")
+}

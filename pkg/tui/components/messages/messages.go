@@ -500,10 +500,10 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	case "pgdown":
 		m.scrollPageDown()
 		return m, nil
-	case "home":
+	case "home", "g":
 		m.scrollToTop()
 		return m, nil
-	case "end":
+	case "end", "G":
 		m.scrollToBottom()
 		return m, nil
 	}

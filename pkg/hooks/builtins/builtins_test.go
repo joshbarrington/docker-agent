@@ -27,6 +27,11 @@ func TestRegisterInstallsAllBuiltins(t *testing.T) {
 		builtins.AddDate,
 		builtins.AddEnvironmentInfo,
 		builtins.AddPromptFiles,
+		builtins.AddGitStatus,
+		builtins.AddGitDiff,
+		builtins.AddDirectoryListing,
+		builtins.AddUserInfo,
+		builtins.AddRecentCommits,
 	} {
 		fn, ok := r.LookupBuiltin(name)
 		assert.True(t, ok, "builtin %q must be registered", name)

@@ -1,17 +1,26 @@
 // Package builtins contains the stock in-process hook implementations
-// shipped with docker-agent: add_date, add_environment_info, and
-// add_prompt_files. Each lives in its own file along with its
-// registered-name constant; this file holds the shared registration
-// and agent-defaults plumbing.
+// shipped with docker-agent.
+//
+// Available builtins:
+//
+//   - add_date              (turn_start)    — today's date
+//   - add_environment_info  (session_start) — cwd, git, OS, arch
+//   - add_prompt_files      (turn_start)    — contents of prompt files
+//   - add_git_status        (turn_start)    — `git status --short --branch`
+//   - add_git_diff          (turn_start)    — `git diff --stat` (or full)
+//   - add_directory_listing (session_start) — top-level entries of cwd
+//   - add_user_info         (session_start) — current OS user and host
+//   - add_recent_commits    (session_start) — `git log --oneline -n N`
 //
 // They can be referenced explicitly from a hook YAML entry using
 // `{type: builtin, command: "<name>"}`. The runtime also auto-injects
-// them when the corresponding agent flags (AddDate, AddEnvironmentInfo,
-// AddPromptFiles) are set.
+// add_date / add_environment_info / add_prompt_files when the matching
+// agent flags are set.
 //
-// AddDate and AddPromptFiles target turn_start so they recompute every
-// turn. AddEnvironmentInfo targets session_start because cwd / OS / arch
-// don't change during a session.
+// turn_start builtins recompute every turn (date, git state). session_start
+// builtins run once per session for context that's stable for its duration.
+// Each builtin lives in its own file along with its registered-name
+// constant; this file holds the shared registration plumbing.
 package builtins
 
 import (
@@ -26,6 +35,11 @@ func Register(r *hooks.Registry) error {
 		r.RegisterBuiltin(AddDate, addDate),
 		r.RegisterBuiltin(AddEnvironmentInfo, addEnvironmentInfo),
 		r.RegisterBuiltin(AddPromptFiles, addPromptFiles),
+		r.RegisterBuiltin(AddGitStatus, addGitStatus),
+		r.RegisterBuiltin(AddGitDiff, addGitDiff),
+		r.RegisterBuiltin(AddDirectoryListing, addDirectoryListing),
+		r.RegisterBuiltin(AddUserInfo, addUserInfo),
+		r.RegisterBuiltin(AddRecentCommits, addRecentCommits),
 	)
 }
 

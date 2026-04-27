@@ -33,16 +33,16 @@ import (
 )
 
 // MaxSummaryTokens caps the summary's output length when using the
-// default LLM strategy. Exposed so callers building their own
-// strategies can match the runtime's expectations.
+// default LLM strategy. Exposed because the runtime subtracts it from
+// the model's context budget when deciding whether the model lookup
+// produced a workable limit.
 const MaxSummaryTokens = 16_000
 
-// MaxKeepTokens is the runtime's policy for how much recent
+// maxKeepTokens is the runtime's policy for how much recent
 // conversation to preserve verbatim across a compaction. Messages
 // fitting in this window are kept aside; the rest are the candidates
-// to summarize. Exposed so user-supplied strategies can compute the
-// same kept-tail boundary the runtime uses.
-const MaxKeepTokens = 20_000
+// to summarize.
+const maxKeepTokens = 20_000
 
 // Result is the structural outcome of running a compaction strategy.
 // The runtime applies it to the parent session by appending a
@@ -87,8 +87,8 @@ type LLMArgs struct {
 	// ContextLimit is the parent model's context-window size in
 	// tokens, used to truncate the conversation we hand to the
 	// summarizer so the request itself doesn't blow the window.
-	// Zero is treated as "unknown" and yields the empty conversation
-	// — the LLM strategy needs a real number to work with.
+	// Required: zero is rejected, since the LLM strategy needs a real
+	// number to work with.
 	ContextLimit int64
 	// RunAgent runs the synthesized compaction agent against the
 	// synthesized child session. Required.
@@ -124,7 +124,7 @@ func RunLLM(ctx context.Context, args LLMArgs) (*Result, error) {
 	)
 	compactionAgent := agent.New("root", compaction.SystemPrompt, agent.WithModel(summaryModel))
 
-	messages, firstKeptEntry := ExtractMessages(args.Session, compactionAgent, args.ContextLimit, args.AdditionalPrompt)
+	messages, firstKeptEntry := extractMessages(args.Session, compactionAgent, args.ContextLimit, args.AdditionalPrompt)
 
 	compactionSession := session.New(
 		session.WithTitle("Generating summary"),
@@ -148,7 +148,32 @@ func RunLLM(ctx context.Context, args LLMArgs) (*Result, error) {
 	}, nil
 }
 
-// ExtractMessages returns the messages to send to the compaction
+// ComputeFirstKeptEntry returns the index in sess.Messages of the
+// first message preserved verbatim after compaction, given the
+// [maxKeepTokens] window. Used by the runtime when a hook supplies
+// its own summary so the kept-tail policy stays consistent across
+// the two strategies.
+func ComputeFirstKeptEntry(sess *session.Session, a *agent.Agent) int {
+	return mapToSessionIndex(sess, compaction.SplitIndexForKeep(nonSystemMessages(sess, a), maxKeepTokens))
+}
+
+// nonSystemMessages returns the agent-visible messages in sess with
+// the system entries filtered out. Both the LLM strategy (via
+// [extractMessages]) and the hook-supplied path (via
+// [ComputeFirstKeptEntry]) operate on this same shape, which is also
+// what [compaction.SplitIndexForKeep] expects.
+func nonSystemMessages(sess *session.Session, a *agent.Agent) []chat.Message {
+	var messages []chat.Message
+	for _, msg := range sess.GetMessages(a) {
+		if msg.Role == chat.MessageRoleSystem {
+			continue
+		}
+		messages = append(messages, msg)
+	}
+	return messages
+}
+
+// extractMessages returns the messages to send to the compaction
 // model, plus the index (into sess.Messages) of the first message
 // that is kept verbatim after compaction. The caller is responsible
 // for actually preserving that tail; this function only computes the
@@ -163,30 +188,22 @@ func RunLLM(ctx context.Context, args LLMArgs) (*Result, error) {
 // If the conversation tail itself doesn't fit in
 // (contextLimit − MaxSummaryTokens − prompt-overhead), older messages
 // are dropped from the front of the to-compact list to make room.
-func ExtractMessages(sess *session.Session, a *agent.Agent, contextLimit int64, additionalPrompt string) ([]chat.Message, int) {
-	var messages []chat.Message
-	for _, msg := range sess.GetMessages(a) {
-		if msg.Role == chat.MessageRoleSystem {
-			continue
-		}
-		msg.Cost = 0
-		msg.CacheControl = false
-		messages = append(messages, msg)
+func extractMessages(sess *session.Session, a *agent.Agent, contextLimit int64, additionalPrompt string) ([]chat.Message, int) {
+	messages := nonSystemMessages(sess, a)
+	for i := range messages {
+		messages[i].Cost = 0
+		messages[i].CacheControl = false
 	}
 
-	splitIdx := compaction.SplitIndexForKeep(messages, MaxKeepTokens)
-	messagesToCompact := messages[:splitIdx]
-	firstKeptEntry := MapToSessionIndex(sess, splitIdx)
-
-	messages = messagesToCompact
+	splitIdx := compaction.SplitIndexForKeep(messages, maxKeepTokens)
+	firstKeptEntry := mapToSessionIndex(sess, splitIdx)
+	messages = messages[:splitIdx]
 
 	systemPromptMessage := chat.Message{
 		Role:      chat.MessageRoleSystem,
 		Content:   compaction.SystemPrompt,
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}
-	systemPromptLen := compaction.EstimateMessageTokens(&systemPromptMessage)
-
 	userPrompt := compaction.UserPrompt
 	if additionalPrompt != "" {
 		userPrompt += "\n\n" + additionalPrompt
@@ -196,9 +213,11 @@ func ExtractMessages(sess *session.Session, a *agent.Agent, contextLimit int64, 
 		Content:   userPrompt,
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}
-	userPromptLen := compaction.EstimateMessageTokens(&userPromptMessage)
 
-	contextAvailable := max(int64(0), contextLimit-MaxSummaryTokens-systemPromptLen-userPromptLen)
+	contextAvailable := max(int64(0),
+		contextLimit-MaxSummaryTokens-
+			compaction.EstimateMessageTokens(&systemPromptMessage)-
+			compaction.EstimateMessageTokens(&userPromptMessage))
 	firstIndex := compaction.FirstIndexInBudget(messages, contextAvailable)
 	if firstIndex < len(messages) {
 		messages = messages[firstIndex:]
@@ -211,29 +230,11 @@ func ExtractMessages(sess *session.Session, a *agent.Agent, contextLimit int64, 
 	return messages, firstKeptEntry
 }
 
-// ComputeFirstKeptEntry returns the index in sess.Messages of the
-// first message preserved verbatim after compaction, given the
-// [MaxKeepTokens] window. Used by callers (typically the runtime
-// after a hook supplies its own summary) that need the kept-tail
-// boundary without invoking the LLM strategy.
-func ComputeFirstKeptEntry(sess *session.Session, a *agent.Agent) int {
-	var messages []chat.Message
-	for _, msg := range sess.GetMessages(a) {
-		if msg.Role == chat.MessageRoleSystem {
-			continue
-		}
-		messages = append(messages, msg)
-	}
-	return MapToSessionIndex(sess, compaction.SplitIndexForKeep(messages, MaxKeepTokens))
-}
-
-// MapToSessionIndex maps an index in the non-system-filtered message
-// list (the form [ExtractMessages] operates on) back to an index in
-// sess.Messages.
-//
-// Returns len(sess.Messages) when filteredIdx is past the end — i.e.
-// "compact everything; keep nothing of the tail".
-func MapToSessionIndex(sess *session.Session, filteredIdx int) int {
+// mapToSessionIndex maps an index in the non-system-filtered message
+// list (the form [extractMessages] operates on) back to an index in
+// sess.Messages. Returns len(sess.Messages) when filteredIdx is past
+// the end — i.e. "compact everything; keep nothing of the tail".
+func mapToSessionIndex(sess *session.Session, filteredIdx int) int {
 	count := 0
 	for i, item := range sess.Messages {
 		if item.IsMessage() && item.Message.Message.Role != chat.MessageRoleSystem {
@@ -249,11 +250,9 @@ func MapToSessionIndex(sess *session.Session, filteredIdx int) int {
 // toItems wraps a flat slice of chat messages into session items so a
 // fresh session can be built from them for the compaction sub-run.
 func toItems(messages []chat.Message) []session.Item {
-	var items []session.Item
-	for _, message := range messages {
-		items = append(items, session.Item{
-			Message: &session.Message{Message: message},
-		})
+	items := make([]session.Item, len(messages))
+	for i, message := range messages {
+		items[i] = session.Item{Message: &session.Message{Message: message}}
 	}
 	return items
 }

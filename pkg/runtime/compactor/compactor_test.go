@@ -66,8 +66,6 @@ func TestExtractMessages(t *testing.T) {
 				newMsg(chat.MessageRoleUser, "second message"),
 				newMsg(chat.MessageRoleAssistant, "second response"),
 			},
-			// Set context limit so small that after subtracting MaxSummaryTokens + prompt overhead,
-			// not all messages fit.
 			contextLimit:             MaxSummaryTokens + 50,
 			wantConversationMsgCount: 0,
 		},
@@ -102,7 +100,7 @@ func TestExtractMessages(t *testing.T) {
 			t.Parallel()
 			sess := session.New(session.WithMessages(tt.messages))
 			a := agent.New("test", "test prompt")
-			result, _ := ExtractMessages(sess, a, tt.contextLimit, tt.additionalPrompt)
+			result, _ := extractMessages(sess, a, tt.contextLimit, tt.additionalPrompt)
 
 			require.GreaterOrEqual(t, len(result), tt.wantConversationMsgCount+2)
 			assert.Equal(t, chat.MessageRoleSystem, result[0].Role)
@@ -151,9 +149,9 @@ func TestExtractMessages_KeepsRecentMessages(t *testing.T) {
 	sess := session.New(session.WithMessages(items))
 	a := agent.New("test", "test prompt")
 
-	result, firstKeptEntry := ExtractMessages(sess, a, 200_000, "")
+	result, firstKeptEntry := extractMessages(sess, a, 200_000, "")
 
-	// 20 messages × ~5k tokens = ~100k. MaxKeepTokens=20k → ~4 messages kept.
+	// 20 messages × ~5k tokens = ~100k. maxKeepTokens=20k → ~4 messages kept.
 	compactedMsgCount := len(result) - 2 // minus system and user prompt
 	assert.Less(t, compactedMsgCount, 20, "some messages should have been kept aside")
 	assert.Positive(t, compactedMsgCount, "some messages should be compacted")
@@ -197,11 +195,11 @@ func TestMapToSessionIndex(t *testing.T) {
 
 	// Filtered list (no system): [u1, a1, u2] → indices 0,1,2
 	// Map back to sess.Messages indices: 1, 2, 4
-	assert.Equal(t, 1, MapToSessionIndex(sess, 0))
-	assert.Equal(t, 2, MapToSessionIndex(sess, 1))
-	assert.Equal(t, 4, MapToSessionIndex(sess, 2))
+	assert.Equal(t, 1, mapToSessionIndex(sess, 0))
+	assert.Equal(t, 2, mapToSessionIndex(sess, 1))
+	assert.Equal(t, 4, mapToSessionIndex(sess, 2))
 	// Past the end: returns len(sess.Messages)
-	assert.Equal(t, len(sess.Messages), MapToSessionIndex(sess, 3))
+	assert.Equal(t, len(sess.Messages), mapToSessionIndex(sess, 3))
 }
 
 // TestRunLLM_RequiresRunAgent pins the contract that a missing RunAgent

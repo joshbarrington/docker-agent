@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -41,8 +40,7 @@ const (
 //   - If a BeforeCompaction hook supplies a non-empty Summary in
 //     HookSpecificOutput, the runtime applies that summary verbatim and
 //     skips the LLM-based summarization entirely. The kept-tail policy
-//     ([compactor.MaxKeepTokens]) still applies so conversation
-//     continuity is identical to the LLM path.
+//     stays consistent across both paths via [compactor.ComputeFirstKeptEntry].
 //   - AfterCompaction fires after the summary has been applied; it is
 //     observational.
 //
@@ -61,9 +59,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	pre := r.executeBeforeCompactionHooks(ctx, sess, a, reason, contextLimit, events)
 	if pre != nil && !pre.Allowed {
 		slog.Info("Session compaction skipped by before_compaction hook",
-			"session_id", sess.ID,
-			"agent", a.Name(),
-			"reason", reason,
+			"session_id", sess.ID, "agent", a.Name(), "reason", reason,
 			"hook_message", pre.Message,
 		)
 		return
@@ -75,15 +71,34 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 		events <- SessionCompaction(sess.ID, "completed", a.Name())
 	}()
 
-	result, err := r.produceSummary(ctx, sess, a, additionalPrompt, contextLimit, pre)
-	if err != nil {
-		slog.Error("Failed to generate session summary", "error", err)
-		events <- Error(err.Error())
-		return
-	}
+	// Choose the strategy: a hook-supplied summary if before_compaction
+	// returned one, otherwise the default LLM strategy.
+	result := summaryFromHook(sess, a, pre)
 	if result == nil {
-		// Empty summary — bail without applying anything.
-		return
+		if contextLimit <= 0 {
+			slog.Error("Failed to generate session summary",
+				"error", "model definition unavailable")
+			events <- Error("Failed to get model definition")
+			return
+		}
+
+		var err error
+		result, err = compactor.RunLLM(ctx, compactor.LLMArgs{
+			Session:          sess,
+			Agent:            a,
+			AdditionalPrompt: additionalPrompt,
+			ContextLimit:     contextLimit,
+			RunAgent:         r.runCompactionAgent,
+		})
+		if err != nil {
+			slog.Error("Failed to generate session summary", "error", err)
+			events <- Error(err.Error())
+			return
+		}
+		if result == nil {
+			// Empty summary — bail without applying anything.
+			return
+		}
 	}
 
 	// Apply the summary to the session. This is intrinsically
@@ -106,50 +121,35 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	r.executeAfterCompactionHooks(ctx, sess, a, reason, contextLimit, result.Summary, events)
 }
 
-// produceSummary returns a structured compaction result, choosing
-// between a hook-supplied summary (if before_compaction returned one)
-// and the default LLM-based strategy.
-func (r *LocalRuntime) produceSummary(
-	ctx context.Context,
-	sess *session.Session,
-	a *agent.Agent,
-	additionalPrompt string,
-	contextLimit int64,
-	pre *hooks.Result,
-) (*compactor.Result, error) {
-	if pre != nil && pre.Summary != "" {
-		slog.Debug("Using compaction summary from before_compaction hook",
-			"session_id", sess.ID, "agent", a.Name(), "summary_length", len(pre.Summary))
-		return &compactor.Result{
-			Summary:        pre.Summary,
-			FirstKeptEntry: compactor.ComputeFirstKeptEntry(sess, a),
-			// Estimate the summary's token count for session bookkeeping;
-			// no LLM was called so the cost is zero.
-			InputTokens: compaction.EstimateMessageTokens(&chat.Message{
-				Role:    chat.MessageRoleAssistant,
-				Content: pre.Summary,
-			}),
-			Cost: 0,
-		}, nil
+// summaryFromHook lifts a before_compaction hook's Summary verdict into
+// a [compactor.Result] that the runtime can apply with the same code
+// path as the LLM strategy. Returns nil when no hook supplied a
+// summary (the caller then falls through to [compactor.RunLLM]).
+//
+// The hook only contributes the summary text; the runtime fills in the
+// kept-tail boundary (matching the LLM path's policy) and estimates the
+// summary's token count for session bookkeeping. Cost is zero since no
+// LLM call ran.
+func summaryFromHook(sess *session.Session, a *agent.Agent, pre *hooks.Result) *compactor.Result {
+	if pre == nil || pre.Summary == "" {
+		return nil
 	}
-
-	if contextLimit <= 0 {
-		return nil, errors.New("failed to get model definition")
+	slog.Debug("Using compaction summary from before_compaction hook",
+		"session_id", sess.ID, "agent", a.Name(), "summary_length", len(pre.Summary))
+	return &compactor.Result{
+		Summary:        pre.Summary,
+		FirstKeptEntry: compactor.ComputeFirstKeptEntry(sess, a),
+		InputTokens: compaction.EstimateMessageTokens(&chat.Message{
+			Role:    chat.MessageRoleAssistant,
+			Content: pre.Summary,
+		}),
 	}
-
-	return compactor.RunLLM(ctx, compactor.LLMArgs{
-		Session:          sess,
-		Agent:            a,
-		AdditionalPrompt: additionalPrompt,
-		ContextLimit:     contextLimit,
-		RunAgent:         r.runCompactionAgent,
-	})
 }
 
 // compactionContextLimit returns the agent's model context limit, or 0
-// when it can't be resolved. Failure is non-fatal here: a
-// before_compaction hook may supply its own summary and never need the
-// model definition. The LLM strategy itself enforces ContextLimit > 0.
+// when it can't be resolved. Failure is non-fatal: a before_compaction
+// hook may supply its own summary and never need the model definition.
+// The LLM strategy itself enforces ContextLimit > 0.
 func (r *LocalRuntime) compactionContextLimit(ctx context.Context, a *agent.Agent) int64 {
 	if a == nil || a.Model() == nil {
 		return 0

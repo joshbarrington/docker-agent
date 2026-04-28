@@ -334,6 +334,12 @@ func aggregate(results []hookResult, event EventType) *Result {
 			sysMsgs = append(sysMsgs, out.SystemMessage)
 		}
 		if hso := out.HookSpecificOutput; hso != nil {
+			if event == EventPreToolUse && hso.PermissionDecision != "" {
+				final.Decision, final.DecisionReason = strongerDecision(
+					final.Decision, final.DecisionReason,
+					hso.PermissionDecision, hso.PermissionDecisionReason,
+				)
+			}
 			if event == EventPreToolUse || event == EventPermissionRequest {
 				switch hso.PermissionDecision {
 				case DecisionDeny:
@@ -342,7 +348,9 @@ func aggregate(results []hookResult, event EventType) *Result {
 						messages = append(messages, hso.PermissionDecisionReason)
 					}
 				case DecisionAllow:
-					final.PermissionAllowed = true
+					if event == EventPermissionRequest {
+						final.PermissionAllowed = true
+					}
 					if hso.PermissionDecisionReason != "" {
 						contexts = append(contexts, hso.PermissionDecisionReason)
 					}
@@ -377,4 +385,32 @@ func aggregate(results []hookResult, event EventType) *Result {
 	final.AdditionalContext = strings.Join(contexts, "\n")
 	final.SystemMessage = strings.Join(sysMsgs, "\n")
 	return final
+}
+
+// decisionWeight ranks PermissionDecision verdicts so [strongerDecision]
+// can pick the most-restrictive across a chain of pre_tool_use hooks.
+// Deny > Ask > Allow > "" (no decision).
+func decisionWeight(d Decision) int {
+	switch d {
+	case DecisionDeny:
+		return 3
+	case DecisionAsk:
+		return 2
+	case DecisionAllow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// strongerDecision returns the more-restrictive of two (decision,
+// reason) pairs, preserving the reason of the winner. A non-empty
+// decision always beats the empty string. Ties keep the existing
+// (current) decision so the iteration order in [aggregate] is
+// stable and the first-seen reason wins.
+func strongerDecision(curD Decision, curR string, newD Decision, newR string) (Decision, string) {
+	if decisionWeight(newD) > decisionWeight(curD) {
+		return newD, newR
+	}
+	return curD, curR
 }

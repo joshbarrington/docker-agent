@@ -41,4 +41,9 @@ const (
 	// registered via [Registry.RegisterBuiltin]. The name is stored in
 	// [Hook.Command].
 	HookTypeBuiltin HookType = "builtin"
+	// HookTypeModel asks an LLM and translates the reply into the hook's
+	// native [Output] shape via a [ResponseShape]. It is registered by
+	// the runtime ([RegisterModelFactory]) because it depends on the
+	// runtime's model provider stack.
+	HookTypeModel HookType = "model"
 )

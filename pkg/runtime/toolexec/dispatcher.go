@@ -35,6 +35,8 @@ const (
 	ApprovalSourceSessionPermissionsDeny  = "session_permissions_deny"
 	ApprovalSourceTeamPermissionsAllow    = "team_permissions_allow"
 	ApprovalSourceTeamPermissionsDeny     = "team_permissions_deny"
+	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
+	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
 	ApprovalSourceReadOnlyHint            = "readonly_hint"
 	ApprovalSourceUserApproved            = "user_approved"
 	ApprovalSourceUserApprovedSession     = "user_approved_session"
@@ -234,7 +236,7 @@ type call struct {
 	em   Emitter
 	a    *agent.Agent
 
-	tc        tools.ToolCall // mutable: preHook may rewrite arguments
+	tc        tools.ToolCall // mutable: pre_tool_use hooks may rewrite arguments
 	tool      tools.Tool     // tool.Name is always set; other fields zero when !available
 	available bool           // false when the tool wasn't in the agent's toolset
 }
@@ -291,21 +293,38 @@ func (c *call) run(ctx context.Context) CallOutcome {
 // approveAndRun runs runTool if the configured approval pipeline allows
 // it, otherwise records an error or asks the user.
 //
-// The policy decision is delegated to the pure [Decide] function; this
-// method only applies the resulting outcome and notifies the
-// [HookDispatcher] of the verdict.
+// The pipeline order is:
+//
+//  1. yolo / permission checkers (delegated to [Decide]) — deterministic
+//     verdicts win first. ForceAsk goes straight to the user.
+//  2. pre_tool_use hooks (LLM-judge, shell scripts, ...) — consulted
+//     ONLY when no deterministic checker matched. The hook can Deny
+//     (block), Allow (skip the user prompt) or Ask (force the prompt).
+//     Hooks may also rewrite tool arguments via UpdatedInput, in which
+//     case the rewrite is applied here so the user prompt and the tool
+//     handler both see the modified call.
+//  3. read-only hint — auto-approve when the tool advertises it.
+//  4. user confirmation — fallback prompt.
+//
+// Splitting the read-only hint out of [Decide] is deliberate: it lets
+// the pre_tool_use hook see (and override) calls that would otherwise
+// auto-approve via the read-only hint. This matches the PR's intent
+// that an LLM judge gets a turn on every call that isn't covered by an
+// explicit allow/deny rule.
 func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) CallOutcome {
 	var checkers []NamedChecker
 	if c.d.Permissions != nil {
 		checkers = c.d.Permissions(c.sess)
 	}
 
+	// readOnlyHint is intentionally false here so the pre_tool_use hook
+	// gets a turn before the read-only fast-path applies.
 	decision := Decide(
 		c.sess.ToolsApproved,
 		checkers,
 		c.tc.Function.Name,
 		ParseToolInput(c.tc.Function.Arguments),
-		c.tool.Annotations.ReadOnlyHint,
+		false,
 	)
 
 	switch decision.Outcome {
@@ -320,11 +339,86 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 		return CallOutcome{}
 	case OutcomeAsk:
 		if decision.Reason == ReasonChecker {
+			// Explicit ask pattern from a checker: skip the hook and
+			// prompt the user directly. The user is the source of
+			// truth for these calls.
 			slog.Debug("Tool requires confirmation (ask pattern)", "tool", c.tc.Function.Name, "source", decision.Source, "session_id", c.sess.ID)
+			return c.askUser(ctx, runTool)
 		}
-		return c.askUser(ctx, runTool)
 	}
-	return CallOutcome{}
+
+	// No deterministic verdict: consult the pre_tool_use hook chain.
+	if outcome, handled := c.consultPreToolUseHook(ctx, runTool); handled {
+		return outcome
+	}
+
+	if c.tool.Annotations.ReadOnlyHint {
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceReadOnlyHint)
+		return runTool()
+	}
+	return c.askUser(ctx, runTool)
+}
+
+// consultPreToolUseHook fires the pre_tool_use hook chain in the
+// approval flow, before the user is asked.
+//
+// Returns (outcome, true) when the hook produced a definitive verdict
+// (Deny / Allow / Ask) that the caller should honor; returns
+// (zero, false) when no hook is configured or the chain returned no
+// opinion, in which case the caller should fall through to the
+// read-only hint / user prompt.
+//
+// UpdatedInput from a hook is applied to c.tc here so every downstream
+// path (auto-run, user prompt, runToolset) sees the rewritten
+// arguments — this is the only place pre-call argument rewriting
+// happens.
+func (c *call) consultPreToolUseHook(ctx context.Context, runTool func() CallOutcome) (CallOutcome, bool) {
+	if c.d.Hooks == nil {
+		return CallOutcome{}, false
+	}
+
+	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPreToolUse, NewHooksInput(c.sess, c.tc))
+	if result == nil {
+		return CallOutcome{}, false
+	}
+
+	// Apply UpdatedInput first so subsequent paths see the rewritten args.
+	c.applyHookModifiedInput(result)
+
+	if !result.Allowed {
+		slog.Debug("Pre-tool hook blocked tool call", "tool", c.tc.Function.Name, "message", result.Message)
+		c.notifyApproval(ctx, ApprovalDecisionDeny, ApprovalSourcePreToolUseHookDeny)
+		c.em.EmitHookBlocked(c.tc, c.tool, result.Message, c.a.Name())
+		c.errorResponse("Tool call blocked by hook: " + result.Message)
+		return CallOutcome{}, true
+	}
+
+	switch result.Decision {
+	case hooks.DecisionAllow:
+		slog.Debug("Tool auto-approved by pre_tool_use hook", "tool", c.tc.Function.Name, "reason", result.DecisionReason, "session_id", c.sess.ID)
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourcePreToolUseHookAllow)
+		return runTool(), true
+	case hooks.DecisionAsk:
+		slog.Debug("pre_tool_use hook escalated to user", "tool", c.tc.Function.Name, "reason", result.DecisionReason, "session_id", c.sess.ID)
+		return c.askUser(ctx, runTool), true
+	}
+	return CallOutcome{}, false
+}
+
+// applyHookModifiedInput applies a hook's UpdatedInput to the in-flight
+// tool call. Errors are logged at warn level and otherwise ignored —
+// the hook can't crash the call by returning malformed JSON.
+func (c *call) applyHookModifiedInput(result *hooks.Result) {
+	if result.ModifiedInput == nil {
+		return
+	}
+	updated, err := json.Marshal(result.ModifiedInput)
+	if err != nil {
+		slog.Warn("Failed to marshal modified tool input from hook", "tool", c.tc.Function.Name, "error", err)
+		return
+	}
+	slog.Debug("Pre-tool hook modified tool input", "tool", c.tc.Function.Name)
+	c.tc.Function.Arguments = string(updated)
 }
 
 // notifyApproval forwards the resolved approval decision to the
@@ -492,14 +586,13 @@ func (c *call) handleResume(ctx context.Context, req ResumeRequest, runTool func
 }
 
 // runToolset executes a tool from an agent's toolset (MCP, filesystem, ...),
-// surrounding the call with pre/post hooks. The pre-hook may block the
-// call or rewrite its arguments; the post-hook may signal run
-// termination via its returned [CallOutcome].
+// surrounding the call with the post-tool-use hook. The pre-tool-use
+// hook fires earlier in [call.approveAndRun] (so an LLM-judge can
+// short-circuit the user prompt); by the time we get here, any
+// argument rewrite the hook requested has already been applied to
+// c.tc. The post-tool-use hook may signal run termination via its
+// returned [CallOutcome].
 func (c *call) runToolset(ctx context.Context) CallOutcome {
-	if blocked := c.preHook(ctx); blocked {
-		return CallOutcome{}
-	}
-
 	res := c.invoke(ctx, "runtime.tool.handler", func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
 		res, err := c.tool.Handler(ctx, c.tc)
 		return res, 0, err
@@ -606,37 +699,6 @@ func buildMultiContent(text string, images []tools.MediaContent) []chat.MessageP
 		})
 	}
 	return parts
-}
-
-// preHook fires the pre-tool-use hook and returns whether the tool call
-// was blocked. When the hook rewrites arguments, [c.tc] is mutated in
-// place so the downstream invoke() sees the new arguments.
-func (c *call) preHook(ctx context.Context) (blocked bool) {
-	if c.d.Hooks == nil {
-		return false
-	}
-
-	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPreToolUse, NewHooksInput(c.sess, c.tc))
-	if result == nil {
-		return false
-	}
-
-	if !result.Allowed {
-		slog.Debug("Pre-tool hook blocked tool call", "tool", c.tc.Function.Name, "message", result.Message)
-		c.em.EmitHookBlocked(c.tc, c.tool, result.Message, c.a.Name())
-		c.errorResponse("Tool call blocked by hook: " + result.Message)
-		return true
-	}
-
-	if result.ModifiedInput != nil {
-		if updated, err := json.Marshal(result.ModifiedInput); err != nil {
-			slog.Warn("Failed to marshal modified tool input from hook", "tool", c.tc.Function.Name, "error", err)
-		} else {
-			slog.Debug("Pre-tool hook modified tool input", "tool", c.tc.Function.Name)
-			c.tc.Function.Arguments = string(updated)
-		}
-	}
-	return false
 }
 
 // postHook fires the post-tool-use hook. SystemMessage emission is the

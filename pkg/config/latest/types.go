@@ -1816,6 +1816,10 @@ type HookDefinition struct {
 	//                 is owned by the runtime; the docker-agent runtime
 	//                 ships add_date, add_environment_info, and
 	//                 add_prompt_files.
+	//   - "model":    ask an LLM and translate its reply into the hook's
+	//                 native output. See Model / Prompt / Schema. Used to
+	//                 implement "LLM as a judge" pre_tool_use hooks,
+	//                 turn-start summarizers, etc., with no Go code.
 	Type string `json:"type" yaml:"type"`
 
 	// Command is the shell command (Type==command) or the builtin name
@@ -1839,6 +1843,25 @@ type HookDefinition struct {
 
 	// OnError controls non-fail-closed hook failures: warn (default), ignore, or block.
 	OnError string `json:"on_error,omitempty" yaml:"on_error,omitempty"`
+
+	// Model is the model spec ("provider/model", e.g. "openai/gpt-4o-mini")
+	// invoked by Type==model hooks. Required for that type, ignored
+	// otherwise.
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+
+	// Prompt is the user-message template rendered for each invocation
+	// of a Type==model hook. It is parsed as a Go text/template with the
+	// hook [Input] as the data context (so {{ .ToolName }},
+	// {{ .ToolInput }}, etc. work). Required for Type==model.
+	Prompt string `json:"prompt,omitempty" yaml:"prompt,omitempty"`
+
+	// Schema selects a well-known response interpretation for Type==model
+	// hooks. The empty value means "return the model's reply as
+	// additional_context". Other values (registered by the runtime) ask
+	// the provider for strict-JSON output and translate the result into
+	// the right Output shape (e.g. "pre_tool_use_decision" produces a
+	// permission_decision verdict).
+	Schema string `json:"schema,omitempty" yaml:"schema,omitempty"`
 }
 
 // GetTimeout returns the per-hook execution timeout, defaulting to 60
@@ -2044,8 +2067,15 @@ func (h *HookDefinition) validate(prefix string, index int) error {
 		if h.Command == "" {
 			return fmt.Errorf("hooks.%s[%d]: command must name the builtin to invoke", prefix, index)
 		}
+	case "model":
+		if h.Model == "" {
+			return fmt.Errorf("hooks.%s[%d]: model is required for model hooks (e.g. 'openai/gpt-4o-mini')", prefix, index)
+		}
+		if h.Prompt == "" {
+			return fmt.Errorf("hooks.%s[%d]: prompt is required for model hooks", prefix, index)
+		}
 	default:
-		return fmt.Errorf("hooks.%s[%d]: unsupported hook type '%s' (supported: 'command', 'builtin')", prefix, index, h.Type)
+		return fmt.Errorf("hooks.%s[%d]: unsupported hook type '%s' (supported: 'command', 'builtin', 'model')", prefix, index, h.Type)
 	}
 
 	return nil

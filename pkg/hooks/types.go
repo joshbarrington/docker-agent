@@ -332,4 +332,20 @@ type Result struct {
 	// LLM-generated compaction summary. When multiple hooks return a
 	// non-empty summary, the first one wins.
 	Summary string
+
+	// Decision is the most-restrictive PreToolUse verdict reported by
+	// any matching hook in the chain ("" when no hook produced one).
+	// Most-restrictive ordering: Deny > Ask > Allow > "".
+	//
+	// The runtime's tool-approval flow consults this BEFORE asking the
+	// user, so an LLM-judge hook that returns Allow can auto-approve a
+	// call that would otherwise prompt, and Ask can force a prompt for
+	// a call that would otherwise auto-run.
+	//
+	// Always empty for non-PreToolUse events.
+	Decision Decision
+	// DecisionReason is the human-readable rationale paired with
+	// Decision (the reason from the most-restrictive hook). Empty when
+	// Decision is empty.
+	DecisionReason string
 }

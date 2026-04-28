@@ -121,3 +121,23 @@ func TestHooksExecWiresAgentFlagsToBuiltins(t *testing.T) {
 		})
 	}
 }
+
+// TestModelHookFactoryIsRegistered pins the wiring of the model hook:
+// NewLocalRuntime must register a [hooks.HookTypeModel] factory so
+// agents can reference `{type: model, model: ..., prompt: ...}` in
+// YAML without any additional setup. We assert at the registry level
+// (rather than dispatching a hook) because the real ModelClient would
+// otherwise need network and credentials.
+func TestModelHookFactoryIsRegistered(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	a := agent.New("root", "instructions", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(a))
+	r, err := NewLocalRuntime(tm, WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	factory, ok := r.hooksRegistry.Lookup(hooks.HookTypeModel)
+	assert.True(t, ok, "model hook factory must be registered by NewLocalRuntime")
+	assert.NotNil(t, factory)
+}

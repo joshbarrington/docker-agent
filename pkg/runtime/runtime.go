@@ -362,6 +362,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("register builtin hooks: %w", err)
 	}
+	registerModelHook(hooksRegistry)
 
 	r := &LocalRuntime{
 		toolMap:                make(map[string]ToolHandlerFunc),

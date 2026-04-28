@@ -167,9 +167,7 @@ func (s *Supervisor) handleRuntimeEvent(sessionID string, msg tea.Msg) {
 	case *runtime.StreamStoppedEvent:
 		runner.IsRunning = false
 		runner.PendingEvent = nil // Clear any pending attention event since stream ended
-		if runner.NeedsAttn {
-			runner.NeedsAttn = false
-		}
+		runner.NeedsAttn = false
 		s.notifyTabsUpdated()
 
 	case *runtime.SessionTitleEvent:
@@ -350,14 +348,14 @@ func (s *Supervisor) Spawner() SessionSpawner {
 }
 
 // CloseSession closes a session and removes it from the supervisor.
-func (s *Supervisor) CloseSession(sessionID string) (nextActiveID string) {
+func (s *Supervisor) CloseSession(sessionID string) string {
 	s.mu.Lock()
 
 	runner, ok := s.runners[sessionID]
 	if !ok {
-		nextActiveID = s.activeID
+		activeID := s.activeID
 		s.mu.Unlock()
-		return nextActiveID
+		return activeID
 	}
 
 	// Cancel the session context
@@ -379,16 +377,15 @@ func (s *Supervisor) CloseSession(sessionID string) (nextActiveID string) {
 	// If this was the active session, switch to the previous tab (or the
 	// first one when closing the first tab).
 	if s.activeID == sessionID {
-		if len(s.order) > 0 {
-			prevIdx := max(closedIdx-1, 0)
-			s.activeID = s.order[prevIdx]
-		} else {
+		if len(s.order) == 0 {
 			s.activeID = ""
+		} else {
+			s.activeID = s.order[max(closedIdx-1, 0)]
 		}
 	}
 
 	s.notifyTabsUpdated()
-	nextActiveID = s.activeID
+	activeID := s.activeID
 	s.mu.Unlock()
 
 	// Run cleanup outside the lock so it can't deadlock.
@@ -396,7 +393,7 @@ func (s *Supervisor) CloseSession(sessionID string) (nextActiveID string) {
 		go cleanup()
 	}
 
-	return nextActiveID
+	return activeID
 }
 
 // Count returns the number of sessions.

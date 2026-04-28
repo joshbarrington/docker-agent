@@ -983,20 +983,16 @@ func (r *LocalRuntime) compactWithReason(ctx context.Context, sess *session.Sess
 	a := r.resolveSessionAgent(sess)
 
 	source := preCompactSourceFor(reason)
-	if skip, msg, extraPrompt := r.executePreCompactHooks(ctx, sess, a, source, events); skip {
+	skip, msg, extraPrompt := r.executePreCompactHooks(ctx, sess, a, source, events)
+	if skip {
 		slog.Warn("pre_compact hook signalled skip",
 			"agent", a.Name(), "session_id", sess.ID, "source", source, "reason", msg)
 		if msg != "" {
 			events <- Warning(msg, a.Name())
 		}
 		return
-	} else if extraPrompt != "" {
-		if additionalPrompt != "" {
-			additionalPrompt += "\n\n" + extraPrompt
-		} else {
-			additionalPrompt = extraPrompt
-		}
 	}
+	additionalPrompt = joinPrompts(additionalPrompt, extraPrompt)
 
 	r.doCompact(ctx, sess, a, additionalPrompt, reason, events)
 
@@ -1028,5 +1024,21 @@ func preCompactSourceFor(reason string) string {
 		return "manual"
 	default:
 		return reason
+	}
+}
+
+// joinPrompts concatenates two non-empty prompt fragments with a blank
+// line, returning whichever is non-empty when the other isn't. Used by
+// compactWithReason to splice pre_compact's additional_context into
+// the caller's additionalPrompt without having to special-case empty
+// strings at the callsite.
+func joinPrompts(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	default:
+		return a + "\n\n" + b
 	}
 }

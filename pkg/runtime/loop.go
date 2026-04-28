@@ -203,22 +203,19 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	events <- ToolsetInfo(len(agentTools), false, a.Name())
 
 	messages := sess.GetMessages(a)
-	if sess.SendUserMessage && len(messages) > 0 {
-		lastMsg := messages[len(messages)-1]
-		events <- UserMessage(lastMsg.Content, sess.ID, lastMsg.MultiContent, len(sess.Messages)-1)
-	}
 
-	// user_prompt_submit fires once per user message, after session_start
-	// and before the first model call. Only top-level sessions fire it:
-	// sub-sessions (transferred tasks, background agents, skill
-	// sub-sessions) carry a synthesised "Please proceed." implicit user
-	// message that no human authored, so firing the hook there would be
-	// noise. SendUserMessage is the same flag the runtime uses to decide
-	// whether to emit a UserMessageEvent, which is exactly the right
-	// signal: "a real user prompt is at the tail of the session".
+	// Sub-sessions (transferred tasks, background agents, skill
+	// sub-sessions) carry a synthesised "Please proceed." message that
+	// no human authored. SendUserMessage is the same flag the runtime
+	// uses to gate the UserMessageEvent, which is exactly the right
+	// signal here too: "a real user prompt is at the tail of the session".
 	var userPromptMsgs []chat.Message
 	if sess.SendUserMessage && len(messages) > 0 {
 		lastMsg := messages[len(messages)-1]
+		events <- UserMessage(lastMsg.Content, sess.ID, lastMsg.MultiContent, len(sess.Messages)-1)
+
+		// user_prompt_submit fires once per real user message, after
+		// session_start and before the first model call.
 		if lastMsg.Role == chat.MessageRoleUser {
 			stop, msg, ctxMsgs := r.executeUserPromptSubmitHooks(ctx, sess, a, lastMsg.Content, events)
 			if stop {

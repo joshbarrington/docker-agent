@@ -335,24 +335,24 @@ func aggregate(results []hookResult, event EventType) *Result {
 		}
 		if hso := out.HookSpecificOutput; hso != nil {
 			if event == EventPreToolUse || event == EventPermissionRequest {
-				if hso.PermissionDecision == DecisionDeny {
+				switch hso.PermissionDecision {
+				case DecisionDeny:
 					final.Allowed = false
 					if hso.PermissionDecisionReason != "" {
 						messages = append(messages, hso.PermissionDecisionReason)
 					}
-				}
-				if hso.PermissionDecision == DecisionAllow {
+				case DecisionAllow:
 					final.PermissionAllowed = true
 					if hso.PermissionDecisionReason != "" {
 						contexts = append(contexts, hso.PermissionDecisionReason)
 					}
 				}
-				if event == EventPreToolUse && hso.UpdatedInput != nil {
-					if final.ModifiedInput == nil {
-						final.ModifiedInput = make(map[string]any)
-					}
-					maps.Copy(final.ModifiedInput, hso.UpdatedInput)
+			}
+			if event == EventPreToolUse && hso.UpdatedInput != nil {
+				if final.ModifiedInput == nil {
+					final.ModifiedInput = make(map[string]any)
 				}
+				maps.Copy(final.ModifiedInput, hso.UpdatedInput)
 			}
 			if event == EventBeforeCompaction && hso.Summary != "" && final.Summary == "" {
 				// First non-empty summary in CONFIG ORDER wins. Hooks run

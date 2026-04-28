@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/docker/docker-agent/pkg/paths"
 )
 
 // remoteIndex represents the index.json served at /.well-known/skills/index.json
@@ -25,19 +23,11 @@ type remoteSkillEntry struct {
 	Files       []string `json:"files"`
 }
 
-func defaultCache() *diskCache {
-	return newDiskCache(filepath.Join(paths.GetCacheDir(), "skills"))
-}
-
-// loadRemoteSkills fetches skills from a remote URL per the well-known skills discovery spec.
-// It fetches /.well-known/skills/index.json, then prefetches all listed files
-// into a disk cache so the agent can read them without network requests during
-// task execution.
-func loadRemoteSkills(baseURL string) []Skill {
-	return loadRemoteSkillsWithCache(context.Background(), baseURL, defaultCache())
-}
-
-func loadRemoteSkillsWithCache(ctx context.Context, baseURL string, cache *diskCache) []Skill {
+// loadRemoteSkills fetches skills from a remote URL per the well-known skills
+// discovery spec. It fetches /.well-known/skills/index.json, then prefetches
+// all listed files into the given disk cache so the agent can read them
+// without network requests during task execution.
+func loadRemoteSkills(ctx context.Context, baseURL string, cache *diskCache) []Skill {
 	baseURL = strings.TrimRight(baseURL, "/")
 	indexURL := baseURL + "/.well-known/skills/index.json"
 

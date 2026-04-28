@@ -47,7 +47,7 @@ func TestLoadRemoteSkills(t *testing.T) {
 
 		cacheDir := t.TempDir()
 		cache := newDiskCache(cacheDir)
-		skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, cache)
+		skills := loadRemoteSkills(t.Context(), srv.URL, cache)
 
 		require.Len(t, skills, 2)
 
@@ -84,7 +84,7 @@ func TestLoadRemoteSkills(t *testing.T) {
 		defer srv.Close()
 
 		cache := newDiskCache(t.TempDir())
-		skills := loadRemoteSkillsWithCache(t.Context(), srv.URL+"/", cache)
+		skills := loadRemoteSkills(t.Context(), srv.URL+"/", cache)
 		require.Len(t, skills, 1)
 
 		content, err := os.ReadFile(skills[0].FilePath)
@@ -99,7 +99,7 @@ func TestLoadRemoteSkills(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, newDiskCache(t.TempDir()))
+		skills := loadRemoteSkills(t.Context(), srv.URL, newDiskCache(t.TempDir()))
 		assert.Empty(t, skills)
 	})
 
@@ -110,7 +110,7 @@ func TestLoadRemoteSkills(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, newDiskCache(t.TempDir()))
+		skills := loadRemoteSkills(t.Context(), srv.URL, newDiskCache(t.TempDir()))
 		assert.Empty(t, skills)
 	})
 
@@ -121,7 +121,7 @@ func TestLoadRemoteSkills(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, newDiskCache(t.TempDir()))
+		skills := loadRemoteSkills(t.Context(), srv.URL, newDiskCache(t.TempDir()))
 		assert.Empty(t, skills)
 	})
 
@@ -129,7 +129,7 @@ func TestLoadRemoteSkills(t *testing.T) {
 		srv := httptest.NewServer(http.NotFoundHandler())
 		defer srv.Close()
 
-		skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, newDiskCache(t.TempDir()))
+		skills := loadRemoteSkills(t.Context(), srv.URL, newDiskCache(t.TempDir()))
 		assert.Empty(t, skills)
 	})
 
@@ -139,12 +139,12 @@ func TestLoadRemoteSkills(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, newDiskCache(t.TempDir()))
+		skills := loadRemoteSkills(t.Context(), srv.URL, newDiskCache(t.TempDir()))
 		assert.Empty(t, skills)
 	})
 
 	t.Run("unreachable server", func(t *testing.T) {
-		skills := loadRemoteSkillsWithCache(t.Context(), "http://127.0.0.1:1", newDiskCache(t.TempDir()))
+		skills := loadRemoteSkills(t.Context(), "http://127.0.0.1:1", newDiskCache(t.TempDir()))
 		assert.Empty(t, skills)
 	})
 
@@ -168,12 +168,12 @@ func TestLoadRemoteSkills(t *testing.T) {
 		cache := newDiskCache(t.TempDir())
 
 		// First load
-		skills1 := loadRemoteSkillsWithCache(t.Context(), srv.URL, cache)
+		skills1 := loadRemoteSkills(t.Context(), srv.URL, cache)
 		require.Len(t, skills1, 1)
 		assert.Equal(t, 2, fetchCount) // index.json + SKILL.md
 
 		// Second load — SKILL.md should be cached
-		skills2 := loadRemoteSkillsWithCache(t.Context(), srv.URL, cache)
+		skills2 := loadRemoteSkills(t.Context(), srv.URL, cache)
 		require.Len(t, skills2, 1)
 		assert.Equal(t, 3, fetchCount) // only index.json re-fetched, SKILL.md from cache
 	})
@@ -193,7 +193,7 @@ func TestLoadRemoteSkills(t *testing.T) {
 		defer srv.Close()
 
 		cache := newDiskCache(t.TempDir())
-		skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, cache)
+		skills := loadRemoteSkills(t.Context(), srv.URL, cache)
 		require.Len(t, skills, 1)
 		// Only SKILL.md should have been fetched, not the malicious paths
 	})
@@ -363,7 +363,7 @@ func TestLoadRemoteSkills_RejectsSkillNameTraversal(t *testing.T) {
 
 	cacheBase := t.TempDir()
 	cache := newDiskCache(cacheBase)
-	skills := loadRemoteSkillsWithCache(t.Context(), srv.URL, cache)
+	skills := loadRemoteSkills(t.Context(), srv.URL, cache)
 
 	require.Len(t, skills, 1)
 	assert.Equal(t, "ok-skill", skills[0].Name)

@@ -1,4 +1,4 @@
-package latest
+package v7
 
 import (
 	"github.com/goccy/go-yaml"

@@ -1,6 +1,6 @@
 // Package main runs project-specific linting cops using rubocop-go.
 //
-// Usage: go run ./lint ./...
+// Usage: go run ./lint [path...]
 package main
 
 import (
@@ -12,25 +12,32 @@ import (
 	"github.com/dgageot/rubocop-go/runner"
 )
 
-func main() {
-	cop.Register(&ConfigVersionImport{})
-	cops := cop.All()
-	fmt.Printf("Inspecting Go files with %d cop(s)\n", len(cops))
+// cops is the registry of project-specific cops, in declaration order.
+// To add a cop: implement cop.Cop and append it here.
+var cops = []cop.Cop{
+	&ConfigVersionImport{},
+	&ConfigPackageName{},
+	&ConfigVersionConstant{},
+	&LatestImportsPredecessor{},
+}
 
-	cfg := config.DefaultConfig()
-	r := runner.New(cops, cfg, os.Stdout)
+func main() {
+	for _, c := range cops {
+		cop.Register(c)
+	}
+	fmt.Printf("Inspecting Go files with %d cop(s)\n", len(cops))
 
 	paths := os.Args[1:]
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
 
+	r := runner.New(cop.All(), config.DefaultConfig(), os.Stdout)
 	offenseCount, err := r.Run(paths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
 	if offenseCount > 0 {
 		os.Exit(1)
 	}

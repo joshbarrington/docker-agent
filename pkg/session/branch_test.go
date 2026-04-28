@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/chat"
 )
 
 func TestGenerateBranchTitle(t *testing.T) {
@@ -137,5 +139,44 @@ func TestBranchSession(t *testing.T) {
 		assert.Len(t, branched.Messages, 2)
 		assert.Equal(t, "msg1", branched.Messages[0].Message.Message.Content)
 		assert.Equal(t, "msg2", branched.Messages[1].Message.Message.Content)
+	})
+
+	t.Run("deep-copies pointer fields in MultiContent", func(t *testing.T) {
+		// Regression test: the previous branch.go cloneChatMessage forgot to
+		// duplicate MessagePart.File, leaving branched sessions sharing the
+		// pointer with the parent. Mutating either side now must NOT affect
+		// the other.
+		parent := &Session{
+			Messages: []Item{NewMessageItem(&Message{
+				Message: chat.Message{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{
+							Type:     chat.MessagePartTypeImageURL,
+							ImageURL: &chat.MessageImageURL{URL: "http://parent"},
+						},
+						{
+							Type: chat.MessagePartTypeFile,
+							File: &chat.MessageFile{Path: "/tmp/parent.txt", MimeType: "text/plain"},
+						},
+					},
+				},
+			})},
+		}
+
+		branched, err := BranchSession(parent, 1)
+		require.NoError(t, err)
+		require.Len(t, branched.Messages, 1)
+
+		parts := branched.Messages[0].Message.Message.MultiContent
+		require.Len(t, parts, 2)
+
+		// Mutate branched copies; parent must be unaffected.
+		parts[0].ImageURL.URL = "http://branched"
+		parts[1].File.Path = "/tmp/branched.txt"
+
+		parentParts := parent.Messages[0].Message.Message.MultiContent
+		assert.Equal(t, "http://parent", parentParts[0].ImageURL.URL, "ImageURL must be deep-copied")
+		assert.Equal(t, "/tmp/parent.txt", parentParts[1].File.Path, "File must be deep-copied")
 	})
 }

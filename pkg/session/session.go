@@ -17,10 +17,20 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+// nowFn returns the current time. Indirected through a package-level variable
+// so that tests can install a deterministic clock via setNowForTest.
+var nowFn = time.Now
+
+// newIDFn returns a fresh session ID. Indirected through a package-level
+// variable so that tests can install a deterministic ID generator via
+// setIDForTest.
+var newIDFn = func() string { return uuid.New().String() }
+
 const (
 	// DefaultMaxOldToolCallTokens is the default maximum number of tokens to keep from tool call
 	// arguments and results. Older tool calls beyond this budget will have their
-	// content replaced with a placeholder. Tokens are approximated as len/4.
+	// content replaced with a placeholder. Tokens are approximated by
+	// approximateTokens (len/4).
 	DefaultMaxOldToolCallTokens = 40000
 
 	// toolContentPlaceholder is the text used to replace truncated tool content
@@ -112,7 +122,8 @@ type Session struct {
 
 	// MaxOldToolCallTokens is the maximum number of tokens to keep from old tool call
 	// arguments and results. Older tool calls beyond this budget will have their
-	// content replaced with a placeholder. Tokens are approximated as len/4.
+	// content replaced with a placeholder. Tokens are approximated by
+	// approximateTokens (len/4).
 	// Set to -1 to disable truncation (unlimited tool content).
 	// Default: 40000 (when not configured or set to 0).
 	MaxOldToolCallTokens int `json:"max_old_tool_call_tokens,omitempty"`
@@ -212,7 +223,7 @@ func UserMessage(content string, multiContent ...chat.MessagePart) *Message {
 			Role:         chat.MessageRoleUser,
 			Content:      content,
 			MultiContent: multiContent,
-			CreatedAt:    time.Now().Format(time.RFC3339),
+			CreatedAt:    nowFn().Format(time.RFC3339),
 		},
 	}
 }
@@ -229,7 +240,7 @@ func SystemMessage(content string) *Message {
 		Message: chat.Message{
 			Role:      chat.MessageRoleSystem,
 			Content:   content,
-			CreatedAt: time.Now().Format(time.RFC3339),
+			CreatedAt: nowFn().Format(time.RFC3339),
 		},
 	}
 }
@@ -317,18 +328,35 @@ func (e *EvalCriteria) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// deepCopyMessage returns a deep copy of a session Message.
+// cloneMessage returns a deep copy of a session Message.
 // It copies the inner chat.Message's slice and pointer fields so that the
 // returned value shares no mutable state with the original.
-func deepCopyMessage(m *Message) *Message {
+func cloneMessage(m *Message) *Message {
 	cp := *m
-	cp.Message = deepCopyChatMessage(m.Message)
+	cp.Message = cloneChatMessage(m.Message)
 	return &cp
 }
 
-// deepCopyChatMessage returns a deep copy of a chat.Message, duplicating
+// snapshotItems returns a copy of s.Messages safe to use without holding
+// s.mu. Each Message value is deep-copied so concurrent UpdateMessage calls
+// cannot mutate the snapshot; non-Message fields (Summary, SubSession, Cost,
+// FirstKeptEntry) are shallow-copied since they are not mutated in place.
+func (s *Session) snapshotItems() []Item {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]Item, len(s.Messages))
+	for i, item := range s.Messages {
+		items[i] = item
+		if item.Message != nil {
+			items[i].Message = cloneMessage(item.Message)
+		}
+	}
+	return items
+}
+
+// cloneChatMessage returns a deep copy of a chat.Message, duplicating
 // all slice and pointer fields that would otherwise alias the original.
-func deepCopyChatMessage(m chat.Message) chat.Message {
+func cloneChatMessage(m chat.Message) chat.Message {
 	if m.MultiContent != nil {
 		orig := m.MultiContent
 		m.MultiContent = make([]chat.MessagePart, len(orig))
@@ -410,16 +438,7 @@ func (s *Session) AllowedDirectories() []string {
 
 // GetAllMessages extracts all messages from the session, including from sub-sessions
 func (s *Session) GetAllMessages() []Message {
-	s.mu.RLock()
-	items := make([]Item, len(s.Messages))
-	for i, item := range s.Messages {
-		if item.Message != nil {
-			items[i] = Item{Message: deepCopyMessage(item.Message)}
-		} else {
-			items[i] = item
-		}
-	}
-	s.mu.RUnlock()
+	items := s.snapshotItems()
 
 	var messages []Message
 	for _, item := range items {
@@ -721,8 +740,8 @@ func (s *Session) OwnCost() float64 {
 // New creates a new agent session
 func New(opts ...Opt) *Session {
 	s := &Session{
-		ID:              uuid.New().String(),
-		CreatedAt:       time.Now(),
+		ID:              newIDFn(),
+		CreatedAt:       nowFn(),
 		SendUserMessage: true,
 	}
 
@@ -843,7 +862,7 @@ func buildSessionSummaryMessages(items []Item) ([]chat.Message, int) {
 		messages = append(messages, chat.Message{
 			Role:      chat.MessageRoleUser,
 			Content:   "Session Summary: " + items[lastSummaryIndex].Summary,
-			CreatedAt: time.Now().Format(time.RFC3339),
+			CreatedAt: nowFn().Format(time.RFC3339),
 		})
 	}
 
@@ -870,16 +889,7 @@ func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Messag
 
 	// Take a snapshot of Messages under the lock, copying Message structs
 	// to avoid racing with UpdateMessage which may modify the pointed-to objects.
-	s.mu.RLock()
-	items := make([]Item, len(s.Messages))
-	for i, item := range s.Messages {
-		if item.Message != nil {
-			items[i] = Item{Message: deepCopyMessage(item.Message), Summary: item.Summary, SubSession: item.SubSession, Cost: item.Cost}
-		} else {
-			items[i] = item
-		}
-	}
-	s.mu.RUnlock()
+	items := s.snapshotItems()
 
 	// Build session summary messages (vary per session)
 	summaryMessages, startIndex := buildSessionSummaryMessages(items)
@@ -1127,6 +1137,15 @@ func sanitizeToolCalls(messages []chat.Message) []chat.Message {
 	return out
 }
 
+// approximateTokens returns a coarse token count for a string, using the
+// industry rule-of-thumb of ~4 characters per token. The heuristic is good
+// enough for budgeting tool-content truncation; we do not need provider-exact
+// counts here. Centralised so tests can reason about budgets without
+// hard-coding the divisor.
+func approximateTokens(s string) int {
+	return len(s) / 4
+}
+
 // truncateOldToolContent replaces tool results with placeholders for older
 // messages that exceed the token budget. It processes messages from newest to
 // oldest, keeping recent tool content intact while truncating older content
@@ -1145,7 +1164,7 @@ func truncateOldToolContent(messages []chat.Message, maxTokens int) []chat.Messa
 		msg := &result[i]
 
 		if msg.Role == chat.MessageRoleTool {
-			tokens := len(msg.Content) / 4
+			tokens := approximateTokens(msg.Content)
 			if tokenBudget >= tokens {
 				tokenBudget -= tokens
 			} else {

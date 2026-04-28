@@ -28,12 +28,25 @@ type Migration struct {
 
 // MigrationManager handles database migrations
 type MigrationManager struct {
-	db *sql.DB
+	db         *sql.DB
+	migrations []Migration
 }
 
-// NewMigrationManager creates a new migration manager
+// NewMigrationManager creates a migration manager that runs the production
+// migration list against db. Tests that need to drive the manager with a
+// synthetic migration list should use NewMigrationManagerWithMigrations
+// instead.
 func NewMigrationManager(db *sql.DB) *MigrationManager {
-	return &MigrationManager{db: db}
+	return NewMigrationManagerWithMigrations(db, getAllMigrations())
+}
+
+// NewMigrationManagerWithMigrations creates a migration manager bound to the
+// supplied migration list. The list is treated as ordered by ID; callers must
+// not mutate it after construction. Intended primarily for tests that want to
+// exercise specific migration paths without dragging in the full production
+// list.
+func NewMigrationManagerWithMigrations(db *sql.DB, migrations []Migration) *MigrationManager {
+	return &MigrationManager{db: db, migrations: migrations}
 }
 
 // InitializeMigrations sets up the migrations table and runs pending migrations
@@ -75,8 +88,10 @@ func (m *MigrationManager) createMigrationsTable(ctx context.Context) error {
 // doesn't know about, which indicates the database was created by a newer version.
 // This produces a clear error instead of cryptic SQL failures from schema mismatches.
 func (m *MigrationManager) checkForUnknownMigrations(ctx context.Context) error {
-	known := getAllMigrations()
-	maxKnownID := known[len(known)-1].ID
+	if len(m.migrations) == 0 {
+		return nil
+	}
+	maxKnownID := m.migrations[len(m.migrations)-1].ID
 
 	var maxAppliedID int
 	err := m.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM migrations").Scan(&maxAppliedID)
@@ -97,9 +112,7 @@ func (m *MigrationManager) checkForUnknownMigrations(ctx context.Context) error 
 
 // RunPendingMigrations executes all migrations that haven't been applied yet
 func (m *MigrationManager) RunPendingMigrations(ctx context.Context) error {
-	migrations := getAllMigrations()
-
-	for _, migration := range migrations {
+	for _, migration := range m.migrations {
 		applied, err := m.isMigrationApplied(ctx, migration.Name)
 		if err != nil {
 			return fmt.Errorf("failed to check if migration %s is applied: %w", migration.Name, err)

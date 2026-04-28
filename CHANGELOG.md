@@ -3,6 +3,89 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.53.0] - 2026-04-28
+
+This release adds OpenAI-compatible API server functionality, skill model overrides, and response caching, along with extensive refactoring to improve code organization and testability.
+
+## What's New
+
+- Adds `docker agent serve chat` command that exposes agents through an OpenAI-compatible HTTP server
+- Adds configurable response cache for agents to skip model calls for repeated questions
+- Adds skill model override capability allowing fork skills to specify different models via `model:` field in SKILL.md frontmatter
+- Adds g/G keybindings to scroll messages view (jump to top/bottom)
+- Adds 10 new builtin hook events including lifecycle events, compaction events, and observability events
+- Adds `type: model` hook handler for LLM-as-judge functionality
+
+## Improvements
+
+- Switches Anthropic Opus 4.6/4.7 to adaptive thinking when token-based budgets are configured
+- Improves file path handling for sub-agent sessions by propagating user-attached files and encouraging absolute paths
+- Improves error messages for HTTP 400 failures with structured provider error details
+
+## Bug Fixes
+
+- Fixes Copilot integration by adding required `Copilot-Integration-Id` header for github-copilot provider
+- Fixes crash when opening sessions with empty configuration files
+- Fixes session_start hook output appearing as user messages in transcript
+- Fixes TUI bottom slack clearing after thinking text fades out
+- Fixes race conditions in skill model overrides and response cache handling
+
+## Technical Changes
+
+- Extracts hooks builtins from runtime into separate package
+- Extracts tool execution, compaction, and delegation logic into focused sub-packages
+- Consolidates hook orchestration and simplifies executor caching
+- Improves testability across runtime, session, provider, and TUI packages
+- Replaces PersistentRuntime decorator with EventObserver pattern
+- Updates multiple dependencies including Anthropic SDK, AWS Smithy, and various UI libraries
+
+### Pull Requests
+
+- [#2475](https://github.com/docker/docker-agent/pull/2475) - fix(openai): send Copilot-Integration-Id header for github-copilot
+- [#2510](https://github.com/docker/docker-agent/pull/2510) - feat: add `docker agent serve chat` command (OpenAI-compatible API)
+- [#2520](https://github.com/docker/docker-agent/pull/2520) - docs: update CHANGELOG.md for v1.52.0
+- [#2521](https://github.com/docker/docker-agent/pull/2521) - refactor(hooks): extract builtins from pkg/runtime into pkg/hooks/builtins
+- [#2522](https://github.com/docker/docker-agent/pull/2522) - refactor(hooks): simplify package while preserving features
+- [#2523](https://github.com/docker/docker-agent/pull/2523) - refactor(runtime): consolidate hook orchestration and cache executors
+- [#2524](https://github.com/docker/docker-agent/pull/2524) - refactor(skills): move fork-skill validation into SkillsToolset
+- [#2525](https://github.com/docker/docker-agent/pull/2525) - Skills: allow fork skills to override the model
+- [#2526](https://github.com/docker/docker-agent/pull/2526) - refactor(hooks/builtins): one file per builtin + simplify registration
+- [#2527](https://github.com/docker/docker-agent/pull/2527) - fix(skills): unbreak main after fork-skill refactor merge
+- [#2528](https://github.com/docker/docker-agent/pull/2528) - feat(tui): add g/G keybindings to scroll messages view
+- [#2529](https://github.com/docker/docker-agent/pull/2529) - refactor(hooks/builtins): inline GetEnvironmentInfo + simplify package
+- [#2530](https://github.com/docker/docker-agent/pull/2530) - refactor(hooks/builtins): inline & simplify add_prompt_files
+- [#2531](https://github.com/docker/docker-agent/pull/2531) - refactor(hooks): simplify caching, dispatch flow, and notification helpers
+- [#2532](https://github.com/docker/docker-agent/pull/2532) - Inherit user-attached files in sub-agent sessions
+- [#2533](https://github.com/docker/docker-agent/pull/2533) - fix(runtime): don't persist session_start hook output as a session message
+- [#2534](https://github.com/docker/docker-agent/pull/2534) - refactor(hooks): drop runtime shadow types and tighten the executor
+- [#2535](https://github.com/docker/docker-agent/pull/2535) - refactor(runtime): extract sub-session orchestration
+- [#2536](https://github.com/docker/docker-agent/pull/2536) - feat(agent): add a configurable response cache
+- [#2537](https://github.com/docker/docker-agent/pull/2537) - feat(hooks): add before_compaction and after_compaction events
+- [#2538](https://github.com/docker/docker-agent/pull/2538) - feat(hooks): add 6 builtin hooks + widen post_tool_use / before_llm_call contract
+- [#2539](https://github.com/docker/docker-agent/pull/2539) - refactor(runtime): drop unused receiver from handleStream
+- [#2540](https://github.com/docker/docker-agent/pull/2540) - feat(hooks): lifecycle events, per-hook options, and event-spec refactor
+- [#2541](https://github.com/docker/docker-agent/pull/2541) - refactor(runtime): extract model-fallback chain into fallbackExecutor
+- [#2542](https://github.com/docker/docker-agent/pull/2542) - feat(hooks): add three observability events around runtime transitions
+- [#2543](https://github.com/docker/docker-agent/pull/2543) - fix(tui): clear bottom slack after thinking text fades out
+- [#2544](https://github.com/docker/docker-agent/pull/2544) - refactor(tui): simplify components, drop dead code, consolidate helpers
+- [#2545](https://github.com/docker/docker-agent/pull/2545) - refactor(runtime): extract tool execution into pkg/runtime/toolexec
+- [#2546](https://github.com/docker/docker-agent/pull/2546) - feat(hooks): add 'type: model' hook and integrate pre_tool_use into approval flow
+- [#2547](https://github.com/docker/docker-agent/pull/2547) - refactor(provider): improve testability and split provider.go
+- [#2548](https://github.com/docker/docker-agent/pull/2548) - feat(hooks): add 4 new hook events to match Claude Code / OpenCode / pi
+- [#2549](https://github.com/docker/docker-agent/pull/2549) - feat(modelerrors): surface structured provider error details on non-2xx responses
+- [#2550](https://github.com/docker/docker-agent/pull/2550) - refactor(session): improve testability and simplify the session package
+- [#2551](https://github.com/docker/docker-agent/pull/2551) - tui: improve testability and simplify code
+- [#2552](https://github.com/docker/docker-agent/pull/2552) - refactor(runtime): replace PersistentRuntime decorator with EventObserver
+- [#2553](https://github.com/docker/docker-agent/pull/2553) - speed up PR image builds
+- [#2554](https://github.com/docker/docker-agent/pull/2554) - refactor(runtime): improve testability and simplify package structure
+- [#2555](https://github.com/docker/docker-agent/pull/2555) - docs: document all builtin hooks in schema and hooks page
+- [#2556](https://github.com/docker/docker-agent/pull/2556) - refactor(tui): reduce duplication across picker dialogs
+- [#2560](https://github.com/docker/docker-agent/pull/2560) - Add context to todo storage methods
+- [#2561](https://github.com/docker/docker-agent/pull/2561) - log history init failure via slog instead of stderr
+- [#2562](https://github.com/docker/docker-agent/pull/2562) - Bump direct Go dependencies
+- [#2563](https://github.com/docker/docker-agent/pull/2563) - anthropic: switch opus 4.6/4.7 token thinking budgets to adaptive
+
+
 ## [v1.52.0] - 2026-04-27
 
 This release adds file picker hotkeys, improves message handling consistency, and introduces an extensible hooks system with new lifecycle events.
@@ -2241,3 +2324,5 @@ This release improves the terminal user interface with better error handling and
 [v1.51.0]: https://github.com/docker/docker-agent/releases/tag/v1.51.0
 
 [v1.52.0]: https://github.com/docker/docker-agent/releases/tag/v1.52.0
+
+[v1.53.0]: https://github.com/docker/docker-agent/releases/tag/v1.53.0

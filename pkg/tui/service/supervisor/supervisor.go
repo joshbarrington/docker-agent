@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	tea "charm.land/bubbletea/v2"
@@ -166,9 +167,7 @@ func (s *Supervisor) handleRuntimeEvent(sessionID string, msg tea.Msg) {
 	case *runtime.StreamStoppedEvent:
 		runner.IsRunning = false
 		runner.PendingEvent = nil // Clear any pending attention event since stream ended
-		if runner.NeedsAttn {
-			runner.NeedsAttn = false
-		}
+		runner.NeedsAttn = false
 		s.notifyTabsUpdated()
 
 	case *runtime.SessionTitleEvent:
@@ -234,12 +233,7 @@ func (s *Supervisor) buildTabInfoLocked() []messages.TabInfo {
 
 // activeIndexLocked returns the index of the active tab (must be called with lock held).
 func (s *Supervisor) activeIndexLocked() int {
-	for i, id := range s.order {
-		if id == s.activeID {
-			return i
-		}
-	}
-	return 0
+	return max(0, slices.Index(s.order, s.activeID))
 }
 
 // SwitchTo switches to a different session.
@@ -354,14 +348,14 @@ func (s *Supervisor) Spawner() SessionSpawner {
 }
 
 // CloseSession closes a session and removes it from the supervisor.
-func (s *Supervisor) CloseSession(sessionID string) (nextActiveID string) {
+func (s *Supervisor) CloseSession(sessionID string) string {
 	s.mu.Lock()
 
 	runner, ok := s.runners[sessionID]
 	if !ok {
-		nextActiveID = s.activeID
+		activeID := s.activeID
 		s.mu.Unlock()
-		return nextActiveID
+		return activeID
 	}
 
 	// Cancel the session context
@@ -375,27 +369,23 @@ func (s *Supervisor) CloseSession(sessionID string) (nextActiveID string) {
 
 	// Remove from order slice, remembering where it was.
 	closedIdx := 0
-	for i, id := range s.order {
-		if id == sessionID {
-			closedIdx = i
-			s.order = append(s.order[:i], s.order[i+1:]...)
-			break
-		}
+	if i := slices.Index(s.order, sessionID); i >= 0 {
+		closedIdx = i
+		s.order = slices.Delete(s.order, i, i+1)
 	}
 
 	// If this was the active session, switch to the previous tab (or the
 	// first one when closing the first tab).
 	if s.activeID == sessionID {
-		if len(s.order) > 0 {
-			prevIdx := max(closedIdx-1, 0)
-			s.activeID = s.order[prevIdx]
-		} else {
+		if len(s.order) == 0 {
 			s.activeID = ""
+		} else {
+			s.activeID = s.order[max(closedIdx-1, 0)]
 		}
 	}
 
 	s.notifyTabsUpdated()
-	nextActiveID = s.activeID
+	activeID := s.activeID
 	s.mu.Unlock()
 
 	// Run cleanup outside the lock so it can't deadlock.
@@ -403,7 +393,7 @@ func (s *Supervisor) CloseSession(sessionID string) (nextActiveID string) {
 		go cleanup()
 	}
 
-	return nextActiveID
+	return activeID
 }
 
 // Count returns the number of sessions.
@@ -430,8 +420,8 @@ func (s *Supervisor) ReorderTab(fromIdx, toIdx int) {
 	}
 
 	id := s.order[fromIdx]
-	s.order = append(s.order[:fromIdx], s.order[fromIdx+1:]...)
-	s.order = append(s.order[:toIdx], append([]string{id}, s.order[toIdx:]...)...)
+	s.order = slices.Delete(s.order, fromIdx, fromIdx+1)
+	s.order = slices.Insert(s.order, toIdx, id)
 	s.notifyTabsUpdated()
 }
 

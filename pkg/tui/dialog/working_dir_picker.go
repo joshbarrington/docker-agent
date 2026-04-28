@@ -417,11 +417,8 @@ func (d *workingDirPickerDialog) cycleSectionBackward() { d.cycleSection(-1) }
 
 func (d *workingDirPickerDialog) cycleSection(delta int) {
 	n := len(dirPickerSectionOrder)
-	for i, s := range dirPickerSectionOrder {
-		if s == d.section {
-			d.section = dirPickerSectionOrder[(i+delta+n)%n]
-			break
-		}
+	if i := slices.Index(dirPickerSectionOrder, d.section); i >= 0 {
+		d.section = dirPickerSectionOrder[(i+delta+n)%n]
 	}
 	d.updateSectionFocus()
 }

@@ -1151,9 +1151,9 @@ func (m *model) AddLoadingMessage(description string) tea.Cmd {
 func (m *model) ReplaceLoadingWithUser(content string, sessionPos int) tea.Cmd {
 	for i := len(m.messages) - 1; i >= 0; i-- {
 		if m.messages[i].Type == types.MessageTypeLoading {
-			m.messages = append(m.messages[:i], m.messages[i+1:]...)
+			m.messages = slices.Delete(m.messages, i, i+1)
 			if i < len(m.views) {
-				m.views = append(m.views[:i], m.views[i+1:]...)
+				m.views = slices.Delete(m.views, i, i+1)
 			}
 			m.invalidateAllItems()
 			break

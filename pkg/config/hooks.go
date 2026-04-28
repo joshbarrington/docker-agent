@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -10,55 +11,41 @@ import (
 // Each string is treated as a shell command to run.
 // Empty strings are silently skipped.
 func HooksFromCLI(preToolUse, postToolUse, sessionStart, sessionEnd, onUserInput []string) *latest.HooksConfig {
-	hooks := &latest.HooksConfig{}
-
-	if len(preToolUse) > 0 {
-		var defs []latest.HookDefinition
-		for _, cmd := range preToolUse {
-			if strings.TrimSpace(cmd) == "" {
-				continue
-			}
-			defs = append(defs, latest.HookDefinition{Type: "command", Command: cmd})
-		}
-		if len(defs) > 0 {
-			hooks.PreToolUse = []latest.HookMatcherConfig{{Hooks: defs}}
-		}
-	}
-
-	if len(postToolUse) > 0 {
-		var defs []latest.HookDefinition
-		for _, cmd := range postToolUse {
-			if strings.TrimSpace(cmd) == "" {
-				continue
-			}
-			defs = append(defs, latest.HookDefinition{Type: "command", Command: cmd})
-		}
-		if len(defs) > 0 {
-			hooks.PostToolUse = []latest.HookMatcherConfig{{Hooks: defs}}
-		}
-	}
-
-	for _, cmd := range sessionStart {
-		if strings.TrimSpace(cmd) != "" {
-			hooks.SessionStart = append(hooks.SessionStart, latest.HookDefinition{Type: "command", Command: cmd})
-		}
-	}
-	for _, cmd := range sessionEnd {
-		if strings.TrimSpace(cmd) != "" {
-			hooks.SessionEnd = append(hooks.SessionEnd, latest.HookDefinition{Type: "command", Command: cmd})
-		}
-	}
-	for _, cmd := range onUserInput {
-		if strings.TrimSpace(cmd) != "" {
-			hooks.OnUserInput = append(hooks.OnUserInput, latest.HookDefinition{Type: "command", Command: cmd})
-		}
+	hooks := &latest.HooksConfig{
+		PreToolUse:   matcherFromCommands(preToolUse),
+		PostToolUse:  matcherFromCommands(postToolUse),
+		SessionStart: defsFromCommands(sessionStart),
+		SessionEnd:   defsFromCommands(sessionEnd),
+		OnUserInput:  defsFromCommands(onUserInput),
 	}
 
 	if hooks.IsEmpty() {
 		return nil
 	}
-
 	return hooks
+}
+
+// defsFromCommands turns a list of CLI shell commands into hook definitions,
+// skipping any blank entries.
+func defsFromCommands(cmds []string) []latest.HookDefinition {
+	var defs []latest.HookDefinition
+	for _, cmd := range cmds {
+		if strings.TrimSpace(cmd) == "" {
+			continue
+		}
+		defs = append(defs, latest.HookDefinition{Type: "command", Command: cmd})
+	}
+	return defs
+}
+
+// matcherFromCommands wraps the result of defsFromCommands in a single
+// HookMatcherConfig so the commands apply to all tools (empty matcher).
+func matcherFromCommands(cmds []string) []latest.HookMatcherConfig {
+	defs := defsFromCommands(cmds)
+	if len(defs) == 0 {
+		return nil
+	}
+	return []latest.HookMatcherConfig{{Hooks: defs}}
 }
 
 // MergeHooks merges CLI hooks into an existing HooksConfig.
@@ -74,18 +61,18 @@ func MergeHooks(base, cli *latest.HooksConfig) *latest.HooksConfig {
 	}
 
 	merged := &latest.HooksConfig{
-		PreToolUse:      append(append([]latest.HookMatcherConfig{}, base.PreToolUse...), cli.PreToolUse...),
-		PostToolUse:     append(append([]latest.HookMatcherConfig{}, base.PostToolUse...), cli.PostToolUse...),
-		SessionStart:    append(append([]latest.HookDefinition{}, base.SessionStart...), cli.SessionStart...),
-		TurnStart:       append(append([]latest.HookDefinition{}, base.TurnStart...), cli.TurnStart...),
-		BeforeLLMCall:   append(append([]latest.HookDefinition{}, base.BeforeLLMCall...), cli.BeforeLLMCall...),
-		AfterLLMCall:    append(append([]latest.HookDefinition{}, base.AfterLLMCall...), cli.AfterLLMCall...),
-		SessionEnd:      append(append([]latest.HookDefinition{}, base.SessionEnd...), cli.SessionEnd...),
-		OnUserInput:     append(append([]latest.HookDefinition{}, base.OnUserInput...), cli.OnUserInput...),
-		Stop:            append(append([]latest.HookDefinition{}, base.Stop...), cli.Stop...),
-		Notification:    append(append([]latest.HookDefinition{}, base.Notification...), cli.Notification...),
-		OnError:         append(append([]latest.HookDefinition{}, base.OnError...), cli.OnError...),
-		OnMaxIterations: append(append([]latest.HookDefinition{}, base.OnMaxIterations...), cli.OnMaxIterations...),
+		PreToolUse:      slices.Concat(base.PreToolUse, cli.PreToolUse),
+		PostToolUse:     slices.Concat(base.PostToolUse, cli.PostToolUse),
+		SessionStart:    slices.Concat(base.SessionStart, cli.SessionStart),
+		TurnStart:       slices.Concat(base.TurnStart, cli.TurnStart),
+		BeforeLLMCall:   slices.Concat(base.BeforeLLMCall, cli.BeforeLLMCall),
+		AfterLLMCall:    slices.Concat(base.AfterLLMCall, cli.AfterLLMCall),
+		SessionEnd:      slices.Concat(base.SessionEnd, cli.SessionEnd),
+		OnUserInput:     slices.Concat(base.OnUserInput, cli.OnUserInput),
+		Stop:            slices.Concat(base.Stop, cli.Stop),
+		Notification:    slices.Concat(base.Notification, cli.Notification),
+		OnError:         slices.Concat(base.OnError, cli.OnError),
+		OnMaxIterations: slices.Concat(base.OnMaxIterations, cli.OnMaxIterations),
 	}
 	return merged
 }

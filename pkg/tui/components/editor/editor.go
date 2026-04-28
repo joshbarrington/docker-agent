@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -1506,7 +1507,7 @@ func (e *editor) removeLastNAttachments(n int) {
 		if !e.attachments[i].isTemp {
 			// Strip the placeholder text ("@/path/file.png ") that AttachFile inserted
 			value = strings.Replace(value, e.attachments[i].placeholder+" ", "", 1)
-			e.attachments = append(e.attachments[:i], e.attachments[i+1:]...)
+			e.attachments = slices.Delete(e.attachments, i, i+1)
 			removed++
 		}
 	}

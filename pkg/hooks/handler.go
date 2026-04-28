@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/shellpath"
@@ -150,27 +152,26 @@ func hookEnv(base []string, overrides map[string]string) []string {
 	if len(overrides) == 0 {
 		return base
 	}
-	env := append([]string{}, base...)
+	env := slices.Clone(base)
 	if len(env) == 0 {
 		env = os.Environ()
 	}
+
+	// Map each existing key to its position so overrides can replace in place.
 	index := make(map[string]int, len(env))
 	for i, entry := range env {
-		for j, ch := range entry {
-			if ch == '=' {
-				index[entry[:j]] = i
-				break
-			}
+		if key, _, ok := strings.Cut(entry, "="); ok {
+			index[key] = i
 		}
 	}
+
 	for key, value := range overrides {
 		entry := key + "=" + value
 		if i, ok := index[key]; ok {
 			env[i] = entry
-			continue
+		} else {
+			env = append(env, entry)
 		}
-		index[key] = len(env)
-		env = append(env, entry)
 	}
 	return env
 }

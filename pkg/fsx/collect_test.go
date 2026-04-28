@@ -3,7 +3,7 @@ package fsx
 import (
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -379,7 +379,7 @@ func TestCollectFiles_SortedOutput(t *testing.T) {
 
 	// Note: CollectFiles doesn't guarantee order, but results should be consistent
 	// Sort for comparison
-	sort.Strings(got)
+	slices.Sort(got)
 	assert.True(t, strings.HasSuffix(got[0], "a.go"))
 	assert.True(t, strings.HasSuffix(got[1], "m.go"))
 	assert.True(t, strings.HasSuffix(got[2], "z.go"))

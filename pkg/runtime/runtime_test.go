@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -2405,7 +2406,7 @@ func (r *recordingProvider) CreateChatCompletionStream(_ context.Context, _ []ch
 	defer r.mu.Unlock()
 
 	// Record the tool names for this call.
-	r.recordedCalls = append(r.recordedCalls, append([]tools.Tool{}, toolList...))
+	r.recordedCalls = append(r.recordedCalls, slices.Clone(toolList))
 
 	if r.callIdx >= len(r.streams) {
 		return newStreamBuilder().AddStopWithUsage(1, 1).Build(), nil

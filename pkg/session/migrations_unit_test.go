@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,7 +157,7 @@ func TestMigrationManager_CheckForUnknownMigrations_AllowsEqualOrOlderDB(t *test
 	require.NoError(t, NewMigrationManagerWithMigrations(db, migrations).checkForUnknownMigrations(t.Context()))
 
 	// Newer binary that knows about more migrations than the DB has applied: fine.
-	newer := append([]Migration{}, migrations...)
+	newer := slices.Clone(migrations)
 	newer = append(newer, Migration{ID: 2, Name: "002_b", UpSQL: `CREATE TABLE b (id INTEGER)`})
 	require.NoError(t, NewMigrationManagerWithMigrations(db, newer).checkForUnknownMigrations(t.Context()))
 }

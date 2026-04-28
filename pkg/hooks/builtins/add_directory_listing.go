@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/hooks"
@@ -56,7 +56,7 @@ func addDirectoryListing(_ context.Context, in *hooks.Input, _ []string) (*hooks
 	if len(names) == 0 {
 		return nil, nil
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 
 	truncated := 0
 	if len(names) > maxDirectoryEntries {

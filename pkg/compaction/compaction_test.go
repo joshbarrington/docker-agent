@@ -1,6 +1,7 @@
 package compaction
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -160,6 +161,118 @@ func TestShouldCompact(t *testing.T) {
 			t.Parallel()
 			got := ShouldCompact(tt.input, tt.output, tt.added, tt.contextLimit)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestSplitIndexForKeep(t *testing.T) {
+	t.Parallel()
+
+	msg := func(role chat.MessageRole, content string) chat.Message {
+		return chat.Message{Role: role, Content: content}
+	}
+
+	tests := []struct {
+		name      string
+		messages  []chat.Message
+		maxTokens int64
+		wantSplit int // expected split index
+	}{
+		{
+			name:      "empty messages",
+			messages:  nil,
+			maxTokens: 1000,
+			wantSplit: 0,
+		},
+		{
+			name: "all messages fit in keep budget - returned len(messages) signals 'compact everything, keep nothing' (the manual /compact contract)",
+			messages: []chat.Message{
+				msg(chat.MessageRoleUser, "short"),
+				msg(chat.MessageRoleAssistant, "short"),
+			},
+			maxTokens: 100_000,
+			wantSplit: 2, // all fit → messages[:2] is everything to compact, messages[2:] is empty (nothing kept)
+		},
+		{
+			name: "recent messages kept, older ones compacted",
+			messages: []chat.Message{
+				msg(chat.MessageRoleUser, strings.Repeat("a", 40000)),      // ~10005 tokens
+				msg(chat.MessageRoleAssistant, strings.Repeat("b", 40000)), // ~10005 tokens
+				msg(chat.MessageRoleUser, strings.Repeat("c", 40000)),      // ~10005 tokens
+				msg(chat.MessageRoleAssistant, strings.Repeat("d", 40000)), // ~10005 tokens
+				msg(chat.MessageRoleUser, strings.Repeat("e", 40000)),      // ~10005 tokens
+				msg(chat.MessageRoleAssistant, strings.Repeat("f", 40000)), // ~10005 tokens
+			},
+			maxTokens: 20_100, // enough for exactly 2 messages
+			wantSplit: 4,      // last 2 messages are kept
+		},
+		{
+			name: "snap to assistant boundary even when a tool result fits",
+			messages: []chat.Message{
+				msg(chat.MessageRoleUser, "u1"),
+				msg(chat.MessageRoleAssistant, "a1"),
+				msg(chat.MessageRoleTool, "t1"),
+			},
+			maxTokens: 100_000, // everything fits
+			wantSplit: 3,       // all fit → compact everything (returned len)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := SplitIndexForKeep(tt.messages, tt.maxTokens)
+			assert.Equal(t, tt.wantSplit, got)
+		})
+	}
+}
+
+func TestFirstIndexInBudget(t *testing.T) {
+	t.Parallel()
+
+	msg := func(role chat.MessageRole, content string) chat.Message {
+		return chat.Message{Role: role, Content: content}
+	}
+
+	tests := []struct {
+		name      string
+		messages  []chat.Message
+		budget    int64
+		wantFirst int
+	}{
+		{
+			name:      "empty",
+			messages:  nil,
+			budget:    1000,
+			wantFirst: 0,
+		},
+		{
+			name: "everything fits",
+			messages: []chat.Message{
+				msg(chat.MessageRoleUser, "short"),
+				msg(chat.MessageRoleAssistant, "short"),
+			},
+			budget:    1000,
+			wantFirst: 0,
+		},
+		{
+			name: "tight budget keeps tail starting on a user/assistant turn",
+			messages: []chat.Message{
+				msg(chat.MessageRoleUser, strings.Repeat("a", 4000)),
+				msg(chat.MessageRoleAssistant, strings.Repeat("b", 4000)),
+				msg(chat.MessageRoleUser, strings.Repeat("c", 4000)),
+				msg(chat.MessageRoleAssistant, strings.Repeat("d", 4000)),
+			},
+			budget:    2100, // ~2 messages worth
+			wantFirst: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := FirstIndexInBudget(tt.messages, tt.budget)
+			assert.Equal(t, tt.wantFirst, got)
 		})
 	}
 }

@@ -1,19 +1,32 @@
 // Package builtins contains the stock in-process hook implementations
-// shipped with docker-agent: add_date, add_environment_info, and
-// add_prompt_files.
+// shipped with docker-agent.
 //
-// They can be referenced explicitly from a hook YAML entry using
-// `{type: builtin, command: "<name>"}`. The runtime also auto-injects
-// them when the corresponding agent flags (AddDate, AddEnvironmentInfo,
-// AddPromptFiles) are set.
+// Available builtins:
 //
-// AddDate and AddPromptFiles target turn_start so they recompute every
-// turn. AddEnvironmentInfo targets session_start because cwd / OS / arch
-// don't change during a session.
+//   - add_date              (turn_start)      — today's date
+//   - add_environment_info  (session_start)   — cwd, git, OS, arch
+//   - add_prompt_files      (turn_start)      — contents of prompt files
+//   - add_git_status        (turn_start)      — `git status --short --branch`
+//   - add_git_diff          (turn_start)      — `git diff --stat` (or full)
+//   - add_directory_listing (session_start)   — top-level entries of cwd
+//   - add_user_info         (session_start)   — current OS user and host
+//   - add_recent_commits    (session_start)   — `git log --oneline -n N`
+//   - max_iterations        (before_llm_call) — hard stop after N model calls
 //
-// Each builtin lives in its own file (add_date.go, add_environment_info.go,
-// add_prompt_files.go) along with its registered-name constant; this file
-// holds the shared registration plumbing.
+// Reference any of them from a hook YAML entry as
+// `{type: builtin, command: "<name>"}`. The runtime additionally
+// auto-injects add_date / add_environment_info / add_prompt_files
+// from the matching agent flags.
+//
+// turn_start builtins recompute every turn (date, git state).
+// session_start builtins run once per session for context that's
+// stable for its duration. max_iterations is stateful: its
+// per-session counter lives on the [State] returned by [Register];
+// the runtime clears it via [State.ClearSession] from session_end.
+//
+// LLM-as-a-judge hooks are NOT shipped here: write `type: model` with
+// `schema: pre_tool_use_decision` instead — see
+// pkg/hooks/shape_pre_tool_use_decision.go and examples/llm_judge.yaml.
 package builtins
 
 import (
@@ -22,13 +35,42 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 )
 
-// Register installs the stock builtin hooks on r.
-func Register(r *hooks.Registry) error {
-	return errors.Join(
+// State holds the per-runtime state of the stateful builtins.
+// It is returned by [Register] so callers can clear per-session
+// entries on session_end. Stateless builtins don't appear here.
+type State struct {
+	maxIterations *maxIterationsBuiltin
+}
+
+// ClearSession drops per-session state from every stateful builtin.
+// A nil receiver is a no-op.
+func (s *State) ClearSession(sessionID string) {
+	if s == nil || sessionID == "" {
+		return
+	}
+	s.maxIterations.clearSession(sessionID)
+}
+
+// Register installs the stock builtin hooks on r and returns a [State]
+// handle the caller must use to clear per-session state on session_end.
+func Register(r *hooks.Registry) (*State, error) {
+	state := &State{
+		maxIterations: newMaxIterations(),
+	}
+	if err := errors.Join(
 		r.RegisterBuiltin(AddDate, addDate),
 		r.RegisterBuiltin(AddEnvironmentInfo, addEnvironmentInfo),
 		r.RegisterBuiltin(AddPromptFiles, addPromptFiles),
-	)
+		r.RegisterBuiltin(AddGitStatus, addGitStatus),
+		r.RegisterBuiltin(AddGitDiff, addGitDiff),
+		r.RegisterBuiltin(AddDirectoryListing, addDirectoryListing),
+		r.RegisterBuiltin(AddUserInfo, addUserInfo),
+		r.RegisterBuiltin(AddRecentCommits, addRecentCommits),
+		r.RegisterBuiltin(MaxIterations, state.maxIterations.hook),
+	); err != nil {
+		return nil, err
+	}
+	return state, nil
 }
 
 // AgentDefaults captures the agent-level flags that map onto stock
@@ -39,16 +81,9 @@ type AgentDefaults struct {
 	AddPromptFiles     []string
 }
 
-// IsZero reports whether no agent default would inject any builtin.
-func (d AgentDefaults) IsZero() bool {
-	return !d.AddDate && !d.AddEnvironmentInfo && len(d.AddPromptFiles) == 0
-}
-
 // ApplyAgentDefaults appends the stock builtin hook entries implied by
-// d to cfg, returning the (possibly mutated) config.
-//
-// A nil cfg is treated as empty; the returned value is non-nil iff at
-// least one hook (user-configured or auto-injected) is present.
+// d to cfg. A nil cfg is treated as empty. Returns nil iff no hook
+// (user-configured or auto-injected) is present.
 func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 	if cfg == nil {
 		cfg = &hooks.Config{}
@@ -71,11 +106,4 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 // builtinHook returns a hook entry that dispatches to the named builtin.
 func builtinHook(name string, args ...string) hooks.Hook {
 	return hooks.Hook{Type: hooks.HookTypeBuiltin, Command: name, Args: args}
-}
-
-// turnStartContext wraps additional context as a turn_start output.
-// Shared by builtins that contribute per-turn context (add_date,
-// add_prompt_files).
-func turnStartContext(content string) *hooks.Output {
-	return hooks.NewAdditionalContextOutput(hooks.EventTurnStart, content)
 }

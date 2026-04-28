@@ -19,6 +19,10 @@ Hooks allow you to execute shell commands or scripts at key points in an agent's
 - Validate or transform tool inputs before execution
 - Log all tool calls to an audit file
 - Block dangerous operations based on custom rules
+- Validate, redact, or enrich user prompts before they reach the model
+- Programmatically approve or deny tool calls without prompting the user
+- Steer or veto context-window compaction
+- Audit sub-agent handoffs in multi-agent setups
 - Set up the environment when a session starts
 - Clean up resources when a session ends
 - Log or validate model responses before returning to the user
@@ -30,15 +34,19 @@ Hooks allow you to execute shell commands or scripts at key points in an agent's
 
 There are seven hook event types:
 
-| Event            | When it fires                                          | Can block? |
-| ---------------- | ------------------------------------------------------ | ---------- |
-| `pre_tool_use`   | Before a tool call executes                            | Yes        |
-| `post_tool_use`  | After a tool completes successfully                    | No         |
-| `session_start`  | When a session begins or resumes                       | No         |
-| `session_end`    | When a session terminates                              | No         |
-| `on_user_input`  | When the agent is waiting for user input               | No         |
-| `stop`           | When the model finishes responding                     | No         |
-| `notification`   | When the agent emits a notification (error or warning) | No         |
+| Event               | When it fires                                                       | Can block? |
+| ------------------- | ------------------------------------------------------------------- | ---------- |
+| `pre_tool_use`      | Before a tool call executes                                         | Yes        |
+| `post_tool_use`     | After a tool completes — fires for both success and failure         | Yes        |
+| `permission_request`| Just before the runtime would prompt the user to approve a tool     | Yes        |
+| `session_start`     | When a session begins or resumes                                    | No         |
+| `user_prompt_submit`| Once per user message, after submission and before the model runs   | Yes        |
+| `session_end`       | When a session terminates                                           | No         |
+| `pre_compact`       | Just before the runtime compacts the session transcript             | Yes        |
+| `subagent_stop`     | When a sub-agent (transferred task / background) finishes           | No         |
+| `on_user_input`     | When the agent is waiting for user input                            | No         |
+| `stop`              | When the model finishes responding                                  | No         |
+| `notification`      | When the agent emits a notification (error or warning)              | No         |
 
 ## Configuration
 
@@ -90,6 +98,63 @@ agents:
           command: "./scripts/alert.sh"
 ```
 
+## Built-in Hooks
+
+In addition to shell `command` hooks, docker-agent ships a small library of **built-in hooks** — in-process Go functions that run without spawning a subprocess. They're invoked with `type: builtin`, where `command` is the builtin's registered name and `args` are passed through as the builtin's parameters.
+
+```yaml
+hooks:
+  turn_start:
+    - type: builtin
+      command: add_date
+    - type: builtin
+      command: add_prompt_files
+      args:
+        - GUIDELINES.md
+        - PROJECT.md
+  session_start:
+    - type: builtin
+      command: add_environment_info
+  before_llm_call:
+    - type: builtin
+      command: max_iterations
+      args: ["50"]
+```
+
+Built-ins are typically zero-config and faster than equivalent shell hooks because they don't fork a process. They cover the common "inject context into every turn / session" patterns out of the box.
+
+### Available built-ins
+
+| Builtin                 | Event             | Args                   | What it does                                                                                                          |
+| ----------------------- | ----------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `add_date`              | `turn_start`      | _none_                 | Prepends `Today's date: YYYY-MM-DD` so the model always knows the current date.                                       |
+| `add_environment_info`  | `session_start`   | _none_                 | Adds the working directory, git-repo status, OS, and CPU architecture.                                                |
+| `add_prompt_files`      | `turn_start`      | `[file1, file2, ...]`  | Reads each named file from the workdir hierarchy (walking up) and the home directory, and appends their contents.     |
+| `add_git_status`        | `turn_start`      | _none_                 | Adds the output of `git status --short --branch` (no-op outside a git repo or when git isn't installed).              |
+| `add_git_diff`          | `turn_start`      | _none_, or `["full"]`  | Adds `git diff --stat` by default. Pass `args: ["full"]` to emit the full unified diff. Output is capped to 4 KB.     |
+| `add_directory_listing` | `session_start`   | _none_                 | Adds an alphabetical listing of the cwd's top-level entries (skips dot-files, capped at 100 with a "... and N more"). |
+| `add_user_info`         | `session_start`   | _none_                 | Adds the current OS user (username and full name) and the hostname.                                                   |
+| `add_recent_commits`    | `session_start`   | _none_, or `["<N>"]`   | Adds `git log --oneline -n N`. `N` defaults to 10; pass a positive integer to override.                               |
+| `max_iterations`        | `before_llm_call` | `["<N>"]` (required)   | Hard-stops the agent after `N` model calls. State is per-session and reset at `session_end`.                          |
+
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">ℹ️ Per-turn vs. per-session
+</div>
+  <p><code>turn_start</code> built-ins recompute every turn and contribute <strong>transient</strong> context that is <em>not</em> persisted to the session — perfect for fast-moving signals like the date or current git state. <code>session_start</code> built-ins run once per session and their context <strong>persists</strong> across turns and resumes — pick this for stable context like the OS user or the initial directory listing.</p>
+</div>
+
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">ℹ️ Auto-injected built-ins
+</div>
+  <p>The agent flags <code>add_date: true</code>, <code>add_environment_info: true</code>, and <code>add_prompt_files: [...]</code> are shorthands that auto-register the matching built-in hook. You don't need to repeat them under <code>hooks:</code> — set the flag <em>or</em> the hook entry, not both.</p>
+</div>
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">⚠️ Two flavors of <code>max_iterations</code>
+</div>
+  <p>The <code>max_iterations</code> agent field has its own UX (it pauses and asks the user to resume past the limit). The <code>max_iterations</code> built-in hook is a <strong>hard stop with no resume</strong> — when its counter trips, the agent terminates with a block decision. Use the agent field for interactive sessions and the built-in hook to enforce non-negotiable caps in unattended runs.</p>
+</div>
+
 ## Matcher Patterns
 
 The `matcher` field uses regex patterns to match tool names:
@@ -121,26 +186,34 @@ Hooks receive JSON input via stdin with context about the event:
 
 ### Input Fields by Event Type
 
-| Field                  | pre_tool_use | post_tool_use | session_start | session_end | on_user_input | stop | notification |
-| ---------------------- | ------------ | ------------- | ------------- | ----------- | ------------- | ---- | ------------ |
-| `session_id`           | ✓            | ✓             | ✓             | ✓           | ✓             | ✓    | ✓            |
-| `cwd`                  | ✓            | ✓             | ✓             | ✓           | ✓             | ✓    | ✓            |
-| `hook_event_name`      | ✓            | ✓             | ✓             | ✓           | ✓             | ✓    | ✓            |
-| `tool_name`            | ✓            | ✓             |               |             |               |      |              |
-| `tool_use_id`          | ✓            | ✓             |               |             |               |      |              |
-| `tool_input`           | ✓            | ✓             |               |             |               |      |              |
-| `tool_response`        |              | ✓             |               |             |               |      |              |
-| `source`               |              |               | ✓             |             |               |      |              |
-| `reason`               |              |               |               | ✓           |               |      |              |
-| `stop_response`        |              |               |               |             |               | ✓    |              |
-| `notification_level`   |              |               |               |             |               |      | ✓            |
-| `notification_message` |              |               |               |             |               |      | ✓            |
+| Field                  | pre_tool_use | post_tool_use | permission_request | session_start | user_prompt_submit | session_end | pre_compact | subagent_stop | on_user_input | stop | notification |
+| ---------------------- | ------------ | ------------- | ------------------ | ------------- | ------------------ | ----------- | ----------- | ------------- | ------------- | ---- | ------------ |
+| `session_id`           | ✓            | ✓             | ✓                  | ✓             | ✓                  | ✓           | ✓           | ✓             | ✓             | ✓    | ✓            |
+| `cwd`                  | ✓            | ✓             | ✓                  | ✓             | ✓                  | ✓           | ✓           | ✓             | ✓             | ✓    | ✓            |
+| `hook_event_name`      | ✓            | ✓             | ✓                  | ✓             | ✓                  | ✓           | ✓           | ✓             | ✓             | ✓    | ✓            |
+| `tool_name`            | ✓            | ✓             | ✓                  |               |                    |             |             |               |               |      |              |
+| `tool_use_id`          | ✓            | ✓             | ✓                  |               |                    |             |             |               |               |      |              |
+| `tool_input`           | ✓            | ✓             | ✓                  |               |                    |             |             |               |               |      |              |
+| `tool_response`        |              | ✓             |                    |               |                    |             |             |               |               |      |              |
+| `source`               |              |               |                    | ✓             |                    |             | ✓           |               |               |      |              |
+| `reason`               |              |               |                    |               |                    | ✓           |             |               |               |      |              |
+| `prompt`               |              |               |                    |               | ✓                  |             |             |               |               |      |              |
+| `agent_name`           |              |               |                    |               |                    |             |             | ✓             |               |      |              |
+| `parent_session_id`    |              |               |                    |               |                    |             |             | ✓             |               |      |              |
+| `stop_response`        |              |               |                    |               |                    |             |             | ✓             |               | ✓    |              |
+| `notification_level`   |              |               |                    |               |                    |             |             |               |               |      | ✓            |
+| `notification_message` |              |               |                    |               |                    |             |             |               |               |      | ✓            |
 
 The `source` field for `session_start` can be: `startup`, `resume`, `clear`, or `compact`.
+The `source` field for `pre_compact` can be: `manual` (user-initiated `/compact`), `auto` (proactive threshold), `overflow` (context-overflow recovery), or `tool_overflow` (proactive recovery after tool results pushed past the threshold).
 
 The `reason` field for `session_end` can be: `clear`, `logout`, `prompt_input_exit`, or `other`.
 
-The `stop_response` field contains the model's final text response.
+The `prompt` field for `user_prompt_submit` is the text the user just submitted. Sub-sessions (transferred tasks, background agents, skills) do **not** fire this event because their kick-off message is synthesised by the runtime, not authored by the user.
+
+The `agent_name` field for `subagent_stop` is the name of the sub-agent that just finished; `parent_session_id` is the session that spawned it.
+
+The `stop_response` field contains the model's final text response (for both `stop` and `subagent_stop`).
 
 The `notification_level` field can be: `error` or `warning`.
 
@@ -188,7 +261,7 @@ The `hook_specific_output` for `pre_tool_use` supports:
 
 ### Plain Text Output
 
-For `session_start`, `post_tool_use`, and `stop` hooks, plain text written to stdout (i.e., output that is not valid JSON) is captured as additional context for the agent.
+For `session_start`, `user_prompt_submit`, `post_tool_use`, `pre_compact`, and `stop` hooks, plain text written to stdout (i.e., output that is not valid JSON) is captured as additional context for the agent. For `pre_compact` it is appended to the compaction prompt; for the others it is spliced into the conversation as a (transient or persisted) system message depending on the event.
 
 ## Exit Codes
 
@@ -200,19 +273,26 @@ Hook exit codes have special meaning:
 | `2`       | Blocking error — stop the operation    |
 | Other     | Error — logged but execution continues |
 
-## Timeout
+## Per-hook options
 
-Hooks have a default timeout of 60 seconds. You can customize this per hook:
+Hooks have a default timeout of 60 seconds. You can also give hooks a name, add environment variables, choose a working directory, and control how non-security hook failures behave:
 
 ```yaml
 hooks:
-  pre_tool_use:
-    - matcher: "*"
+  post_tool_use:
+    - matcher: "shell"
       hooks:
-        - type: command
-          command: "./slow-validation.sh"
+        - name: "summarize shell output"
+          type: command
+          command: "./summarize.sh"
           timeout: 120 # 2 minutes
+          working_dir: ./hooks
+          env:
+            PROFILE: dev
+          on_error: warn # warn | ignore | block
 ```
+
+`pre_tool_use` is fail-closed for safety: a failed pre-tool hook blocks the tool call regardless of `on_error`.
 
 <div class="callout callout-warning" markdown="1">
 <div class="callout-title">⚠️ Performance
@@ -345,6 +425,111 @@ The `notification` hook fires when:
 - The model returns an error (all models failed)
 - A degenerate tool call loop is detected
 - The maximum iteration limit is reached
+
+### Pre-Compact: steer the summary
+
+`pre_compact` fires just before the runtime compacts the session transcript. Its `source` field tells you why compaction was triggered:
+
+- `manual` — the user invoked `/compact`
+- `auto` — proactive compaction at the configured threshold
+- `overflow` — emergency compaction after a context-overflow error
+- `tool_overflow` — proactive compaction triggered by tool results pushing the estimated context past the threshold
+
+Return `additional_context` (or plain stdout) to append guidance to the compaction prompt without modifying the agent's instruction. Block the event (`decision: block` / exit code 2) to cancel compaction — useful when you want to handle truncation yourself.
+
+### User-Prompt-Submit: gate or enrich every user message
+
+`user_prompt_submit` fires once per user message, after the prompt is recorded in the session and before the first model call. The submitted text is in `prompt`. Use it to:
+
+- block prompts that violate policy (`decision: block` / exit code 2),
+- inject per-prompt context (`additional_context` is spliced as a transient system message for that turn),
+- audit user prompts to a log.
+
+It does **not** fire for sub-sessions (transferred tasks, background agents, skill sub-sessions) because their kick-off message is synthesised by the runtime.
+
+### Subagent-Stop: observe handoff completions
+
+`subagent_stop` fires whenever a sub-agent finishes — `transfer_task` returns, a background agent completes, or a skill sub-session ends. It runs against the *parent* agent's hooks executor, so handlers configured on the orchestrator see every child completion in one place. The sub-agent's name is in `agent_name`, the parent's session ID in `parent_session_id`, and the child's final assistant message in `stop_response`.
+
+### Permission-Request: programmatic tool approval
+
+`permission_request` fires just before the runtime would prompt the user to approve a tool call (i.e. when neither `--yolo` nor a permissions rule short-circuited the decision and the tool is not read-only). Use the same `hook_specific_output.permission_decision` shape as `pre_tool_use` to auto-approve or auto-deny the call:
+
+```yaml
+hooks:
+  permission_request:
+    - matcher: "shell"
+      hooks:
+        - type: command
+          command: |
+            INPUT=$(cat)
+            CMD=$(echo "$INPUT" | jq -r '.tool_input.cmd // ""')
+            if echo "$CMD" | grep -qE '^(ls|pwd|cat) '; then
+              echo '{"hook_specific_output":{"permission_decision":"allow","permission_decision_reason":"safe read-only command"}}'
+            fi
+```
+
+Return nothing to fall through to the usual interactive confirmation.
+
+### LLM as a Judge (Auto-Approving Tool Calls)
+
+The `model` hook type asks an LLM and translates its reply into the
+hook's native output — no Go code, no shell glue, no JSON parsing on
+your side. Combined with the well-known `pre_tool_use_decision`
+schema it gives you a fully-configurable LLM judge that decides
+`allow` / `ask` / `deny` per tool call.
+
+```yaml
+hooks:
+  pre_tool_use:
+    - matcher: "shell|edit_file|mcp:.*"
+      hooks:
+        - type: model
+          model: openai/gpt-4o-mini
+          timeout: 15
+          schema: pre_tool_use_decision
+          prompt: |
+            You are a security judge for an autonomous agent.
+            Decide whether this tool call is safe to auto-approve.
+
+            Tool: {{ .ToolName }}
+            Args: {{ .ToolInput | toJSON }}
+
+            Project rules:
+            - Reads under the working directory are safe.
+            - Writes to ~/.ssh / ~/.aws / ~/.docker are deny.
+```
+
+| Field    | Required          | Description                                                                                                                                                                |
+| -------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`  | yes               | Model spec (`provider/model`, e.g. `openai/gpt-4o-mini`). The judge model — small/cheap is recommended.                                                                    |
+| `prompt` | yes               | Go [`text/template`](https://pkg.go.dev/text/template) body. Sees the hook [Input](#hook-input) as data, plus the `toJSON` and `truncate <n>` helpers.                     |
+| `schema` | no                | Well-known response interpretation. `pre_tool_use_decision` produces a `permission_decision` verdict; omit for free-form text injected as `additional_context`.            |
+| `timeout`| no (default 60s)  | Per-call timeout. **Timeouts fail closed (deny) for `pre_tool_use`** regardless of any other setting. Match it to your judge model's typical latency plus a small buffer. |
+
+The `pre_tool_use_decision` schema constrains the judge to reply with
+strict `{decision, reason}` JSON. Providers that honor structured
+output (OpenAI, ...) are asked to emit that shape directly; on
+providers that ignore it the framework still parses tolerant
+JSON-in-text. Anything unparseable propagates as a hook error and the
+executor falls closed (deny) on `pre_tool_use`.
+
+Pair it with deterministic `permissions:` rules so destructive calls
+(e.g. `sudo`, `rm -rf`) are blocked even if the judge is misled, and
+obvious read-only calls bypass the LLM entirely. See
+[`examples/llm_judge.yaml`](https://github.com/docker/docker-agent/blob/main/examples/llm_judge.yaml)
+for a complete configuration.
+
+**Security considerations**:
+
+- **Sensitive data**: Tool arguments (including file paths, command
+  arguments, and any other parameters) are sent to the judge LLM. Avoid
+  using the judge on tools that handle secrets, or ensure your judge
+  model is self-hosted.
+- **Defense in depth**: The judge should not be your only security
+  layer. Use deterministic `permissions:` rules to block obviously
+  dangerous operations (e.g., `sudo`, `rm -rf`) before the judge sees
+  them, as shown in the example configuration.
 
 </div>
 

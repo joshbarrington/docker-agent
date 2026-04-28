@@ -12,7 +12,6 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -34,7 +33,13 @@ type streamResult struct {
 // events (content deltas, partial tool calls, reasoning tokens) and returning
 // the aggregated streamResult. The caller is responsible for adding the
 // resulting assistant message to the session.
-func (r *LocalRuntime) handleStream(ctx context.Context, stream chat.MessageStream, a *agent.Agent, agentTools []tools.Tool, sess *session.Session, m *modelsdev.Model, events chan Event) (streamResult, error) {
+//
+// handleStream is a pure stream-aggregation routine: it does not touch
+// runtime state and can be unit-tested by feeding a mock chat.MessageStream.
+// It is intentionally a free function rather than a method on *LocalRuntime
+// so the dependency direction is explicit (the loop calls into the chunker,
+// never the reverse).
+func handleStream(ctx context.Context, stream chat.MessageStream, a *agent.Agent, agentTools []tools.Tool, sess *session.Session, m *modelsdev.Model, tel Telemetry, events chan<- Event) (streamResult, error) {
 	defer stream.Close()
 
 	var fullContent strings.Builder
@@ -68,7 +73,7 @@ func (r *LocalRuntime) handleStream(ctx context.Context, stream chat.MessageStre
 		if m != nil {
 			modelName = m.Name
 		}
-		telemetry.RecordTokenUsage(ctx, modelName, sess.InputTokens, sess.OutputTokens, sess.TotalCost())
+		tel.RecordTokenUsage(ctx, modelName, sess.InputTokens, sess.OutputTokens, sess.TotalCost())
 	}
 
 	for {

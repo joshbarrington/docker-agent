@@ -239,6 +239,103 @@ func TestFormatError(t *testing.T) {
 		err := errors.New("authentication failed")
 		assert.Equal(t, "authentication failed", FormatError(err))
 	})
+
+	t.Run("context overflow takes precedence over status formatting", func(t *testing.T) {
+		t.Parallel()
+		underlying := errors.New("prompt is too long: 226360 tokens > 200000 maximum")
+		wrapped := NewContextOverflowError(&StatusError{StatusCode: 400, Err: underlying})
+		msg := FormatError(wrapped)
+		assert.Contains(t, msg, "context window")
+		assert.Contains(t, msg, "/compact")
+	})
+}
+
+func TestStatusErrorParsesProviderBody(t *testing.T) {
+	t.Parallel()
+
+	t.Run("opaque proxy body strips URL noise but keeps the message", func(t *testing.T) {
+		t.Parallel()
+		// This is the case the user reported: the Docker AI gateway returns
+		// only {"message":"Bad Request"}, no structured details.
+		inner := errors.New(`POST "https://ai-backend-service-stage.docker.com/proxy/v1/messages?beta=true": 400 Bad Request {"message":"Bad Request"}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t, "HTTP 400: Bad Request", se.Error())
+	})
+
+	t.Run("anthropic-style body surfaces error.type and error.message", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "https://api.anthropic.com/v1/messages": 400 Bad Request {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 226360 tokens > 200000 maximum"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: invalid_request_error: prompt is too long: 226360 tokens > 200000 maximum",
+			se.Error())
+	})
+
+	t.Run("anthropic-style body keeps the request id", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "https://api.anthropic.com/v1/messages": 400 Bad Request (Request-ID: req_abc123) {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: Field required"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: invalid_request_error: max_tokens: Field required (Request-ID: req_abc123)",
+			se.Error())
+	})
+
+	t.Run("openai-style body surfaces type, message, code and param", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "https://api.openai.com/v1/chat/completions": 400 Bad Request {"error":{"message":"Invalid model 'foo-bar'","type":"invalid_request_error","param":"model","code":"model_not_found"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: invalid_request_error: Invalid model 'foo-bar' (code=model_not_found, param=model)",
+			se.Error())
+	})
+
+	t.Run("gemini-style body surfaces numeric code and status", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`{"error":{"code":400,"message":"Invalid value at 'contents[0].parts[0]'","status":"INVALID_ARGUMENT"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: Invalid value at 'contents[0].parts[0]' (code=400, status=INVALID_ARGUMENT)",
+			se.Error())
+	})
+
+	t.Run("openai-style body with null param omits param meta", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/chat": 401 Unauthorized {"error":{"message":"Incorrect API key provided","type":"invalid_request_error","param":null,"code":"invalid_api_key"}}`)
+		se := &StatusError{StatusCode: 401, Err: inner}
+		assert.Equal(t,
+			"HTTP 401: invalid_request_error: Incorrect API key provided (code=invalid_api_key)",
+			se.Error())
+	})
+
+	t.Run("falls back to underlying message when no JSON body", func(t *testing.T) {
+		t.Parallel()
+		// No JSON, no URL — keep the existing simple format.
+		se := &StatusError{StatusCode: 429, Err: errors.New("rate limit exceeded")}
+		assert.Equal(t, "HTTP 429: rate limit exceeded", se.Error())
+	})
+
+	t.Run("falls back to underlying message when JSON has no useful fields", func(t *testing.T) {
+		t.Parallel()
+		se := &StatusError{StatusCode: 500, Err: errors.New(`POST "/v1/x": 500 Internal Server Error {"foo":"bar"}`)}
+		assert.Equal(t, `HTTP 500: POST "/v1/x": 500 Internal Server Error {"foo":"bar"}`, se.Error())
+	})
+
+	t.Run("handles braces inside string values", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/x": 400 Bad Request {"error":{"type":"invalid_request_error","message":"unexpected token '}' in payload"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t,
+			"HTTP 400: invalid_request_error: unexpected token '}' in payload",
+			se.Error())
+	})
+
+	t.Run("context overflow detection still works on cleaned message", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/messages": 400 Bad Request {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 226360 tokens > 200000 maximum"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.True(t, IsContextOverflowError(se),
+			"context-overflow phrasing must remain detectable in StatusError.Error()")
+	})
 }
 
 func TestParseRetryAfterHeader(t *testing.T) {
@@ -435,4 +532,95 @@ func TestClassifyModelError(t *testing.T) {
 		assert.False(t, rateLimited)
 		assert.Equal(t, time.Duration(0), retryAfter)
 	})
+}
+
+func TestStatusErrorEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty JSON object falls back to underlying", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/x": 400 Bad Request {}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t, `HTTP 400: POST "/v1/x": 400 Bad Request {}`, se.Error())
+	})
+
+	t.Run("malformed JSON falls back to underlying", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/x": 400 Bad Request {"error":{"message":"test"`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t, `HTTP 400: POST "/v1/x": 400 Bad Request {"error":{"message":"test"`, se.Error())
+	})
+
+	t.Run("multiple JSON objects extracts first", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/x": 400 Bad Request {"message":"First"} {"message":"Second"}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t, "HTTP 400: First", se.Error())
+	})
+
+	t.Run("unicode in error message", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/x": 400 Bad Request {"message":"Invalid emoji: 😀"}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t, "HTTP 400: Invalid emoji: 😀", se.Error())
+	})
+
+	t.Run("very large number in code field", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`{"error":{"code":9007199254740992,"message":"test"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		// Large float64 that exceeds int64 range should still format
+		assert.Contains(t, se.Error(), "test")
+		assert.Contains(t, se.Error(), "code=")
+	})
+
+	t.Run("request-id with special characters", func(t *testing.T) {
+		t.Parallel()
+		inner := errors.New(`POST "/v1/x": 400 Bad Request (Request-ID: req_abc-123_XYZ) {"message":"test"}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t, "HTTP 400: test (Request-ID: req_abc-123_XYZ)", se.Error())
+	})
+
+	t.Run("brace in URL before JSON", func(t *testing.T) {
+		t.Parallel()
+		// Ensure we don't mistake a '{' in the URL for the start of JSON
+		inner := errors.New(`POST "https://api.example.com/v1/messages?param={value}": 400 Bad Request {"message":"test"}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Equal(t, "HTTP 400: test", se.Error())
+	})
+
+	t.Run("nested JSON in message field", func(t *testing.T) {
+		t.Parallel()
+		// The message field itself contains JSON-like text
+		inner := errors.New(`{"error":{"message":"Expected format: {\"key\":\"value\"}"}}`)
+		se := &StatusError{StatusCode: 400, Err: inner}
+		assert.Contains(t, se.Error(), `Expected format: {"key":"value"}`)
+	})
+}
+
+func TestScalarStringEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    any
+		expected string
+	}{
+		{name: "nil", input: nil, expected: ""},
+		{name: "empty string", input: "", expected: ""},
+		{name: "normal string", input: "test", expected: "test"},
+		{name: "whole number", input: float64(400), expected: "400"},
+		{name: "decimal number", input: float64(3.14), expected: "3.14"},
+		{name: "negative whole", input: float64(-500), expected: "-500"},
+		{name: "zero", input: float64(0), expected: "0"},
+		{name: "bool true", input: true, expected: "true"},
+		{name: "bool false", input: false, expected: "false"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, scalarString(tt.input))
+		})
+	}
 }

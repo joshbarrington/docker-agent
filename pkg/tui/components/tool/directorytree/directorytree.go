@@ -1,7 +1,6 @@
 package directorytree
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/tools/builtin"
@@ -27,18 +26,16 @@ func extractResult(msg *types.Message) string {
 		return ""
 	}
 
-	fileCount := meta.FileCount
-	dirCount := meta.DirCount
-	if fileCount+dirCount == 0 {
+	if meta.FileCount+meta.DirCount == 0 {
 		return "empty"
 	}
 
 	var parts []string
-	if fileCount > 0 {
-		parts = append(parts, formatCount(fileCount, "file", "files"))
+	if meta.FileCount > 0 {
+		parts = append(parts, toolcommon.Pluralize(meta.FileCount, "file", "files"))
 	}
-	if dirCount > 0 {
-		parts = append(parts, formatCount(dirCount, "dir", "dirs"))
+	if meta.DirCount > 0 {
+		parts = append(parts, toolcommon.Pluralize(meta.DirCount, "dir", "dirs"))
 	}
 
 	result := strings.Join(parts, ", ")
@@ -46,11 +43,4 @@ func extractResult(msg *types.Message) string {
 		result += " (truncated)"
 	}
 	return result
-}
-
-func formatCount(count int, singular, plural string) string {
-	if count == 1 {
-		return fmt.Sprintf("%d %s", count, singular)
-	}
-	return fmt.Sprintf("%d %s", count, plural)
 }

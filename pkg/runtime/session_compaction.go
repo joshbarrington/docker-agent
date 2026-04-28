@@ -2,231 +2,193 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"log/slog"
-	"time"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/compaction"
+	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/runtime/compactor"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 )
 
-const maxSummaryTokens = 16_000
+// Compaction reasons reported to BeforeCompaction / AfterCompaction hooks.
+const (
+	compactionReasonThreshold = "threshold"
+	compactionReasonOverflow  = "overflow"
+	compactionReasonManual    = "manual"
+)
 
-// maxKeepTokens is the maximum number of tokens to preserve from the end of
-// the conversation during compaction. These recent messages are kept verbatim
-// so the LLM can continue naturally after compaction.
-const maxKeepTokens = 20_000
+// doCompact orchestrates a session compaction. It is intentionally thin:
+// the heavy lifting (extracting the conversation, running the LLM, computing
+// the kept-tail boundary) lives in [pkg/runtime/compactor]; this function
+// owns only what's runtime-private: hook dispatch, session mutation, event
+// emission, and persistence.
+//
+// reason is one of [compactionReasonThreshold] (proactive 90% trigger),
+// [compactionReasonOverflow] (post-overflow recovery) or
+// [compactionReasonManual] (user-invoked /compact). It is forwarded to
+// BeforeCompaction / AfterCompaction hooks.
+//
+// Hook integration:
+//   - BeforeCompaction fires first. If a hook denies (Decision: "block"),
+//     the runtime returns immediately without emitting any compaction
+//     events; the conversation is left untouched.
+//   - If a BeforeCompaction hook supplies a non-empty Summary in
+//     HookSpecificOutput, the runtime applies that summary verbatim and
+//     skips the LLM-based summarization entirely. The kept-tail policy
+//     stays consistent across both paths via [compactor.ComputeFirstKeptEntry].
+//   - AfterCompaction fires after the summary has been applied; it is
+//     observational.
+//
+// If no hooks are configured for any of these events, control flow is
+// behaviourally identical to the original, hookless implementation.
+//
+// Note: the runtime does NOT re-fire session_start with Source="compact".
+// session_start hook output is held as transient context that is threaded
+// into every model call (see [LocalRuntime.executeSessionStartHooks]), so
+// env / cwd / OS info is automatically present after a compaction without
+// any extra dispatch.
+func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *agent.Agent, additionalPrompt, reason string, events chan Event) {
+	contextLimit := r.compactionContextLimit(ctx, a)
 
-// doCompact runs compaction on a session and applies the result (events,
-// persistence, token count updates). The agent is used to extract the
-// conversation from the session and to obtain the model for summarization.
-func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *agent.Agent, additionalPrompt string, events chan Event) {
-	slog.Debug("Generating summary for session", "session_id", sess.ID)
+	// before_compaction: hooks can veto or supply a custom summary.
+	pre := r.executeBeforeCompactionHooks(ctx, sess, a, reason, contextLimit, events)
+	if pre != nil && !pre.Allowed {
+		slog.Info("Session compaction skipped by before_compaction hook",
+			"session_id", sess.ID, "agent", a.Name(), "reason", reason,
+			"hook_message", pre.Message,
+		)
+		return
+	}
+
+	slog.Debug("Generating summary for session", "session_id", sess.ID, "reason", reason)
 	events <- SessionCompaction(sess.ID, "started", a.Name())
 	defer func() {
 		events <- SessionCompaction(sess.ID, "completed", a.Name())
 	}()
 
-	// Build a model just for compaction.
-	summaryModel := provider.CloneWithOptions(ctx, a.Model(),
-		options.WithStructuredOutput(nil),
-		options.WithMaxTokens(maxSummaryTokens),
-	)
-	m, err := r.modelsStore.GetModel(ctx, summaryModel.ID())
-	if err != nil {
-		slog.Error("Failed to generate session summary", "error", errors.New("failed to get model definition"))
-		events <- Error("Failed to get model definition")
-		return
+	// Choose the strategy: a hook-supplied summary if before_compaction
+	// returned one, otherwise the default LLM strategy.
+	result := summaryFromHook(sess, a, pre)
+	if result == nil {
+		if contextLimit <= 0 {
+			slog.Error("Failed to generate session summary",
+				"error", "model definition unavailable")
+			events <- Error("Failed to get model definition")
+			return
+		}
+
+		var err error
+		result, err = compactor.RunLLM(ctx, compactor.LLMArgs{
+			Session:          sess,
+			Agent:            a,
+			AdditionalPrompt: additionalPrompt,
+			ContextLimit:     contextLimit,
+			RunAgent:         r.runCompactionAgent,
+		})
+		if err != nil {
+			slog.Error("Failed to generate session summary", "error", err)
+			events <- Error(err.Error())
+			return
+		}
+		if result == nil {
+			// Empty summary — bail without applying anything.
+			return
+		}
 	}
 
-	compactionAgent := agent.New("root", compaction.SystemPrompt, agent.WithModel(summaryModel))
+	// Capture the pre-compaction token counts so the after_compaction
+	// hook can observe what was summarized ("compacted from X to Y").
+	// We snapshot before applying the result because the apply step
+	// resets sess.OutputTokens to 0 and replaces sess.InputTokens with
+	// the new summary's estimated size.
+	preInputTokens := sess.InputTokens
+	preOutputTokens := sess.OutputTokens
 
-	// Compute the messages to compact, keeping recent messages aside.
-	messages, firstKeptEntry := extractMessagesToCompact(sess, compactionAgent, int64(m.Limit.Context), additionalPrompt)
-
-	// Run the compaction.
-	compactionSession := session.New(
-		session.WithTitle("Generating summary"),
-		session.WithMessages(toItems(messages)),
-	)
-
-	t := team.New(team.WithAgents(compactionAgent))
-	rt, err := New(t, WithSessionCompaction(false))
-	if err != nil {
-		slog.Error("Failed to generate session summary", "error", err)
-		events <- Error(err.Error())
-		return
-	}
-	if _, err = rt.Run(ctx, compactionSession); err != nil {
-		slog.Error("Failed to generate session summary", "error", err)
-		events <- Error(err.Error())
-		return
-	}
-
-	summary := compactionSession.GetLastAssistantMessageContent()
-	if summary == "" {
-		return
-	}
-
-	// Update the session.
-	sess.InputTokens = compactionSession.OutputTokens
+	// Apply the summary to the session. This is intrinsically
+	// runtime-private: it mutates session-internal state and persists
+	// through the runtime's session store.
+	sess.InputTokens = result.InputTokens
 	sess.OutputTokens = 0
 	sess.Messages = append(sess.Messages, session.Item{
-		Summary:        summary,
-		FirstKeptEntry: firstKeptEntry,
-		Cost:           compactionSession.TotalCost(),
+		Summary:        result.Summary,
+		FirstKeptEntry: result.FirstKeptEntry,
+		Cost:           result.Cost,
 	})
 	_ = r.sessionStore.UpdateSession(ctx, sess)
 
-	slog.Debug("Generated session summary", "session_id", sess.ID, "summary_length", len(summary))
-	events <- SessionSummary(sess.ID, summary, a.Name(), firstKeptEntry)
+	slog.Debug("Generated session summary", "session_id", sess.ID, "summary_length", len(result.Summary))
+	events <- SessionSummary(sess.ID, result.Summary, a.Name(), result.FirstKeptEntry)
+
+	// after_compaction: observational. Fired only when a summary was
+	// actually applied to the session. The hook receives the
+	// pre-compaction token counts (what was summarized) so observability
+	// handlers can compute "compacted from X to Y"; the new (lower)
+	// counts live on sess.InputTokens / sess.OutputTokens after this
+	// returns and are exposed via the next TokenUsageEvent.
+	r.executeAfterCompactionHooks(ctx, sess, a, reason, contextLimit, preInputTokens, preOutputTokens, result.Summary, events)
 }
 
-// extractMessagesToCompact returns the messages to send to the compaction model
-// and the index (into sess.Messages) of the first message that was kept aside.
-// Recent messages (up to maxKeepTokens) are excluded from compaction so they
-// can be preserved verbatim in the session after summarization.
-func extractMessagesToCompact(sess *session.Session, compactionAgent *agent.Agent, contextLimit int64, additionalPrompt string) ([]chat.Message, int) {
-	// Add all the existing messages.
-	var messages []chat.Message
-	for _, msg := range sess.GetMessages(compactionAgent) {
-		if msg.Role == chat.MessageRoleSystem {
-			continue
-		}
-
-		msg.Cost = 0
-		msg.CacheControl = false
-
-		messages = append(messages, msg)
+// summaryFromHook lifts a before_compaction hook's Summary verdict into
+// a [compactor.Result] that the runtime can apply with the same code
+// path as the LLM strategy. Returns nil when no hook supplied a
+// summary (the caller then falls through to [compactor.RunLLM]).
+//
+// The hook only contributes the summary text; the runtime fills in the
+// kept-tail boundary (matching the LLM path's policy) and estimates the
+// summary's token count for session bookkeeping. The Result.Cost is
+// left at its zero value because no LLM call ran — the hook produced
+// the summary itself, so there's nothing to bill.
+func summaryFromHook(sess *session.Session, a *agent.Agent, pre *hooks.Result) *compactor.Result {
+	if pre == nil || pre.Summary == "" {
+		return nil
 	}
-
-	// Split: keep the last N tokens of messages aside so the LLM retains
-	// recent context after compaction.
-	splitIdx := splitIndexForKeep(messages, maxKeepTokens)
-	messagesToCompact := messages[:splitIdx]
-	// Compute firstKeptEntry: index into sess.Messages of the first kept message.
-	// The kept messages start at splitIdx in the non-system filtered list. We
-	// need to map this back to the original sess.Messages index.
-	firstKeptEntry := mapToSessionIndex(sess, splitIdx)
-
-	messages = messagesToCompact
-
-	// Prepare the first (system) message.
-	systemPromptMessage := chat.Message{
-		Role:      chat.MessageRoleSystem,
-		Content:   compaction.SystemPrompt,
-		CreatedAt: time.Now().Format(time.RFC3339),
+	slog.Debug("Using compaction summary from before_compaction hook",
+		"session_id", sess.ID, "agent", a.Name(), "summary_length", len(pre.Summary))
+	return &compactor.Result{
+		Summary:        pre.Summary,
+		FirstKeptEntry: compactor.ComputeFirstKeptEntry(sess, a),
+		// Estimate the summary's token count for session bookkeeping;
+		// no LLM was called so Cost stays at the zero value.
+		InputTokens: compaction.EstimateMessageTokens(&chat.Message{
+			Role:    chat.MessageRoleAssistant,
+			Content: pre.Summary,
+		}),
 	}
-	systemPromptMessageLen := compaction.EstimateMessageTokens(&systemPromptMessage)
-
-	// Prepare the last (user) message.
-	userPrompt := compaction.UserPrompt
-	if additionalPrompt != "" {
-		userPrompt += "\n\n" + additionalPrompt
-	}
-	userPromptMessage := chat.Message{
-		Role:      chat.MessageRoleUser,
-		Content:   userPrompt,
-		CreatedAt: time.Now().Format(time.RFC3339),
-	}
-	userPromptMessageLen := compaction.EstimateMessageTokens(&userPromptMessage)
-
-	// Truncate the messages so that they fit in the available context limit
-	// (minus the expected max length of the summary).
-	contextAvailable := max(0, contextLimit-maxSummaryTokens-systemPromptMessageLen-userPromptMessageLen)
-	firstIndex := firstMessageToKeep(messages, contextAvailable)
-	if firstIndex < len(messages) {
-		messages = messages[firstIndex:]
-	} else {
-		messages = nil
-	}
-
-	// Prepend the first (system) message.
-	messages = append([]chat.Message{systemPromptMessage}, messages...)
-
-	// Append the last (user) message.
-	messages = append(messages, userPromptMessage)
-
-	return messages, firstKeptEntry
 }
 
-// splitIndexForKeep returns the index that splits messages into [0:idx] (to
-// compact) and [idx:] (to keep). It walks backwards accumulating tokens up to
-// maxTokens, snapping to user/assistant boundaries.
-func splitIndexForKeep(messages []chat.Message, maxTokens int64) int {
-	if len(messages) == 0 {
+// compactionContextLimit returns the agent's model context limit, or 0
+// when it can't be resolved. Failure is non-fatal: a before_compaction
+// hook may supply its own summary and never need the model definition.
+// The LLM strategy itself enforces ContextLimit > 0.
+func (r *LocalRuntime) compactionContextLimit(ctx context.Context, a *agent.Agent) int64 {
+	if a == nil || a.Model() == nil {
 		return 0
 	}
-
-	var tokens int64
-	// Walk from the end; find the earliest index whose suffix fits in maxTokens.
-	lastValidBoundary := len(messages)
-	for i := len(messages) - 1; i >= 0; i-- {
-		tokens += compaction.EstimateMessageTokens(&messages[i])
-		if tokens > maxTokens {
-			return lastValidBoundary
-		}
-		role := messages[i].Role
-		if role == chat.MessageRoleUser || role == chat.MessageRoleAssistant {
-			lastValidBoundary = i
-		}
+	summaryModel := provider.CloneWithOptions(ctx, a.Model(),
+		options.WithStructuredOutput(nil),
+		options.WithMaxTokens(compactor.MaxSummaryTokens),
+	)
+	m, err := r.modelsStore.GetModel(ctx, summaryModel.ID())
+	if err != nil || m == nil {
+		return 0
 	}
-	// All messages fit within maxTokens — don't keep any aside (compact everything).
-	return len(messages)
+	return int64(m.Limit.Context)
 }
 
-// mapToSessionIndex maps an index in the non-system-filtered message list back
-// to the corresponding index in sess.Messages. It counts only message items
-// that are not system messages.
-func mapToSessionIndex(sess *session.Session, filteredIdx int) int {
-	count := 0
-	for i, item := range sess.Messages {
-		if item.IsMessage() && item.Message.Message.Role != chat.MessageRoleSystem {
-			if count == filteredIdx {
-				return i
-			}
-			count++
-		}
+// runCompactionAgent runs an agent against a sub-session for compaction.
+// It is the runtime-side glue [pkg/runtime/compactor] invokes via callback,
+// which avoids creating an import cycle on [pkg/runtime].
+func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess *session.Session) error {
+	t := team.New(team.WithAgents(a))
+	rt, err := New(t, WithSessionCompaction(false))
+	if err != nil {
+		return err
 	}
-	// filteredIdx is past the end — no messages to keep.
-	return len(sess.Messages)
-}
-
-func firstMessageToKeep(messages []chat.Message, contextLimit int64) int {
-	var tokens int64
-
-	lastValidMessageSeen := len(messages)
-
-	for i := len(messages) - 1; i >= 0; i-- {
-		tokens += compaction.EstimateMessageTokens(&messages[i])
-		if tokens > contextLimit {
-			return lastValidMessageSeen
-		}
-
-		role := messages[i].Role
-		if role == chat.MessageRoleUser || role == chat.MessageRoleAssistant {
-			lastValidMessageSeen = i
-		}
-	}
-
-	return lastValidMessageSeen
-}
-
-func toItems(messages []chat.Message) []session.Item {
-	var items []session.Item
-
-	for _, message := range messages {
-		items = append(items, session.Item{
-			Message: &session.Message{
-				Message: message,
-			},
-		})
-	}
-
-	return items
+	_, err = rt.Run(ctx, sess)
+	return err
 }

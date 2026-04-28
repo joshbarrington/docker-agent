@@ -1,6 +1,7 @@
 package message
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -9,6 +10,12 @@ import (
 
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
+
+var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func stripANSI(s string) string {
+	return ansiEscape.ReplaceAllString(s, "")
+}
 
 func TestErrorMessageWrapping(t *testing.T) {
 	t.Parallel()

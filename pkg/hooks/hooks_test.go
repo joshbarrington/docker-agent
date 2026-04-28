@@ -110,6 +110,20 @@ func TestConfigIsEmpty(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "with before_compaction",
+			config: Config{
+				BeforeCompaction: []Hook{{Type: HookTypeCommand}},
+			},
+			expected: false,
+		},
+		{
+			name: "with after_compaction",
+			config: Config{
+				AfterCompaction: []Hook{{Type: HookTypeCommand}},
+			},
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -692,6 +706,7 @@ func TestPlainStdoutBecomesAdditionalContext(t *testing.T) {
 	observationalEvents := []EventType{
 		EventBeforeLLMCall, EventAfterLLMCall, EventOnError,
 		EventOnMaxIterations, EventNotification, EventOnUserInput, EventSessionEnd,
+		EventBeforeCompaction, EventAfterCompaction,
 	}
 
 	for _, ev := range contextEvents {
@@ -751,6 +766,10 @@ func configWithFlatHook(ev EventType, h Hook) *Config {
 		cfg.OnError = []Hook{h}
 	case EventOnMaxIterations:
 		cfg.OnMaxIterations = []Hook{h}
+	case EventBeforeCompaction:
+		cfg.BeforeCompaction = []Hook{h}
+	case EventAfterCompaction:
+		cfg.AfterCompaction = []Hook{h}
 	}
 	return cfg
 }
@@ -784,4 +803,169 @@ func TestExecutePostToolUseDoesNotFailClosedOnError(t *testing.T) {
 	// Post-tool-use is observational only: a failed hook must not block
 	// the already-completed tool call.
 	assert.True(t, result.Allowed)
+}
+
+// TestExecuteBeforeCompactionAllowedByDefault checks that an empty
+// observational hook (echo to stdout) does not deny compaction. Plain
+// stdout is dropped for before_compaction since the runtime acts on
+// Allowed and Summary, not on AdditionalContext.
+func TestExecuteBeforeCompactionAllowedByDefault(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		BeforeCompaction: []Hook{
+			{Type: HookTypeCommand, Command: "echo 'about to compact'", Timeout: 5},
+		},
+	}
+
+	exec := NewExecutor(config, t.TempDir(), nil)
+	input := &Input{
+		SessionID:        "test-session",
+		InputTokens:      100_000,
+		OutputTokens:     5_000,
+		ContextLimit:     128_000,
+		CompactionReason: "threshold",
+	}
+
+	result, err := exec.Dispatch(t.Context(), EventBeforeCompaction, input)
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+	assert.Empty(t, result.Summary)
+}
+
+// TestExecuteBeforeCompactionBlocksWithExitCode2 pins the contract that a
+// before_compaction hook can veto compaction by exiting with code 2.
+func TestExecuteBeforeCompactionBlocksWithExitCode2(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		BeforeCompaction: []Hook{
+			{Type: HookTypeCommand, Command: "echo 'no compaction please' >&2; exit 2", Timeout: 5},
+		},
+	}
+
+	exec := NewExecutor(config, t.TempDir(), nil)
+	input := &Input{
+		SessionID:        "test-session",
+		CompactionReason: "manual",
+	}
+
+	result, err := exec.Dispatch(t.Context(), EventBeforeCompaction, input)
+	require.NoError(t, err)
+	assert.False(t, result.Allowed)
+	assert.Equal(t, 2, result.ExitCode)
+}
+
+// TestExecuteBeforeCompactionSurfacesSummary checks that a before_compaction
+// hook returning HookSpecificOutput.summary populates Result.Summary so the
+// runtime can apply it verbatim and skip the LLM-based compaction.
+func TestExecuteBeforeCompactionSurfacesSummary(t *testing.T) {
+	t.Parallel()
+
+	jsonOutput := `{"hook_specific_output":{"hook_event_name":"before_compaction","summary":"hook-supplied summary"}}`
+	config := &Config{
+		BeforeCompaction: []Hook{
+			{Type: HookTypeCommand, Command: "echo '" + jsonOutput + "'", Timeout: 5},
+		},
+	}
+
+	exec := NewExecutor(config, t.TempDir(), nil)
+	input := &Input{
+		SessionID:        "test-session",
+		CompactionReason: "manual",
+	}
+
+	result, err := exec.Dispatch(t.Context(), EventBeforeCompaction, input)
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+	assert.Equal(t, "hook-supplied summary", result.Summary)
+}
+
+// TestExecuteBeforeCompactionFirstSummaryWins checks that when multiple
+// hooks return a summary, the first non-empty one is kept. Concatenating
+// summaries would produce nonsense; clobbering would be order-dependent.
+func TestExecuteBeforeCompactionFirstSummaryWins(t *testing.T) {
+	t.Parallel()
+
+	first := `{"hook_specific_output":{"hook_event_name":"before_compaction","summary":"first"}}`
+	second := `{"hook_specific_output":{"hook_event_name":"before_compaction","summary":"second"}}`
+	config := &Config{
+		BeforeCompaction: []Hook{
+			{Type: HookTypeCommand, Command: "echo '" + first + "'", Timeout: 5},
+			{Type: HookTypeCommand, Command: "echo '" + second + "'", Timeout: 5},
+		},
+	}
+
+	exec := NewExecutor(config, t.TempDir(), nil)
+	result, err := exec.Dispatch(t.Context(), EventBeforeCompaction, &Input{
+		SessionID:        "test-session",
+		CompactionReason: "manual",
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+	// Hooks run concurrently, so we assert on either-or rather than
+	// strict ordering. The contract is "first non-empty wins"; with
+	// concurrent execution that means a deterministic single value
+	// surfaces (no concatenation) — never both.
+	assert.Contains(t, []string{"first", "second"}, result.Summary)
+	assert.NotEqual(t, "firstsecond", result.Summary)
+	assert.NotEqual(t, "secondfirst", result.Summary)
+}
+
+// TestExecuteAfterCompactionIsObservational pins the contract that the
+// after_compaction event ignores its hooks' Allowed/Summary verdicts —
+// they are surfaced into Result for inspection but do not affect the
+// runtime, which calls the hook purely for observability.
+func TestExecuteAfterCompactionIsObservational(t *testing.T) {
+	t.Parallel()
+
+	config := &Config{
+		AfterCompaction: []Hook{
+			{Type: HookTypeCommand, Command: "echo 'compaction done'", Timeout: 5},
+		},
+	}
+
+	exec := NewExecutor(config, t.TempDir(), nil)
+	input := &Input{
+		SessionID:        "test-session",
+		CompactionReason: "threshold",
+		Summary:          "earlier summary",
+	}
+
+	result, err := exec.Dispatch(t.Context(), EventAfterCompaction, input)
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+}
+
+// TestInputCompactionFieldsSerialize pins the wire format for the
+// compaction-specific Input fields so external (command-type) hooks can
+// rely on it.
+func TestInputCompactionFieldsSerialize(t *testing.T) {
+	t.Parallel()
+
+	input := &Input{
+		SessionID:        "sess-789",
+		HookEventName:    EventBeforeCompaction,
+		InputTokens:      120_000,
+		OutputTokens:     8_000,
+		ContextLimit:     200_000,
+		CompactionReason: "overflow",
+	}
+
+	data, err := input.ToJSON()
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(data, &parsed))
+
+	assert.Equal(t, "sess-789", parsed["session_id"])
+	assert.Equal(t, "before_compaction", parsed["hook_event_name"])
+	assert.EqualValues(t, 120_000, parsed["input_tokens"])
+	assert.EqualValues(t, 8_000, parsed["output_tokens"])
+	assert.EqualValues(t, 200_000, parsed["context_limit"])
+	assert.Equal(t, "overflow", parsed["compaction_reason"])
+	// Summary is omitted on before_compaction inputs (it's only set on
+	// after_compaction so handlers receive the produced summary).
+	_, hasSummary := parsed["summary"]
+	assert.False(t, hasSummary)
 }

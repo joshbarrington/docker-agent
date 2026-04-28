@@ -71,32 +71,6 @@ func TestExtractResult(t *testing.T) {
 	}
 }
 
-func TestFormatCount(t *testing.T) {
-	tests := []struct {
-		count    int
-		singular string
-		plural   string
-		expected string
-	}{
-		{0, "file", "files", "0 files"},
-		{1, "file", "files", "1 file"},
-		{2, "file", "files", "2 files"},
-		{100, "file", "files", "100 files"},
-		{1, "directory", "directories", "1 directory"},
-		{2, "directory", "directories", "2 directories"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.expected, func(t *testing.T) {
-			result := formatCount(tt.count, tt.singular, tt.plural)
-			if result != tt.expected {
-				t.Errorf("formatCount(%d, %q, %q) = %q, want %q",
-					tt.count, tt.singular, tt.plural, result, tt.expected)
-			}
-		})
-	}
-}
-
 func TestShortenPath(t *testing.T) {
 	tests := []struct {
 		name     string

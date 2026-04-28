@@ -40,7 +40,11 @@ func BranchSession(parent *Session, branchAtPosition int) (*Session, error) {
 func cloneSessionItem(item Item) (Item, error) {
 	switch {
 	case item.Message != nil:
-		return Item{Message: cloneMessage(item.Message)}, nil
+		cloned := cloneMessage(item.Message)
+		// Branched messages must get fresh database IDs when persisted, so
+		// drop the parent's row ID.
+		cloned.ID = 0
+		return Item{Message: cloned}, nil
 	case item.SubSession != nil:
 		clonedSub, err := cloneSubSession(item.SubSession)
 		if err != nil {
@@ -90,6 +94,7 @@ func copySessionMetadata(dst, src *Session, title string) {
 	dst.Permissions = clonePermissionsConfig(src.Permissions)
 	dst.AgentModelOverrides = cloneStringMap(src.AgentModelOverrides)
 	dst.CustomModelsUsed = cloneStringSlice(src.CustomModelsUsed)
+	dst.AttachedFiles = src.AttachedFilesSnapshot()
 }
 
 // generateBranchTitle creates a title for a branched session based on the parent title.
@@ -146,56 +151,6 @@ func cloneStringSlice(src []string) []string {
 		return nil
 	}
 	return slices.Clone(src)
-}
-
-func cloneMessage(src *Message) *Message {
-	if src == nil {
-		return nil
-	}
-	msgCopy := *src
-	msgCopy.ID = 0
-	msgCopy.Message = cloneChatMessage(src.Message)
-	return &msgCopy
-}
-
-func cloneChatMessage(src chat.Message) chat.Message {
-	dst := src
-
-	if src.MultiContent != nil {
-		dst.MultiContent = make([]chat.MessagePart, len(src.MultiContent))
-		for i, part := range src.MultiContent {
-			cloned := part
-			if part.ImageURL != nil {
-				imageCopy := *part.ImageURL
-				cloned.ImageURL = &imageCopy
-			}
-			dst.MultiContent[i] = cloned
-		}
-	}
-
-	if src.FunctionCall != nil {
-		fnCopy := *src.FunctionCall
-		dst.FunctionCall = &fnCopy
-	}
-
-	if src.ToolCalls != nil {
-		dst.ToolCalls = slices.Clone(src.ToolCalls)
-	}
-
-	if src.ToolDefinitions != nil {
-		dst.ToolDefinitions = slices.Clone(src.ToolDefinitions)
-	}
-
-	if src.Usage != nil {
-		usageCopy := *src.Usage
-		dst.Usage = &usageCopy
-	}
-
-	if src.ThoughtSignature != nil {
-		dst.ThoughtSignature = slices.Clone(src.ThoughtSignature)
-	}
-
-	return dst
 }
 
 func setParentIDs(sess *Session) {

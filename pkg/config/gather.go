@@ -106,7 +106,7 @@ func addEnvVarsForModelConfig(model *latest.ModelConfig, customProviders map[str
 				addEnvVarsForCoreProvider(effective, model, requiredEnv)
 			}
 		}
-	} else if alias, exists := provider.Aliases[model.Provider]; exists {
+	} else if alias, exists := provider.LookupAlias(model.Provider); exists {
 		// Check built-in aliases
 		if alias.TokenEnvVar != "" {
 			requiredEnv[alias.TokenEnvVar] = true

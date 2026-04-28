@@ -17,7 +17,7 @@ func TestCatalogProviders(t *testing.T) {
 	}
 
 	// Should include aliases with BaseURL
-	for name, alias := range Aliases {
+	for name, alias := range EachAlias() {
 		if alias.BaseURL != "" {
 			assert.Contains(t, providers, name, "should include alias %s with BaseURL", name)
 		} else {
@@ -35,7 +35,7 @@ func TestIsCatalogProvider(t *testing.T) {
 	}
 
 	// Aliases: catalog if and only if they have a BaseURL
-	for name, alias := range Aliases {
+	for name, alias := range EachAlias() {
 		if alias.BaseURL != "" {
 			assert.True(t, IsCatalogProvider(name), "alias %s with BaseURL should be a catalog provider", name)
 		} else {
@@ -59,7 +59,7 @@ func TestAllProviders(t *testing.T) {
 	}
 
 	// Should include all aliases
-	for name := range Aliases {
+	for name := range EachAlias() {
 		assert.Contains(t, all, name, "should include alias %s", name)
 	}
 
@@ -76,7 +76,7 @@ func TestIsKnownProvider(t *testing.T) {
 	}
 
 	// All aliases should be known
-	for name := range Aliases {
+	for name := range EachAlias() {
 		assert.True(t, IsKnownProvider(name), "alias %s should be known", name)
 	}
 

@@ -215,6 +215,7 @@ func (s *InMemorySessionStore) UpdateSession(_ context.Context, session *Session
 		Permissions:         session.Permissions,
 		AgentModelOverrides: session.AgentModelOverrides,
 		CustomModelsUsed:    session.CustomModelsUsed,
+		AttachedFiles:       session.AttachedFilesSnapshot(),
 		ParentID:            session.ParentID,
 	}
 
@@ -264,7 +265,7 @@ func (s *InMemorySessionStore) AddMessage(_ context.Context, sessionID string, m
 func (s *InMemorySessionStore) UpdateMessage(_ context.Context, messageID int64, msg *Message) error {
 	// Create a deep copy of the message to avoid mutating the caller's pointer,
 	// which may be shared with another Session object.
-	updated := deepCopyMessage(msg)
+	updated := cloneMessage(msg)
 	updated.ID = messageID
 
 	// For in-memory store, we need to find the message across all sessions
@@ -331,6 +332,62 @@ type SQLiteSessionStore struct {
 	db *sql.DB
 }
 
+// sessionSelectColumns is the canonical SELECT list for the sessions table.
+// The column order matches what scanSession expects; all read paths use this
+// constant so that adding a column requires updating exactly one place.
+const sessionSelectColumns = `id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id`
+
+// sessionPersistedFields holds the encoded form of a Session's JSON-bearing
+// columns plus the SQL representation of parent_id (nil for the empty
+// string, which keeps the foreign key constraint happy).
+type sessionPersistedFields struct {
+	PermissionsJSON         string
+	AgentModelOverridesJSON string
+	CustomModelsUsedJSON    string
+	ParentID                any // string or nil
+}
+
+// sessionPersistedFieldsOf marshals the JSON-bearing columns of session and
+// derives the SQL parent_id value. INSERT/UPDATE call sites use this helper
+// so the marshaling rules ("" / "{}" / "[]" defaults, NULL parent_id) live
+// in one place.
+func sessionPersistedFieldsOf(session *Session) (sessionPersistedFields, error) {
+	var f sessionPersistedFields
+
+	if session.Permissions != nil {
+		permBytes, err := json.Marshal(session.Permissions)
+		if err != nil {
+			return f, err
+		}
+		f.PermissionsJSON = string(permBytes)
+	}
+
+	f.AgentModelOverridesJSON = "{}"
+	if len(session.AgentModelOverrides) > 0 {
+		overridesBytes, err := json.Marshal(session.AgentModelOverrides)
+		if err != nil {
+			return f, err
+		}
+		f.AgentModelOverridesJSON = string(overridesBytes)
+	}
+
+	f.CustomModelsUsedJSON = "[]"
+	if len(session.CustomModelsUsed) > 0 {
+		customBytes, err := json.Marshal(session.CustomModelsUsed)
+		if err != nil {
+			return f, err
+		}
+		f.CustomModelsUsedJSON = string(customBytes)
+	}
+
+	// Use NULL for empty parent_id to avoid foreign key constraint issues.
+	if session.ParentID != "" {
+		f.ParentID = session.ParentID
+	}
+
+	return f, nil
+}
+
 // UpdateSessionTokens updates only token/cost fields.
 func (s *InMemorySessionStore) UpdateSessionTokens(_ context.Context, sessionID string, inputTokens, outputTokens int64, cost float64) error {
 	if sessionID == "" {
@@ -364,7 +421,10 @@ func (s *InMemorySessionStore) Close() error {
 	return nil
 }
 
-// NewSQLiteSessionStore creates a new SQLite session store
+// NewSQLiteSessionStore creates a new SQLite session store backed by a file
+// at path. If migrations fail (other than a version mismatch or a filesystem
+// open failure) the existing database is moved aside to <path>.bak and a
+// fresh one is created.
 func NewSQLiteSessionStore(path string) (Store, error) {
 	store, err := openAndMigrateSQLiteStore(path)
 	if err != nil {
@@ -405,6 +465,24 @@ func NewSQLiteSessionStore(path string) (Store, error) {
 	return store, nil
 }
 
+// NewSQLiteSessionStoreFromDB wraps an already-open *sql.DB in a session store,
+// running the bootstrap schema and migrations against it. The caller retains
+// ownership of db: it is not closed on error, and Store.Close() will close it
+// when the store is closed.
+//
+// This is intended primarily for tests that want to use an in-memory database
+// (sql.Open("sqlite", ":memory:")) or pre-seed a database with non-default
+// state. Production callers should use NewSQLiteSessionStore.
+func NewSQLiteSessionStoreFromDB(db *sql.DB) (*SQLiteSessionStore, error) {
+	if db == nil {
+		return nil, errors.New("db is nil")
+	}
+	if err := setupAndMigrate(db); err != nil {
+		return nil, err
+	}
+	return &SQLiteSessionStore{db: db}, nil
+}
+
 // openAndMigrateSQLiteStore opens the database and runs migrations
 func openAndMigrateSQLiteStore(path string) (*SQLiteSessionStore, error) {
 	db, err := sqliteutil.OpenDB(path)
@@ -412,14 +490,7 @@ func openAndMigrateSQLiteStore(path string) (*SQLiteSessionStore, error) {
 		return nil, err
 	}
 
-	_, err = db.ExecContext(context.Background(), `
-		CREATE TABLE IF NOT EXISTS sessions (
-			id TEXT PRIMARY KEY,
-			messages TEXT,
-			created_at TEXT
-		)
-	`)
-	if err != nil {
+	if err := setupAndMigrate(db); err != nil {
 		db.Close()
 		if sqliteutil.IsCantOpenError(err) {
 			return nil, sqliteutil.DiagnoseDBOpenError(path, err)
@@ -427,15 +498,27 @@ func openAndMigrateSQLiteStore(path string) (*SQLiteSessionStore, error) {
 		return nil, err
 	}
 
-	// Initialize and run migrations
-	migrationManager := NewMigrationManager(db)
-	err = migrationManager.InitializeMigrations(context.Background())
+	return &SQLiteSessionStore{db: db}, nil
+}
+
+// setupAndMigrate creates the bootstrap sessions table (if missing) and runs
+// all pending schema migrations. The bootstrap schema only declares the
+// columns the very first migration expects to find; later columns are added
+// by subsequent ALTER TABLE migrations.
+func setupAndMigrate(db *sql.DB) error {
+	_, err := db.ExecContext(context.Background(), `
+		CREATE TABLE IF NOT EXISTS sessions (
+			id TEXT PRIMARY KEY,
+			messages TEXT,
+			created_at TEXT
+		)
+	`)
 	if err != nil {
-		db.Close()
-		return nil, err
+		return err
 	}
 
-	return &SQLiteSessionStore{db: db}, nil
+	migrationManager := NewMigrationManager(db)
+	return migrationManager.InitializeMigrations(context.Background())
 }
 
 // backupDatabase moves the database file (and related WAL files) to a backup
@@ -477,40 +560,11 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 		return ErrEmptyID
 	}
 
-	permissionsJSON := ""
-	if session.Permissions != nil {
-		permBytes, err := json.Marshal(session.Permissions)
-		if err != nil {
-			return err
-		}
-		permissionsJSON = string(permBytes)
+	fields, err := sessionPersistedFieldsOf(session)
+	if err != nil {
+		return err
 	}
 
-	// Marshal agent model overrides (default to empty object if nil)
-	agentModelOverridesJSON := "{}"
-	if len(session.AgentModelOverrides) > 0 {
-		overridesBytes, err := json.Marshal(session.AgentModelOverrides)
-		if err != nil {
-			return err
-		}
-		agentModelOverridesJSON = string(overridesBytes)
-	}
-
-	// Marshal custom models used (default to empty array if nil)
-	customModelsUsedJSON := "[]"
-	if len(session.CustomModelsUsed) > 0 {
-		customBytes, err := json.Marshal(session.CustomModelsUsed)
-		if err != nil {
-			return err
-		}
-		customModelsUsedJSON = string(customBytes)
-	}
-
-	// Use NULL for empty parent_id to avoid foreign key constraint issues
-	var parentID any
-	if session.ParentID != "" {
-		parentID = session.ParentID
-	}
 	// Use a transaction to insert session and its items
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -526,8 +580,8 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens, session.Title,
 		session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
-		session.CreatedAt.Format(time.RFC3339), permissionsJSON, agentModelOverridesJSON,
-		customModelsUsedJSON, false, parentID)
+		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
+		fields.CustomModelsUsedJSON, false, fields.ParentID)
 	if err != nil {
 		return err
 	}
@@ -542,108 +596,63 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 	return tx.Commit()
 }
 
-// scanSession scans a single row into a Session struct
-// Note: Messages are loaded separately from session_items table
+// scanSession scans a single row into a Session struct.
+// Note: Messages are loaded separately from session_items table.
+// The thinking column is read but discarded — it is kept in the schema for
+// backward compatibility with older docker-agent versions that wrote it.
 func scanSession(scanner interface {
 	Scan(dest ...any) error
 },
 ) (*Session, error) {
-	var toolsApprovedStr, inputTokensStr, outputTokensStr, titleStr, costStr, sendUserMessageStr, maxIterationsStr, createdAtStr, starredStr, agentModelOverridesJSON, customModelsUsedJSON string
-	var thinkingStr string // read from DB but not used (kept for backward compatibility)
-	var sessionID string
-	var workingDir sql.NullString
-	var permissionsJSON sql.NullString
-	var parentID sql.NullString
-	err := scanner.Scan(&sessionID, &toolsApprovedStr, &inputTokensStr, &outputTokensStr, &titleStr, &costStr, &sendUserMessageStr, &maxIterationsStr, &workingDir, &createdAtStr, &starredStr, &permissionsJSON, &agentModelOverridesJSON, &customModelsUsedJSON, &thinkingStr, &parentID)
+	var (
+		sess                    Session
+		workingDir              sql.NullString
+		permissionsJSON         sql.NullString
+		parentID                sql.NullString
+		agentModelOverridesJSON string
+		customModelsUsedJSON    string
+		createdAtStr            string
+		thinking                bool // discarded
+	)
+
+	err := scanner.Scan(
+		&sess.ID, &sess.ToolsApproved, &sess.InputTokens, &sess.OutputTokens,
+		&sess.Title, &sess.Cost, &sess.SendUserMessage, &sess.MaxIterations,
+		&workingDir, &createdAtStr, &sess.Starred, &permissionsJSON,
+		&agentModelOverridesJSON, &customModelsUsedJSON, &thinking, &parentID,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	toolsApproved, err := strconv.ParseBool(toolsApprovedStr)
+	sess.CreatedAt, err = time.Parse(time.RFC3339, createdAtStr)
 	if err != nil {
 		return nil, err
 	}
 
-	inputTokens, err := strconv.ParseInt(inputTokensStr, 10, 64)
-	if err != nil {
-		return nil, err
-	}
+	sess.WorkingDir = workingDir.String
+	sess.ParentID = parentID.String
 
-	outputTokens, err := strconv.ParseInt(outputTokensStr, 10, 64)
-	if err != nil {
-		return nil, err
-	}
-
-	cost, err := strconv.ParseFloat(costStr, 64)
-	if err != nil {
-		return nil, err
-	}
-
-	sendUserMessage, err := strconv.ParseBool(sendUserMessageStr)
-	if err != nil {
-		return nil, err
-	}
-
-	maxIterations, err := strconv.Atoi(maxIterationsStr)
-	if err != nil {
-		return nil, err
-	}
-
-	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
-	if err != nil {
-		return nil, err
-	}
-
-	starred, err := strconv.ParseBool(starredStr)
-	if err != nil {
-		return nil, err
-	}
-
-	// thinkingStr is read from the DB but ignored (column kept for backward compatibility).
-
-	// Parse permissions if present
-	var permissions *PermissionsConfig
 	if permissionsJSON.Valid && permissionsJSON.String != "" {
-		permissions = &PermissionsConfig{}
-		if err := json.Unmarshal([]byte(permissionsJSON.String), permissions); err != nil {
+		sess.Permissions = &PermissionsConfig{}
+		if err := json.Unmarshal([]byte(permissionsJSON.String), sess.Permissions); err != nil {
 			return nil, err
 		}
 	}
 
-	// Parse agent model overrides (may be empty or "{}")
-	var agentModelOverrides map[string]string
 	if agentModelOverridesJSON != "" && agentModelOverridesJSON != "{}" {
-		if err := json.Unmarshal([]byte(agentModelOverridesJSON), &agentModelOverrides); err != nil {
+		if err := json.Unmarshal([]byte(agentModelOverridesJSON), &sess.AgentModelOverrides); err != nil {
 			return nil, err
 		}
 	}
 
-	// Parse custom models used (may be empty or "[]")
-	var customModelsUsed []string
 	if customModelsUsedJSON != "" && customModelsUsedJSON != "[]" {
-		if err := json.Unmarshal([]byte(customModelsUsedJSON), &customModelsUsed); err != nil {
+		if err := json.Unmarshal([]byte(customModelsUsedJSON), &sess.CustomModelsUsed); err != nil {
 			return nil, err
 		}
 	}
 
-	return &Session{
-		ID:                  sessionID,
-		Title:               titleStr,
-		Messages:            nil, // Loaded separately from session_items
-		ToolsApproved:       toolsApproved,
-		InputTokens:         inputTokens,
-		OutputTokens:        outputTokens,
-		Cost:                cost,
-		SendUserMessage:     sendUserMessage,
-		MaxIterations:       maxIterations,
-		CreatedAt:           createdAt,
-		WorkingDir:          workingDir.String,
-		Starred:             starred,
-		Permissions:         permissions,
-		AgentModelOverrides: agentModelOverrides,
-		CustomModelsUsed:    customModelsUsed,
-		ParentID:            parentID.String,
-	}, nil
+	return &sess, nil
 }
 
 // GetSession retrieves a session by ID
@@ -651,26 +660,7 @@ func (s *SQLiteSessionStore) GetSession(ctx context.Context, id string) (*Sessio
 	if id == "" {
 		return nil, ErrEmptyID
 	}
-
-	row := s.db.QueryRowContext(ctx,
-		"SELECT id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id FROM sessions WHERE id = ?", id)
-
-	sess, err := scanSession(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, err
-	}
-
-	// Load messages from session_items table
-	items, err := s.loadSessionItems(ctx, id)
-	if err != nil {
-		return nil, fmt.Errorf("loading session items: %w", err)
-	}
-	sess.Messages = items
-
-	return sess, nil
+	return s.loadSession(ctx, s.db, id)
 }
 
 // sessionItemRow holds the raw data from a session_items row
@@ -685,13 +675,10 @@ type sessionItemRow struct {
 	firstKeptEntry int
 }
 
-// loadSessionItems loads all items for a session from the session_items table.
-func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, sessionID string) ([]Item, error) {
-	return s.loadSessionItemsWith(ctx, s.db, sessionID)
-}
-
-// loadSessionItemsWith loads items using the provided querier (db or tx).
-func (s *SQLiteSessionStore) loadSessionItemsWith(ctx context.Context, q querier, sessionID string) ([]Item, error) {
+// loadSessionItems loads all items for a session from session_items.
+// Used both as the public read path (q == s.db) and recursively from inside
+// loadSession when resolving sub-sessions inside a transaction.
+func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, sessionID string) ([]Item, error) {
 	rows, err := q.QueryContext(ctx,
 		`SELECT position, item_type, agent_name, message_json, implicit, subsession_id, summary_text, COALESCE(first_kept_entry, 0)
 		 FROM session_items WHERE session_id = ? ORDER BY position`, sessionID)
@@ -743,7 +730,7 @@ func (s *SQLiteSessionStore) loadSessionItemsWith(ctx context.Context, q querier
 				continue
 			}
 			// Recursively load sub-session
-			subSession, err := s.loadSessionWith(ctx, q, row.subsessionID.String)
+			subSession, err := s.loadSession(ctx, q, row.subsessionID.String)
 			if err != nil {
 				if errors.Is(err, ErrNotFound) {
 					// Sub-session was deleted but item reference remains (orphaned reference)
@@ -762,10 +749,10 @@ func (s *SQLiteSessionStore) loadSessionItemsWith(ctx context.Context, q querier
 	return items, nil
 }
 
-// loadSessionWith loads a session using the provided querier.
-func (s *SQLiteSessionStore) loadSessionWith(ctx context.Context, q querier, id string) (*Session, error) {
+// loadSession retrieves a session by ID using the supplied querier.
+func (s *SQLiteSessionStore) loadSession(ctx context.Context, q querier, id string) (*Session, error) {
 	row := q.QueryRowContext(ctx,
-		"SELECT id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id FROM sessions WHERE id = ?", id)
+		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ?", id)
 
 	sess, err := scanSession(row)
 	if err != nil {
@@ -775,12 +762,10 @@ func (s *SQLiteSessionStore) loadSessionWith(ctx context.Context, q querier, id 
 		return nil, err
 	}
 
-	// Load messages
-	items, err := s.loadSessionItemsWith(ctx, q, id)
+	sess.Messages, err = s.loadSessionItems(ctx, q, id)
 	if err != nil {
 		return nil, fmt.Errorf("loading session items: %w", err)
 	}
-	sess.Messages = items
 
 	return sess, nil
 }
@@ -788,7 +773,7 @@ func (s *SQLiteSessionStore) loadSessionWith(ctx context.Context, q querier, id 
 // GetSessions retrieves all root sessions (excludes sub-sessions)
 func (s *SQLiteSessionStore) GetSessions(ctx context.Context) ([]*Session, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id FROM sessions WHERE parent_id IS NULL OR parent_id = '' ORDER BY created_at DESC")
+		"SELECT "+sessionSelectColumns+" FROM sessions WHERE parent_id IS NULL OR parent_id = '' ORDER BY created_at DESC")
 	if err != nil {
 		return nil, err
 	}
@@ -809,7 +794,7 @@ func (s *SQLiteSessionStore) GetSessions(ctx context.Context) ([]*Session, error
 
 	// Load messages for each session
 	for _, session := range sessions {
-		items, err := s.loadSessionItems(ctx, session.ID)
+		items, err := s.loadSessionItems(ctx, s.db, session.ID)
 		if err != nil {
 			return nil, fmt.Errorf("loading items for session %s: %w", session.ID, err)
 		}
@@ -835,26 +820,18 @@ func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary
 
 	var summaries []Summary
 	for rows.Next() {
-		var id, title, createdAtStr, starredStr string
-		var numMessages int
-		if err := rows.Scan(&id, &title, &createdAtStr, &starredStr, &numMessages); err != nil {
+		var (
+			summary      Summary
+			createdAtStr string
+		)
+		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &summary.NumMessages); err != nil {
 			return nil, err
 		}
-		createdAt, err := time.Parse(time.RFC3339, createdAtStr)
+		summary.CreatedAt, err = time.Parse(time.RFC3339, createdAtStr)
 		if err != nil {
 			return nil, err
 		}
-		starred, err := strconv.ParseBool(starredStr)
-		if err != nil {
-			return nil, err
-		}
-		summaries = append(summaries, Summary{
-			ID:          id,
-			Title:       title,
-			CreatedAt:   createdAt,
-			Starred:     starred,
-			NumMessages: numMessages,
-		})
+		summaries = append(summaries, summary)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -895,40 +872,11 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		return ErrEmptyID
 	}
 
-	permissionsJSON := ""
-	if session.Permissions != nil {
-		permBytes, err := json.Marshal(session.Permissions)
-		if err != nil {
-			return err
-		}
-		permissionsJSON = string(permBytes)
+	fields, err := sessionPersistedFieldsOf(session)
+	if err != nil {
+		return err
 	}
 
-	// Marshal agent model overrides (default to empty object if nil)
-	agentModelOverridesJSON := "{}"
-	if len(session.AgentModelOverrides) > 0 {
-		overridesBytes, err := json.Marshal(session.AgentModelOverrides)
-		if err != nil {
-			return err
-		}
-		agentModelOverridesJSON = string(overridesBytes)
-	}
-
-	// Marshal custom models used (default to empty array if nil)
-	customModelsUsedJSON := "[]"
-	if len(session.CustomModelsUsed) > 0 {
-		customBytes, err := json.Marshal(session.CustomModelsUsed)
-		if err != nil {
-			return err
-		}
-		customModelsUsedJSON = string(customBytes)
-	}
-
-	// Use NULL for empty parent_id to avoid foreign key constraint issues
-	var parentID any
-	if session.ParentID != "" {
-		parentID = session.ParentID
-	}
 	// Use a transaction
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -961,8 +909,8 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		   parent_id = excluded.parent_id`,
 		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
-		session.CreatedAt.Format(time.RFC3339), session.Starred, permissionsJSON, agentModelOverridesJSON,
-		customModelsUsedJSON, false, parentID)
+		session.CreatedAt.Format(time.RFC3339), session.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
+		fields.CustomModelsUsedJSON, false, fields.ParentID)
 	if err != nil {
 		return err
 	}
@@ -1100,39 +1048,12 @@ func (s *SQLiteSessionStore) AddSubSession(ctx context.Context, parentSessionID 
 
 // addSessionTx inserts a session within a transaction.
 func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, session *Session) error {
-	permissionsJSON := ""
-	if session.Permissions != nil {
-		permBytes, err := json.Marshal(session.Permissions)
-		if err != nil {
-			return err
-		}
-		permissionsJSON = string(permBytes)
+	fields, err := sessionPersistedFieldsOf(session)
+	if err != nil {
+		return err
 	}
 
-	agentModelOverridesJSON := "{}"
-	if len(session.AgentModelOverrides) > 0 {
-		overridesBytes, err := json.Marshal(session.AgentModelOverrides)
-		if err != nil {
-			return err
-		}
-		agentModelOverridesJSON = string(overridesBytes)
-	}
-
-	customModelsUsedJSON := "[]"
-	if len(session.CustomModelsUsed) > 0 {
-		customBytes, err := json.Marshal(session.CustomModelsUsed)
-		if err != nil {
-			return err
-		}
-		customModelsUsedJSON = string(customBytes)
-	}
-
-	// Use NULL for empty parent_id to avoid foreign key constraint issues
-	var parentID any
-	if session.ParentID != "" {
-		parentID = session.ParentID
-	}
-	_, err := tx.ExecContext(ctx,
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO sessions (
 			id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
@@ -1142,8 +1063,8 @@ func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, sessi
 		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations,
 		session.WorkingDir, session.CreatedAt.Format(time.RFC3339), session.Starred,
-		permissionsJSON, agentModelOverridesJSON, customModelsUsedJSON, false,
-		parentID)
+		fields.PermissionsJSON, fields.AgentModelOverridesJSON, fields.CustomModelsUsedJSON, false,
+		fields.ParentID)
 	return err
 }
 

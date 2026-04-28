@@ -104,7 +104,9 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 			return nil
 		}
 
-		sess.AddMessage(PrepareUserMessage(ctx, rt, userInput, cfg.AttachmentPath))
+		userMsg, attachedPath := PrepareUserMessage(ctx, rt, userInput, cfg.AttachmentPath)
+		sess.AddMessage(userMsg)
+		sess.AddAttachedFile(attachedPath)
 
 		if cfg.OutputJSON {
 			for event := range rt.RunStream(ctx, sess) {
@@ -320,8 +322,11 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 //   - userInput: the raw user input (may contain /commands and /attach directives)
 //   - globalAttachPath: attachment path from --attach flag (can be empty)
 //
-// Returns the prepared session.Message ready to be added to the session.
-func PrepareUserMessage(ctx context.Context, rt runtime.Runtime, userInput, globalAttachPath string) *session.Message {
+// Returns the prepared session.Message ready to be added to the session, plus
+// the absolute path of the file that was actually attached (empty when no
+// attachment was used). Callers should pass that path to
+// session.Session.AddAttachedFile so sub-agents inherit the file context.
+func PrepareUserMessage(ctx context.Context, rt runtime.Runtime, userInput, globalAttachPath string) (*session.Message, string) {
 	// Resolve any /command to its prompt text
 	resolvedContent := runtime.ResolveCommand(ctx, rt, userInput)
 
@@ -391,22 +396,35 @@ func ParseAttachCommand(userInput string) (messageText, attachPath string) {
 // CreateUserMessageWithAttachment creates a user message with optional file attachment.
 // Text files are inlined directly as text content for cross-provider compatibility.
 // Binary files (images, PDFs) are stored as file references for provider-specific upload.
-func CreateUserMessageWithAttachment(userContent, attachmentPath string) *session.Message {
-	if attachmentPath == "" {
-		return session.UserMessage(userContent)
+//
+// Returns the prepared session.Message and the absolute path of the file that
+// was actually attached. The returned path is empty when no attachment was
+// produced (no path supplied, file unreadable, type unsupported, file too
+// large to inline, etc.). Callers should record successful attachments via
+// session.Session.AddAttachedFile so sub-agents inherit the file context.
+func CreateUserMessageWithAttachment(userContent, attachmentPath string) (*session.Message, string) {
+	// noAttachment returns the message without any attachment. It's used both
+	// when the caller didn't supply a path and as the fallback for every
+	// best-effort failure below (unreadable file, unsupported type, etc.) so
+	// the user always gets at least a plain text message.
+	noAttachment := func() (*session.Message, string) {
+		return session.UserMessage(userContent), ""
 	}
 
-	// Validate file exists
+	if attachmentPath == "" {
+		return noAttachment()
+	}
+
 	absPath, err := filepath.Abs(attachmentPath)
 	if err != nil {
 		slog.Warn("Failed to get absolute path for attachment", "path", attachmentPath, "error", err)
-		return session.UserMessage(userContent)
+		return noAttachment()
 	}
 
 	fi, err := os.Stat(absPath)
 	if err != nil {
 		slog.Warn("Attachment file not accessible", "path", absPath, "error", err)
-		return session.UserMessage(userContent)
+		return noAttachment()
 	}
 
 	// Ensure we have some text content when attaching a file
@@ -424,12 +442,12 @@ func CreateUserMessageWithAttachment(userContent, attachmentPath string) *sessio
 		// Text files are inlined directly as text content.
 		if fi.Size() > chat.MaxInlineFileSize {
 			slog.Warn("Attachment text file too large to inline", "path", absPath, "size", fi.Size())
-			return session.UserMessage(userContent)
+			return noAttachment()
 		}
 		content, err := chat.ReadFileForInline(absPath)
 		if err != nil {
 			slog.Warn("Failed to read attachment file", "path", absPath, "error", err)
-			return session.UserMessage(userContent)
+			return noAttachment()
 		}
 		multiContent = append(multiContent, chat.MessagePart{
 			Type: chat.MessagePartTypeText,
@@ -441,7 +459,7 @@ func CreateUserMessageWithAttachment(userContent, attachmentPath string) *sessio
 		mimeType := chat.DetectMimeType(absPath)
 		if !chat.IsSupportedMimeType(mimeType) {
 			slog.Warn("Unsupported attachment file type", "path", absPath, "mime_type", mimeType)
-			return session.UserMessage(userContent)
+			return noAttachment()
 		}
 		if chat.IsImageMimeType(mimeType) {
 			// Read, resize if needed, and inline as base64 data URL.
@@ -450,12 +468,12 @@ func CreateUserMessageWithAttachment(userContent, attachmentPath string) *sessio
 			imgData, readErr := os.ReadFile(absPath)
 			if readErr != nil {
 				slog.Warn("Failed to read image attachment", "path", absPath, "error", readErr)
-				return session.UserMessage(userContent)
+				return noAttachment()
 			}
 			resized, resizeErr := chat.ResizeImage(imgData, mimeType)
 			if resizeErr != nil {
 				slog.Warn("Image resize failed for attachment", "path", absPath, "error", resizeErr)
-				return session.UserMessage(userContent)
+				return noAttachment()
 			}
 			dataURL := fmt.Sprintf("data:%s;base64,%s", resized.MimeType, base64.StdEncoding.EncodeToString(resized.Data))
 			multiContent = append(multiContent, chat.MessagePart{
@@ -477,5 +495,5 @@ func CreateUserMessageWithAttachment(userContent, attachmentPath string) *sessio
 		}
 	}
 
-	return session.UserMessage(textContent, multiContent...)
+	return session.UserMessage(textContent, multiContent...), absPath
 }

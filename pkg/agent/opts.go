@@ -3,6 +3,7 @@ package agent
 import (
 	"time"
 
+	"github.com/docker/docker-agent/pkg/cache"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/model/provider"
@@ -170,5 +171,12 @@ func WithLoadTimeWarnings(warnings []string) Opt {
 func WithHooks(hooks *latest.HooksConfig) Opt {
 	return func(a *Agent) {
 		a.hooks = hooks
+	}
+}
+
+// WithCache attaches a response cache to the agent. Pass nil to disable.
+func WithCache(c *cache.Cache) Opt {
+	return func(a *Agent) {
+		a.cache = c
 	}
 }

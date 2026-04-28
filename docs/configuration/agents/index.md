@@ -48,6 +48,11 @@ agents:
     structured_output: # Optional: constrain output format
       name: string
       schema: object
+    cache: # Optional: response cache (skip the model on repeat questions)
+      enabled: boolean
+      case_sensitive: boolean
+      trim_spaces: boolean
+      path: string
 ```
 
 <div class="callout callout-tip" markdown="1">
@@ -83,6 +88,7 @@ agents:
 | `handoffs`                  | array   | ✗        | List of agent names this agent can hand off the conversation to. Enables the `handoff` tool. See [Handoffs Routing]({{ '/concepts/multi-agent/#handoffs-routing' | relative_url }}).                  |
 | `hooks`                     | object  | ✗        | Lifecycle hooks for running commands at various points. See [Hooks]({{ '/configuration/hooks/' | relative_url }}).                                                                                   |
 | `structured_output`         | object  | ✗        | Constrain agent output to match a JSON schema. See [Structured Output]({{ '/configuration/structured-output/' | relative_url }}).                                                                    |
+| `cache`                     | object  | ✗        | Response cache. When the same user question is asked again, the previous answer is replayed verbatim and the model is not called. See [Response Cache](#response-cache) below.                  |
 
 <div class="callout callout-warning" markdown="1">
 <div class="callout-title">⚠️ max_iterations
@@ -90,6 +96,47 @@ agents:
   <p>Default is <code>0</code> (unlimited). Always set <code>max_iterations</code> for agents with powerful tools like <code>shell</code> to prevent infinite loops. A value of 20–50 is typical for development agents.</p>
 
 </div>
+
+## Response Cache
+
+The response cache short-circuits the model when the same user question is asked again. The first time a question is asked, the agent calls the model normally and stores the assistant's reply. Subsequent identical questions skip the model entirely and replay the stored reply verbatim.
+
+```yaml
+agents:
+  root:
+    model: openai/gpt-5-mini
+    description: Cached assistant
+    instruction: You are a helpful assistant.
+    cache:
+      enabled: true          # required to turn the cache on
+      case_sensitive: false  # default: false ("Hello" == "hello")
+      trim_spaces: true      # default: false ("  hello  " == "hello")
+      path: ./cache.json     # optional: persist to disk; omit for in-memory
+```
+
+| Property         | Type    | Default | Description                                                                                                                                                                                                                       |
+| ---------------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`        | boolean | `false` | Master switch. When `false` (or when the `cache` section is omitted), no caching is performed.                                                                                                                                     |
+| `case_sensitive` | boolean | `false` | When `true`, questions must match exactly (including case) to hit the cache.                                                                                                                                                       |
+| `trim_spaces`    | boolean | `false` | When `true`, leading and trailing whitespace is stripped from the question before it is compared.                                                                                                                                  |
+| `path`           | string  | _empty_ | When set, cache entries are persisted to a JSON file at the given path and reloaded on startup so the cache survives restarts. Relative paths resolve against the agent config directory. When empty, the cache lives in memory only. |
+
+**How it works**
+
+- The cache key is the latest user message in the session, normalized according to `case_sensitive` and `trim_spaces`.
+- On a hit, the cached reply is added to the session as the assistant message and stop hooks fire normally — the rest of the agent (tools, sub-agents, the model) is bypassed.
+- On a miss, the agent runs normally; the final assistant message produced by the first stop of the run is then stored under the question's key.
+- Only the response to the original user question of a run is cached; follow-up turns inside the same `RunStream` are not.
+
+**File-backed storage**
+
+When `path` is set, every `Store` rewrites the entire cache file. Writes are **atomic**: the new content is written to a sibling temp file, `fsync`'d, and renamed over the destination, so a concurrent reader (or a process that crashes mid-write) will always see either the previous content or the new content in full — never a partially written file. The parent directory is also `fsync`'d after the rename so the rename itself is durable.
+
+**Cross-process sharing**
+
+Multiple processes can share the same `path:` cache file safely. Every `Store` takes an exclusive advisory lock on a sibling `<path>.lock` file (POSIX `flock(2)` on Unix, `LockFileEx` on Windows), reloads the current on-disk state under the lock, merges the new entry, and writes back atomically. Two processes that store *different* keys at the same time both see their writes preserved on disk; the lock window is short (one read + one fsync'd write).
+
+`Lookup` watches the file's modification time and reloads the in-memory map when the file has advanced since its last load, so writes from a sibling process become visible without a restart. The `<path>.lock` sentinel file is created on first write and never deleted: removing it would let two processes lock different inodes and lose mutual exclusion.
 
 ## Welcome Message
 

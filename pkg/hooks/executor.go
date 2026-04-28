@@ -22,32 +22,21 @@ type Executor struct {
 	registry   *Registry
 	// events maps each event to its compiled matcher list. Flat events
 	// (everything except pre/post_tool_use) are stored as a single
-	// matcher with an empty pattern, unifying the dispatch path.
+	// matcher with a nil pattern, unifying the dispatch path.
 	events map[EventType][]matcher
 }
 
-// matcher is the compiled form of a [MatcherConfig]: an optional regex
-// pattern (nil means "match all") and the hooks to fire when it matches.
+// matcher is the compiled form of a [MatcherConfig]: a tool-name regex
+// plus the hooks to fire when it matches. A nil pattern matches every
+// tool — both "" and "*" matchers compile to nil, as do flat events
+// where the tool-name dimension doesn't apply.
 type matcher struct {
-	raw     string
 	pattern *regexp.Regexp
 	hooks   []Hook
 }
 
 func (m *matcher) matches(toolName string) bool {
-	if m.raw == "" || m.raw == "*" {
-		return true
-	}
-	return m.pattern != nil && m.pattern.MatchString(toolName)
-}
-
-// hookResult is the outcome of a single hook invocation.
-type hookResult struct {
-	output   *Output
-	stdout   string
-	stderr   string
-	exitCode int
-	err      error
+	return m.pattern == nil || m.pattern.MatchString(toolName)
 }
 
 // NewExecutor creates a new hook executor backed by [DefaultRegistry].
@@ -72,8 +61,10 @@ func NewExecutorWithRegistry(config *Config, workingDir string, env []string, re
 	}
 }
 
-// compileEvents builds the per-event matcher lookup. Adding a new event
-// is a one-line change here.
+// compileEvents builds the per-event matcher lookup. This is the only
+// place in the runtime that enumerates events; the persisted side
+// owns the struct itself, its IsEmpty, and validate, all on
+// [latest.HooksConfig]. Adding a new event is a one-line change here.
 func compileEvents(c *Config) map[EventType][]matcher {
 	flat := func(hooks []Hook) []matcher {
 		if len(hooks) == 0 {
@@ -82,18 +73,27 @@ func compileEvents(c *Config) map[EventType][]matcher {
 		return []matcher{{hooks: hooks}}
 	}
 	return map[EventType][]matcher{
-		EventPreToolUse:      compileMatchers(c.PreToolUse),
-		EventPostToolUse:     compileMatchers(c.PostToolUse),
-		EventSessionStart:    flat(c.SessionStart),
-		EventTurnStart:       flat(c.TurnStart),
-		EventBeforeLLMCall:   flat(c.BeforeLLMCall),
-		EventAfterLLMCall:    flat(c.AfterLLMCall),
-		EventSessionEnd:      flat(c.SessionEnd),
-		EventOnUserInput:     flat(c.OnUserInput),
-		EventStop:            flat(c.Stop),
-		EventNotification:    flat(c.Notification),
-		EventOnError:         flat(c.OnError),
-		EventOnMaxIterations: flat(c.OnMaxIterations),
+		EventPreToolUse:             compileMatchers(c.PreToolUse),
+		EventPostToolUse:            compileMatchers(c.PostToolUse),
+		EventPermissionRequest:      compileMatchers(c.PermissionRequest),
+		EventSessionStart:           flat(c.SessionStart),
+		EventUserPromptSubmit:       flat(c.UserPromptSubmit),
+		EventTurnStart:              flat(c.TurnStart),
+		EventBeforeLLMCall:          flat(c.BeforeLLMCall),
+		EventAfterLLMCall:           flat(c.AfterLLMCall),
+		EventSessionEnd:             flat(c.SessionEnd),
+		EventPreCompact:             flat(c.PreCompact),
+		EventSubagentStop:           flat(c.SubagentStop),
+		EventOnUserInput:            flat(c.OnUserInput),
+		EventStop:                   flat(c.Stop),
+		EventNotification:           flat(c.Notification),
+		EventOnError:                flat(c.OnError),
+		EventOnMaxIterations:        flat(c.OnMaxIterations),
+		EventOnAgentSwitch:          flat(c.OnAgentSwitch),
+		EventOnSessionResume:        flat(c.OnSessionResume),
+		EventOnToolApprovalDecision: flat(c.OnToolApprovalDecision),
+		EventBeforeCompaction:       flat(c.BeforeCompaction),
+		EventAfterCompaction:        flat(c.AfterCompaction),
 	}
 }
 
@@ -103,7 +103,7 @@ func compileMatchers(configs []MatcherConfig) []matcher {
 	}
 	out := make([]matcher, 0, len(configs))
 	for _, mc := range configs {
-		m := matcher{raw: mc.Matcher, hooks: mc.Hooks}
+		m := matcher{hooks: mc.Hooks}
 		if mc.Matcher != "" && mc.Matcher != "*" {
 			p, err := regexp.Compile("^(?:" + mc.Matcher + ")$")
 			if err != nil {
@@ -127,36 +127,17 @@ func (e *Executor) Has(event EventType) bool {
 // don't have to remember. Defaults [Input.Cwd] to the executor's
 // working directory when the caller didn't supply one.
 func (e *Executor) Dispatch(ctx context.Context, event EventType, input *Input) (*Result, error) {
-	matchers := e.events[event]
-	if len(matchers) == 0 {
+	hooks := e.hooksFor(event, input.ToolName)
+	if len(hooks) == 0 {
 		return &Result{Allowed: true}, nil
 	}
+
 	input.HookEventName = event
 	if input.Cwd == "" {
 		input.Cwd = e.workingDir
 	}
 
-	// Collect, filter by tool name, and dedup by (type, command, args).
-	// Dedup catches the common case of an explicit YAML hook overlapping
-	// a runtime auto-injected one (e.g. WithAddDate plus a user-authored
-	// add_date entry).
-	seen := make(map[string]bool)
-	var hooks []Hook
-	for _, m := range matchers {
-		if !m.matches(input.ToolName) {
-			continue
-		}
-		for _, h := range m.hooks {
-			key := dedupKey(h)
-			if !seen[key] {
-				seen[key] = true
-				hooks = append(hooks, h)
-			}
-		}
-	}
-	if len(hooks) == 0 {
-		return &Result{Allowed: true}, nil
-	}
+	slog.Debug("Executing hooks", "event", event, "session_id", input.SessionID, "count", len(hooks))
 
 	inputJSON, err := input.ToJSON()
 	if err != nil {
@@ -173,10 +154,33 @@ func (e *Executor) Dispatch(ctx context.Context, event EventType, input *Input) 
 	return aggregate(results, event), nil
 }
 
+// hooksFor returns the deduplicated list of hooks that should run for
+// (event, toolName). Dedup by (type, command, args) catches the common
+// case of an explicit YAML hook overlapping a runtime auto-injected
+// one (e.g. WithAddDate plus a user-authored add_date entry).
+func (e *Executor) hooksFor(event EventType, toolName string) []Hook {
+	seen := make(map[string]bool)
+	var hooks []Hook
+	for _, m := range e.events[event] {
+		if !m.matches(toolName) {
+			continue
+		}
+		for _, h := range m.hooks {
+			key := dedupKey(h)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			hooks = append(hooks, h)
+		}
+	}
+	return hooks
+}
+
 // dedupKey returns a deterministic key identifying a hook by (type, command, args).
 func dedupKey(h Hook) string {
 	var b strings.Builder
-	b.WriteString(string(h.Type))
+	b.WriteString(h.Type)
 	b.WriteByte(0)
 	b.WriteString(h.Command)
 	for _, a := range h.Args {
@@ -186,24 +190,50 @@ func dedupKey(h Hook) string {
 	return b.String()
 }
 
+// hookResult is the outcome of a single hook invocation: the raw
+// [HandlerResult] reported by the handler plus a post-execution err
+// (factory failure, timeout, exec error). When err is non-nil the
+// handler-reported fields are reset to a uniform "did not run"
+// representation so [aggregate] can rely on the err alone.
+type hookResult struct {
+	HandlerResult
+
+	hook Hook
+	err  error
+}
+
 // runHook resolves the hook's [HookType] in the registry, applies its
 // timeout, and returns the structured outcome. JSON-on-stdout is parsed
 // into [Output] when the handler didn't already provide one.
 func (e *Executor) runHook(ctx context.Context, hook Hook, inputJSON []byte) hookResult {
 	factory, ok := e.registry.Lookup(hook.Type)
 	if !ok {
-		return hookResult{err: fmt.Errorf("unsupported hook type: %s", hook.Type)}
+		return hookResult{hook: hook, err: fmt.Errorf("unsupported hook type: %s", hook.Type)}
 	}
 	handler, err := factory(HandlerEnv{WorkingDir: e.workingDir, Env: e.env}, hook)
 	if err != nil {
-		return hookResult{err: err}
+		return hookResult{hook: hook, err: err}
 	}
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, hook.GetTimeout())
 	defer cancel()
 
 	res, err := handler.Run(timeoutCtx, inputJSON)
-	r := hookResult{stdout: res.Stdout, stderr: res.Stderr, exitCode: res.ExitCode, output: res.Output}
+	r := hookResult{HandlerResult: res, hook: hook}
+
+	// markFailed turns r into a "did not complete" outcome: the
+	// handler's diagnostic stdout/stderr survive (aggregate surfaces
+	// stderr in the PreToolUse fail-closed message), ExitCode is
+	// pinned to -1 to match the documented [Result.ExitCode]
+	// convention, any partial Output is dropped (it can't have been
+	// authoritative if the run didn't complete), and rerr lands in
+	// hookResult.err for the err-!= nil branch in [aggregate].
+	markFailed := func(rerr error) hookResult {
+		r.ExitCode = -1
+		r.Output = nil
+		r.err = rerr
+		return r
+	}
 
 	// Normalize timeout/cancellation: handler error types vary, so we
 	// rewrite to a uniform error so PreToolUse fails closed cleanly.
@@ -212,85 +242,82 @@ func (e *Executor) runHook(ctx context.Context, hook Hook, inputJSON []byte) hoo
 		if errors.Is(ctxErr, context.DeadlineExceeded) {
 			reason = fmt.Sprintf("timed out after %s", hook.GetTimeout())
 		}
-		r.err = fmt.Errorf("hook %q %s: %w", hook.Command, reason, ctxErr)
-		r.exitCode = -1
-		r.output = nil
-		return r
+		return markFailed(fmt.Errorf("hook %q %s: %w", hook.Command, reason, ctxErr))
 	}
 	if err != nil {
-		r.err = err
-		r.exitCode = -1
-		r.output = nil
-		return r
+		return markFailed(err)
 	}
 
 	// Fall back to the legacy "parse JSON from stdout" protocol.
-	if r.output == nil && r.exitCode == 0 && r.stdout != "" {
-		s := strings.TrimSpace(r.stdout)
-		if strings.HasPrefix(s, "{") {
-			var parsed Output
-			if jerr := json.Unmarshal([]byte(s), &parsed); jerr == nil {
-				r.output = &parsed
-			}
-		}
+	if r.Output == nil && r.ExitCode == 0 {
+		r.Output = parseStdoutJSON(r.Stdout)
 	}
 	return r
 }
 
-// contextEvents are the events whose runtime emit sites consume
-// Result.AdditionalContext. Plain stdout from a hook is routed there
-// for these events; for observational events it is silently dropped to
-// avoid the impression that it mattered.
-var contextEvents = map[EventType]bool{
-	EventSessionStart: true,
-	EventTurnStart:    true,
-	EventPostToolUse:  true,
-	EventStop:         true,
+// parseStdoutJSON returns a parsed [Output] when stdout begins with '{'
+// and decodes cleanly, or nil otherwise. Used for the legacy "JSON on
+// stdout" hook protocol where handlers don't pre-populate
+// [HandlerResult.Output].
+func parseStdoutJSON(stdout string) *Output {
+	s := strings.TrimSpace(stdout)
+	if !strings.HasPrefix(s, "{") {
+		return nil
+	}
+	var parsed Output
+	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+		return nil
+	}
+	return &parsed
 }
 
 // aggregate combines per-hook results into a single [Result].
 func aggregate(results []hookResult, event EventType) *Result {
+	spec := eventSpec(event)
 	final := &Result{Allowed: true}
 	var messages, contexts, sysMsgs []string
 
 	for _, r := range results {
 		switch {
 		case r.err != nil:
-			// PreToolUse is a security boundary: an exec failure denies.
-			if event == EventPreToolUse {
-				slog.Warn("PreToolUse hook failed to execute; denying tool call", "error", r.err)
+			policy := ErrorPolicy(r.hook.OnError)
+			if policy == "" {
+				policy = ErrorPolicyWarn
+			}
+			if spec.FailClosed || policy == ErrorPolicyBlock {
+				slog.Warn("Hook failed; blocking event", "hook", r.hook.DisplayName(), "error", r.err)
 				final.Allowed = false
 				final.ExitCode = -1
-				final.Stderr = r.stderr
+				final.Stderr = r.Stderr
 				messages = append(messages, fmt.Sprintf("PreToolUse hook failed to execute: %v", r.err))
-			} else {
-				slog.Warn("Hook execution error", "error", r.err)
+			} else if policy != ErrorPolicyIgnore {
+				slog.Warn("Hook execution error", "hook", r.hook.DisplayName(), "error", r.err)
 			}
 			continue
 
-		case r.exitCode == 2:
+		case r.ExitCode == 2:
 			final.Allowed = false
 			final.ExitCode = 2
-			if r.stderr != "" {
-				final.Stderr = r.stderr
-				messages = append(messages, strings.TrimSpace(r.stderr))
+			if r.Stderr != "" {
+				final.Stderr = r.Stderr
+				messages = append(messages, strings.TrimSpace(r.Stderr))
 			}
 			continue
 
-		case r.exitCode != 0:
-			slog.Debug("Hook returned non-zero exit code", "exit_code", r.exitCode, "stderr", r.stderr)
+		case r.ExitCode != 0:
+			slog.Debug("Hook returned non-zero exit code", "exit_code", r.ExitCode, "stderr", r.Stderr)
 			continue
 
-		case r.output == nil:
+		case r.Output == nil:
 			// Plain stdout becomes AdditionalContext only for events
 			// whose runtime consumes it.
-			if r.stdout != "" && contextEvents[event] {
-				contexts = append(contexts, strings.TrimSpace(r.stdout))
+			if r.Stdout != "" && spec.StdoutPolicy == StdoutAdditionalContext {
+				contexts = append(contexts, strings.TrimSpace(r.Stdout))
 			}
 			continue
 		}
 
-		out := r.output
+		out := r.Output
 		if !out.ShouldContinue() {
 			final.Allowed = false
 			if out.StopReason != "" {
@@ -307,19 +334,46 @@ func aggregate(results []hookResult, event EventType) *Result {
 			sysMsgs = append(sysMsgs, out.SystemMessage)
 		}
 		if hso := out.HookSpecificOutput; hso != nil {
-			if event == EventPreToolUse {
-				if hso.PermissionDecision == DecisionDeny {
+			if event == EventPreToolUse && hso.PermissionDecision != "" {
+				final.Decision, final.DecisionReason = strongerDecision(
+					final.Decision, final.DecisionReason,
+					hso.PermissionDecision, hso.PermissionDecisionReason,
+				)
+			}
+			if event == EventPreToolUse || event == EventPermissionRequest {
+				switch hso.PermissionDecision {
+				case DecisionDeny:
 					final.Allowed = false
 					if hso.PermissionDecisionReason != "" {
 						messages = append(messages, hso.PermissionDecisionReason)
 					}
-				}
-				if hso.UpdatedInput != nil {
-					if final.ModifiedInput == nil {
-						final.ModifiedInput = make(map[string]any)
+				case DecisionAllow:
+					if event == EventPermissionRequest {
+						final.PermissionAllowed = true
 					}
-					maps.Copy(final.ModifiedInput, hso.UpdatedInput)
+					if hso.PermissionDecisionReason != "" {
+						contexts = append(contexts, hso.PermissionDecisionReason)
+					}
 				}
+			}
+			if event == EventPreToolUse && hso.UpdatedInput != nil {
+				if final.ModifiedInput == nil {
+					final.ModifiedInput = make(map[string]any)
+				}
+				maps.Copy(final.ModifiedInput, hso.UpdatedInput)
+			}
+			if event == EventBeforeCompaction && hso.Summary != "" && final.Summary == "" {
+				// First non-empty summary in CONFIG ORDER wins. Hooks run
+				// concurrently (see runHook above), but we iterate
+				// `results` in the order they were configured — the index
+				// of each hook's slot in `results` is fixed at registration
+				// time, not by completion order — so this verdict is
+				// deterministic regardless of which hook finishes first.
+				// Concatenating multiple summaries would produce nonsense,
+				// and merging them would require a second LLM call,
+				// defeating the point of the hook-supplied summary (which
+				// is to skip the LLM entirely).
+				final.Summary = hso.Summary
 			}
 			if hso.AdditionalContext != "" {
 				contexts = append(contexts, hso.AdditionalContext)
@@ -331,4 +385,32 @@ func aggregate(results []hookResult, event EventType) *Result {
 	final.AdditionalContext = strings.Join(contexts, "\n")
 	final.SystemMessage = strings.Join(sysMsgs, "\n")
 	return final
+}
+
+// decisionWeight ranks PermissionDecision verdicts so [strongerDecision]
+// can pick the most-restrictive across a chain of pre_tool_use hooks.
+// Deny > Ask > Allow > "" (no decision).
+func decisionWeight(d Decision) int {
+	switch d {
+	case DecisionDeny:
+		return 3
+	case DecisionAsk:
+		return 2
+	case DecisionAllow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// strongerDecision returns the more-restrictive of two (decision,
+// reason) pairs, preserving the reason of the winner. A non-empty
+// decision always beats the empty string. Ties keep the existing
+// (current) decision so the iteration order in [aggregate] is
+// stable and the first-seen reason wins.
+func strongerDecision(curD Decision, curR string, newD Decision, newR string) (Decision, string) {
+	if decisionWeight(newD) > decisionWeight(curD) {
+		return newD, newR
+	}
+	return curD, curR
 }

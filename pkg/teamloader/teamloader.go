@@ -169,6 +169,14 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithHooks(config.MergeHooks(agentConfig.Hooks, cliHooks)),
 		}
 
+		if agentConfig.Cache != nil && agentConfig.Cache.Enabled {
+			c, err := buildAgentCache(agentConfig.Name, agentConfig.Cache, parentDir)
+			if err != nil {
+				return nil, err
+			}
+			opts = append(opts, agent.WithCache(c))
+		}
+
 		models, err := getModelsForAgent(ctx, cfg, &agentConfig, autoModel, runConfig)
 		if err != nil {
 			// Return auto model fallback errors and DMR not installed errors directly

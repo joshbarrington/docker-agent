@@ -2,7 +2,6 @@ package message
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -247,12 +246,6 @@ func (mv *messageModel) SetSize(width, height int) tea.Cmd {
 // GetSize returns the current dimensions
 func (mv *messageModel) GetSize() (width, height int) {
 	return mv.width, mv.height
-}
-
-var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*m")
-
-func stripANSI(s string) string {
-	return ansiEscape.ReplaceAllString(s, "")
 }
 
 // preserveLineBreaks preserves leading indentation by converting leading spaces

@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -1515,7 +1516,7 @@ func TestTransferTaskRejectsNonSubAgent(t *testing.T) {
 	assert.True(t, result.IsError, "transfer to non-sub-agent should return an error result")
 	assert.Contains(t, result.Output, "cannot transfer task to planner")
 	assert.Contains(t, result.Output, "librarian")
-	assert.Equal(t, "root", rt.currentAgent, "current agent should remain root")
+	assert.Equal(t, "root", rt.CurrentAgentName(), "current agent should remain root")
 }
 
 func TestTransferTaskAllowsSubAgent(t *testing.T) {
@@ -1994,6 +1995,75 @@ func TestRunStream_EmptyMessages_SendUserMessage(t *testing.T) {
 	require.NotEmpty(t, events)
 }
 
+// TestRunStream_AddEnvironmentInfo_DoesNotPolluteSession pins the
+// regression where session_start hook output (the AddEnvironmentInfo
+// env block) was persisted as a system message on the session AFTER
+// the user's first message had already been added, then surfaced
+// verbatim as the [UserMessageEvent] because the runtime relays
+// messages[len-1] as the "current" user message.
+func TestRunStream_AddEnvironmentInfo_DoesNotPolluteSession(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("reply").
+		AddStopWithUsage(5, 5).
+		Build()
+
+	prov := &mockProvider{id: "test/mock-model", stream: stream}
+	root := agent.New(
+		"root", "You are a test agent",
+		agent.WithModel(prov),
+		agent.WithAddEnvironmentInfo(true),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(
+		tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+		WithWorkingDir(t.TempDir()),
+	)
+	require.NoError(t, err)
+
+	sess := session.New(
+		session.WithUserMessage("hello"),
+		session.WithWorkingDir(t.TempDir()),
+	)
+
+	evCh := rt.RunStream(t.Context(), sess)
+	var events []Event
+	for ev := range evCh {
+		events = append(events, ev)
+	}
+
+	// The persisted transcript must contain only the user message and
+	// the assistant reply — no system message smuggled in by the hook.
+	var roles []chat.MessageRole
+	for _, item := range sess.Messages {
+		if item.IsMessage() {
+			roles = append(roles, item.Message.Message.Role)
+		}
+	}
+	assert.Equal(t,
+		[]chat.MessageRole{chat.MessageRoleUser, chat.MessageRoleAssistant},
+		roles,
+		"session_start hook output must not be persisted as a session message",
+	)
+
+	// The UserMessageEvent must mirror the user's input, not the env
+	// info block produced by the hook.
+	var userEvts []*UserMessageEvent
+	for _, ev := range events {
+		if ue, ok := ev.(*UserMessageEvent); ok {
+			userEvts = append(userEvts, ue)
+		}
+	}
+	require.Len(t, userEvts, 1)
+	assert.Equal(t, "hello", userEvts[0].Message)
+	assert.NotContains(t, userEvts[0].Message, "<env>",
+		"user_message event must not leak the AddEnvironmentInfo block")
+}
+
 // recordingProvider wraps a sequence of mock streams and records the tools
 // passed to each CreateChatCompletionStream call.
 type recordingProvider struct {
@@ -2436,7 +2506,7 @@ func TestSteer_EmptySessionBootstrap(t *testing.T) {
 // hookStream wraps a mockStream and calls onStop synchronously when it
 // returns a chunk with FinishReasonStop. This lets a test inject a Steer()
 // call at the precise moment the stream signals completion — after the stop
-// chunk is read inside tryModelWithFallback but before the mid-loop steer
+// chunk is read inside fallback.execute but before the mid-loop steer
 // drain runs, exercising the end-of-iteration drain at res.Stopped.
 type hookStream struct {
 	*mockStream
@@ -2496,7 +2566,7 @@ func (p *steerInjectProvider) MaxTokens() int          { return 0 }
 // rather than being stranded until the next call.
 //
 // The hookStream fires the injection synchronously inside Recv() when it
-// yields the FinishReasonStop chunk. At that point tryModelWithFallback has
+// yields the FinishReasonStop chunk. At that point fallback.execute has
 // not yet returned; the steer lands in the queue and is guaranteed to be
 // drained by one of the three drain points (mid-loop, end-of-iteration, or
 // top-of-next-turn). The test asserts the key invariant: consumed within
@@ -2769,4 +2839,125 @@ func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
 	secondParts := items[1].Message.Message.MultiContent
 	require.Len(t, secondParts, 1)
 	assert.Equal(t, "second", secondParts[0].Text, "last message must not be modified")
+}
+
+func TestPostToolHookReceivesToolResult(t *testing.T) {
+	var got *hooks.Input
+	registry := hooks.NewRegistry()
+	require.NoError(t, registry.RegisterBuiltin("capture_post_tool", func(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+		inputCopy := *in
+		got = &inputCopy
+		return nil, nil
+	}))
+
+	agentTools := []tools.Tool{{
+		Name:       "echo_tool",
+		Parameters: map[string]any{},
+		Handler: func(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("actual tool output"), nil
+		},
+	}}
+
+	root := agent.New("root", "You are a test agent",
+		agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}),
+		agent.WithToolSets(newStubToolSet(nil, agentTools, nil)),
+		agent.WithHooks(&latest.HooksConfig{
+			PostToolUse: []latest.HookMatcherConfig{{
+				Matcher: "echo_tool",
+				Hooks: []latest.HookDefinition{{
+					Type:    "builtin",
+					Command: "capture_post_tool",
+				}},
+			}},
+		}),
+	)
+	tm := team.New(team.WithAgents(root))
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.hooksRegistry = registry
+	rt.buildHooksExecutors()
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	calls := []tools.ToolCall{{
+		ID:       "call_1",
+		Type:     "function",
+		Function: tools.FunctionCall{Name: "echo_tool", Arguments: `{"message":"hello"}`},
+	}}
+
+	events := make(chan Event, 10)
+	rt.processToolCalls(t.Context(), sess, calls, agentTools, events)
+
+	require.NotNil(t, got)
+	assert.Equal(t, hooks.EventPostToolUse, got.HookEventName)
+	assert.Equal(t, "echo_tool", got.ToolName)
+	assert.Equal(t, "call_1", got.ToolUseID)
+	assert.Equal(t, "actual tool output", got.ToolResponse)
+	assert.False(t, got.ToolError)
+	assert.Equal(t, "hello", got.ToolInput["message"])
+}
+
+func TestPostToolHookEmitsLifecycleEvents(t *testing.T) {
+	registry := hooks.NewRegistry()
+	require.NoError(t, registry.RegisterBuiltin("noop_post_tool", func(_ context.Context, _ *hooks.Input, _ []string) (*hooks.Output, error) {
+		return nil, nil
+	}))
+
+	agentTools := []tools.Tool{{
+		Name:       "echo_tool",
+		Parameters: map[string]any{},
+		Handler: func(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("ok"), nil
+		},
+	}}
+
+	root := agent.New("root", "You are a test agent",
+		agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}),
+		agent.WithToolSets(newStubToolSet(nil, agentTools, nil)),
+		agent.WithHooks(&latest.HooksConfig{
+			PostToolUse: []latest.HookMatcherConfig{{
+				Matcher: "echo_tool",
+				Hooks: []latest.HookDefinition{{
+					Type:    "builtin",
+					Command: "noop_post_tool",
+				}},
+			}},
+		}),
+	)
+	tm := team.New(team.WithAgents(root))
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.hooksRegistry = registry
+	rt.buildHooksExecutors()
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	calls := []tools.ToolCall{{
+		ID:       "call_1",
+		Type:     "function",
+		Function: tools.FunctionCall{Name: "echo_tool", Arguments: `{}`},
+	}}
+
+	events := make(chan Event, 10)
+	rt.processToolCalls(t.Context(), sess, calls, agentTools, events)
+
+	var started *HookStartedEvent
+	var finished *HookFinishedEvent
+	for len(events) > 0 {
+		switch ev := (<-events).(type) {
+		case *HookStartedEvent:
+			started = ev
+		case *HookFinishedEvent:
+			finished = ev
+		}
+	}
+
+	require.NotNil(t, started)
+	assert.Equal(t, hooks.EventPostToolUse, started.HookEvent)
+	assert.Equal(t, sess.ID, started.SessionID)
+	assert.Equal(t, "root", started.AgentName)
+
+	require.NotNil(t, finished)
+	assert.Equal(t, hooks.EventPostToolUse, finished.HookEvent)
+	assert.Equal(t, sess.ID, finished.SessionID)
+	assert.True(t, finished.Allowed)
+	assert.Empty(t, finished.Error)
 }

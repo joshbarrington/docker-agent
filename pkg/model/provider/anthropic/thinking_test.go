@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"cmp"
 	"encoding/json"
 	"testing"
 
@@ -96,14 +97,25 @@ func TestAnthropicThinkingDisplay(t *testing.T) {
 	}
 }
 
+// defaultTestModel is an Anthropic model that does NOT require the
+// adaptive-thinking workaround, so token-based thinking budgets are
+// preserved as-is.
+const defaultTestModel = "claude-sonnet-4-5"
+
 // clientWith builds a minimal Client with the given ThinkingBudget and
-// provider_opts for use in thinking-config tests.
+// provider_opts on defaultTestModel.
 func clientWith(budget *latest.ThinkingBudget, opts map[string]any) *Client {
+	return clientWithModel(defaultTestModel, budget, opts)
+}
+
+// clientWithModel is like clientWith but lets the test pick the model name,
+// which matters for behaviors like the Opus 4.6/4.7 adaptive-thinking switch.
+func clientWithModel(model string, budget *latest.ThinkingBudget, opts map[string]any) *Client {
 	return &Client{
 		Config: base.Config{
 			ModelConfig: latest.ModelConfig{
 				Provider:       "anthropic",
-				Model:          "claude-opus-4-7",
+				Model:          model,
 				ThinkingBudget: budget,
 				ProviderOpts:   opts,
 			},
@@ -114,6 +126,7 @@ func clientWith(budget *latest.ThinkingBudget, opts map[string]any) *Client {
 func TestApplyThinkingConfig(t *testing.T) {
 	tests := []struct {
 		name            string
+		model           string // optional; defaults to a non-Opus-4-6/4-7 model.
 		budget          *latest.ThinkingBudget
 		opts            map[string]any
 		maxTokens       int64
@@ -193,11 +206,49 @@ func TestApplyThinkingConfig(t *testing.T) {
 			wantEnabled: true,
 			wantTokens:  2048,
 		},
+		{
+			name:         "opus-4-6 token budget auto-switches to adaptive",
+			model:        "claude-opus-4-6",
+			budget:       &latest.ThinkingBudget{Tokens: 4096},
+			maxTokens:    8192,
+			wantEnabled:  true,
+			wantAdaptive: true,
+			wantEffort:   "high",
+		},
+		{
+			name:         "opus-4-7 token budget auto-switches to adaptive",
+			model:        "claude-opus-4-7",
+			budget:       &latest.ThinkingBudget{Tokens: 4096},
+			maxTokens:    8192,
+			wantEnabled:  true,
+			wantAdaptive: true,
+			wantEffort:   "high",
+		},
+		{
+			name:            "opus-4-6 dated variant token budget auto-switches to adaptive",
+			model:           "claude-opus-4-6-20251101",
+			budget:          &latest.ThinkingBudget{Tokens: 8000},
+			opts:            map[string]any{"thinking_display": "summarized"},
+			maxTokens:       16384,
+			wantEnabled:     true,
+			wantAdaptive:    true,
+			wantEffort:      "high",
+			wantDisplayJSON: "summarized",
+		},
+		{
+			name:         "opus-4-6 explicit adaptive budget is preserved",
+			model:        "claude-opus-4-6",
+			budget:       &latest.ThinkingBudget{Effort: "adaptive/low"},
+			maxTokens:    8192,
+			wantEnabled:  true,
+			wantAdaptive: true,
+			wantEffort:   "low",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := clientWith(tt.budget, tt.opts)
+			c := clientWithModel(cmp.Or(tt.model, defaultTestModel), tt.budget, tt.opts)
 			params := anthropic.MessageNewParams{}
 
 			gotEnabled := c.applyThinkingConfig(&params, tt.maxTokens)
@@ -235,6 +286,7 @@ func TestApplyThinkingConfig(t *testing.T) {
 func TestApplyBetaThinkingConfig(t *testing.T) {
 	tests := []struct {
 		name            string
+		model           string // optional; defaults to a non-Opus-4-6/4-7 model.
 		budget          *latest.ThinkingBudget
 		opts            map[string]any
 		maxTokens       int64
@@ -272,11 +324,29 @@ func TestApplyBetaThinkingConfig(t *testing.T) {
 			budget:    &latest.ThinkingBudget{Tokens: 100},
 			maxTokens: 8192,
 		},
+		{
+			name:         "opus-4-6 token budget auto-switches to adaptive",
+			model:        "claude-opus-4-6",
+			budget:       &latest.ThinkingBudget{Tokens: 4096},
+			maxTokens:    8192,
+			wantAdaptive: true,
+			wantEffort:   "high",
+		},
+		{
+			name:            "opus-4-7 token budget auto-switches to adaptive with display",
+			model:           "claude-opus-4-7",
+			budget:          &latest.ThinkingBudget{Tokens: 4096},
+			opts:            map[string]any{"thinking_display": "omitted"},
+			maxTokens:       8192,
+			wantAdaptive:    true,
+			wantEffort:      "high",
+			wantDisplayJSON: "omitted",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := clientWith(tt.budget, tt.opts)
+			c := clientWithModel(cmp.Or(tt.model, defaultTestModel), tt.budget, tt.opts)
 			params := anthropic.BetaMessageNewParams{}
 
 			c.applyBetaThinkingConfig(&params, tt.maxTokens)
@@ -335,6 +405,97 @@ func TestAdjustMaxTokensForThinking(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "max_tokens")
 	})
+
+	t.Run("opus-4-6 with token budget skips adjustment (will be coerced to adaptive)", func(t *testing.T) {
+		c := clientWithModel("claude-opus-4-6", &latest.ThinkingBudget{Tokens: 16384}, nil)
+		got, err := c.adjustMaxTokensForThinking(8192)
+		require.NoError(t, err)
+		assert.Equal(t, int64(8192), got)
+	})
+
+	t.Run("opus-4-7 with token budget skips adjustment (will be coerced to adaptive)", func(t *testing.T) {
+		c := clientWithModel("claude-opus-4-7-20251101", &latest.ThinkingBudget{Tokens: 16384}, nil)
+		userMax := int64(8192)
+		c.ModelConfig.MaxTokens = &userMax
+		got, err := c.adjustMaxTokensForThinking(8192)
+		require.NoError(t, err)
+		assert.Equal(t, int64(8192), got)
+	})
+}
+
+func TestRequiresAdaptiveThinking(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"claude-opus-4-6", true},
+		{"claude-opus-4-7", true},
+		{"claude-opus-4-6-20251101", true},
+		{"claude-opus-4-7-20260101", true},
+		{"CLAUDE-OPUS-4-7", true},     // case-insensitive
+		{"  claude-opus-4-6  ", true}, // trims whitespace
+		{"claude-opus-4-5", false},
+		{"claude-opus-4-5-20251015", false},
+		{"claude-opus-4-8", false},
+		{"claude-sonnet-4-7", false},
+		{"claude-sonnet-4-5", false},
+		{"claude-haiku-4-5", false},
+		{"claude-opus-4-60", false}, // not a real model and must not match
+		{"claude-opus-4-70", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			assert.Equal(t, tt.want, requiresAdaptiveThinking(tt.model))
+		})
+	}
+}
+
+func TestCoerceAdaptiveThinking(t *testing.T) {
+	t.Run("nil budget stays nil", func(t *testing.T) {
+		c := clientWithModel("claude-opus-4-7", nil, nil)
+		assert.Nil(t, c.coerceAdaptiveThinking())
+	})
+
+	t.Run("non-affected model preserves token budget", func(t *testing.T) {
+		in := &latest.ThinkingBudget{Tokens: 4096}
+		c := clientWithModel(defaultTestModel, in, nil)
+		assert.Same(t, in, c.coerceAdaptiveThinking(), "budget pointer must not be replaced")
+	})
+
+	t.Run("opus-4-6 token budget is coerced to adaptive", func(t *testing.T) {
+		in := &latest.ThinkingBudget{Tokens: 4096}
+		c := clientWithModel("claude-opus-4-6", in, nil)
+		got := c.coerceAdaptiveThinking()
+		require.NotNil(t, got)
+		assert.Equal(t, "adaptive", got.Effort)
+		assert.Equal(t, 0, got.Tokens)
+		// Original must not be mutated.
+		assert.Equal(t, 4096, in.Tokens)
+		assert.Empty(t, in.Effort)
+	})
+
+	t.Run("opus-4-7 adaptive budget is preserved as-is", func(t *testing.T) {
+		in := &latest.ThinkingBudget{Effort: "adaptive/low"}
+		c := clientWithModel("claude-opus-4-7", in, nil)
+		assert.Same(t, in, c.coerceAdaptiveThinking())
+	})
+
+	// Disabled or non-positive token budgets must NOT be silently coerced to
+	// adaptive thinking on Opus 4.6/4.7 — the user has either explicitly
+	// disabled thinking or supplied an invalid value.
+	disabledCases := map[string]*latest.ThinkingBudget{
+		"thinking_budget: 0":            {Tokens: 0},
+		"thinking_budget: none":         {Effort: "none"},
+		"effort=none with stray tokens": {Effort: "none", Tokens: 99},
+		"negative tokens":               {Tokens: -5},
+	}
+	for name, in := range disabledCases {
+		t.Run("opus-4-7 "+name+" passes through", func(t *testing.T) {
+			c := clientWithModel("claude-opus-4-7", in, nil)
+			assert.Same(t, in, c.coerceAdaptiveThinking())
+		})
+	}
 }
 
 func TestInterleavedThinkingEnabled(t *testing.T) {

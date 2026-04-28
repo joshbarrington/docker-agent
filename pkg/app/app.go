@@ -139,7 +139,9 @@ func (a *App) SendFirstMessage() tea.Cmd {
 	cmds := []tea.Cmd{
 		func() tea.Msg {
 			// Use the shared PrepareUserMessage function for consistent attachment handling
-			userMsg := cli.PrepareUserMessage(context.Background(), a.runtime, *a.firstMessage, a.firstMessageAttach)
+			userMsg, attachedPath := cli.PrepareUserMessage(context.Background(), a.runtime, *a.firstMessage, a.firstMessageAttach)
+			// Inherit the attachment in any sub-session created by this turn.
+			a.session.AddAttachedFile(attachedPath)
 
 			// If the message has multi-content (attachments), we need to handle it specially
 			if len(userMsg.Message.MultiContent) > 0 {
@@ -301,7 +303,13 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 				switch {
 				case att.FilePath != "":
 					// File-reference attachment: read and classify from disk.
-					a.processFileAttachment(ctx, att, &textBuilder, &binaryParts)
+					// Only remember the path on the session when the file actually
+					// exists as a regular file — we don't want sub-agents to inherit
+					// dangling references to directories or missing paths. The editor
+					// resolves @-mentions to absolute paths before this point.
+					if a.processFileAttachment(ctx, att, &textBuilder, &binaryParts) {
+						a.session.AddAttachedFile(att.FilePath)
+					}
 				case att.Content != "":
 					// Inline content attachment (e.g. pasted text).
 					a.processInlineAttachment(att, &textBuilder)
@@ -342,7 +350,14 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 
 // processFileAttachment reads a file from disk, classifies it, and either
 // appends its text content to textBuilder or adds a binary part to binaryParts.
-func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment, textBuilder *strings.Builder, binaryParts *[]chat.MessagePart) {
+// Returns true when the path resolved to a real, regular file that we attempted
+// to surface to the model — even if the content itself was rejected (too
+// large, unsupported MIME, transient read error, etc.). The boolean is meant
+// for callers that want to record the path on the session for later reuse by
+// sub-agents; we don't want those references to point at directories or
+// missing files, but we do want them to cover "the agent has bigger tools
+// than us" cases.
+func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment, textBuilder *strings.Builder, binaryParts *[]chat.MessagePart) bool {
 	absPath := att.FilePath
 
 	fi, err := os.Stat(absPath)
@@ -358,20 +373,20 @@ func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment
 		}
 		slog.Warn("skipping attachment", "path", absPath, "reason", reason)
 		a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: %s", att.Name, reason), ""))
-		return
+		return false
 	}
 
 	if !fi.Mode().IsRegular() {
 		slog.Warn("skipping attachment: not a regular file", "path", absPath, "mode", fi.Mode().String())
 		a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: not a regular file", att.Name), ""))
-		return
+		return false
 	}
 
 	const maxAttachmentSize = 100 * 1024 * 1024 // 100MB
 	if fi.Size() > maxAttachmentSize {
 		slog.Warn("skipping attachment: file too large", "path", absPath, "size", fi.Size(), "max", maxAttachmentSize)
 		a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: file too large (max 100MB)", att.Name), ""))
-		return
+		return true
 	}
 
 	mimeType := chat.DetectMimeType(absPath)
@@ -381,13 +396,13 @@ func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment
 		if fi.Size() > chat.MaxInlineFileSize {
 			slog.Warn("skipping attachment: text file too large to inline", "path", absPath, "size", fi.Size(), "max", chat.MaxInlineFileSize)
 			a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: text file too large to inline (max 5MB)", att.Name), ""))
-			return
+			return true
 		}
 		content, err := chat.ReadFileForInline(absPath)
 		if err != nil {
 			slog.Warn("skipping attachment: failed to read file", "path", absPath, "error", err)
 			a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: failed to read file", att.Name), ""))
-			return
+			return true
 		}
 		textBuilder.WriteString("\n\n")
 		textBuilder.WriteString(content)
@@ -400,14 +415,14 @@ func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment
 			if readErr != nil {
 				slog.Warn("skipping attachment: failed to read image", "path", absPath, "error", readErr)
 				a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: failed to read image", att.Name), ""))
-				return
+				return true
 			}
 			resized, resizeErr := chat.ResizeImage(imgData, mimeType)
 			if resizeErr != nil {
 				// Don't bypass security checks - reject the file if resize failed
 				slog.Warn("skipping attachment: image resize failed", "path", absPath, "error", resizeErr)
 				a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: %s", att.Name, resizeErr), ""))
-				return
+				return true
 			}
 			dataURL := fmt.Sprintf("data:%s;base64,%s", resized.MimeType, base64.StdEncoding.EncodeToString(resized.Data))
 			*binaryParts = append(*binaryParts, chat.MessagePart{
@@ -435,6 +450,8 @@ func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment
 		slog.Warn("skipping attachment: unsupported file type", "path", absPath, "mime_type", mimeType)
 		a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: unsupported file type", att.Name), ""))
 	}
+
+	return true
 }
 
 // sendEvent sends an event to the TUI, respecting context cancellation to

@@ -81,17 +81,17 @@ type ListTodosOutput struct {
 // TodoStorage defines the storage layer for todo items.
 type TodoStorage interface {
 	// Add appends a new todo item.
-	Add(todo Todo)
+	Add(ctx context.Context, todo Todo)
 	// All returns a copy of all todo items.
-	All() []Todo
+	All(ctx context.Context) []Todo
 	// Len returns the number of todo items.
-	Len() int
+	Len(ctx context.Context) int
 	// FindByID returns the index of the todo with the given ID, or -1 if not found.
-	FindByID(id string) int
+	FindByID(ctx context.Context, id string) int
 	// Update modifies the todo at the given index using the provided function.
-	Update(index int, fn func(Todo) Todo)
+	Update(ctx context.Context, index int, fn func(Todo) Todo)
 	// Clear removes all todo items.
-	Clear()
+	Clear(ctx context.Context)
 }
 
 // MemoryTodoStorage is an in-memory, concurrency-safe implementation of TodoStorage.
@@ -105,28 +105,28 @@ func NewMemoryTodoStorage() *MemoryTodoStorage {
 	}
 }
 
-func (s *MemoryTodoStorage) Add(todo Todo) {
+func (s *MemoryTodoStorage) Add(_ context.Context, todo Todo) {
 	s.todos.Append(todo)
 }
 
-func (s *MemoryTodoStorage) All() []Todo {
+func (s *MemoryTodoStorage) All(_ context.Context) []Todo {
 	return s.todos.All()
 }
 
-func (s *MemoryTodoStorage) Len() int {
+func (s *MemoryTodoStorage) Len(_ context.Context) int {
 	return s.todos.Length()
 }
 
-func (s *MemoryTodoStorage) FindByID(id string) int {
+func (s *MemoryTodoStorage) FindByID(_ context.Context, id string) int {
 	_, idx := s.todos.Find(func(t Todo) bool { return t.ID == id })
 	return idx
 }
 
-func (s *MemoryTodoStorage) Update(index int, fn func(Todo) Todo) {
+func (s *MemoryTodoStorage) Update(_ context.Context, index int, fn func(Todo) Todo) {
 	s.todos.Update(index, fn)
 }
 
-func (s *MemoryTodoStorage) Clear() {
+func (s *MemoryTodoStorage) Clear(_ context.Context) {
 	s.todos.Clear()
 }
 
@@ -175,60 +175,60 @@ Track task progress with todos:
 }
 
 // addTodo creates a new todo and adds it to storage.
-func (h *todoHandler) addTodo(description string) Todo {
+func (h *todoHandler) addTodo(ctx context.Context, description string) Todo {
 	todo := Todo{
 		ID:          fmt.Sprintf("todo_%d", h.nextID.Add(1)),
 		Description: description,
 		Status:      "pending",
 	}
-	h.storage.Add(todo)
+	h.storage.Add(ctx, todo)
 	return todo
 }
 
 // jsonResult builds a ToolCallResult with a JSON-serialized output and current storage as Meta.
-func (h *todoHandler) jsonResult(v any) (*tools.ToolCallResult, error) {
+func (h *todoHandler) jsonResult(ctx context.Context, v any) (*tools.ToolCallResult, error) {
 	out, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling todo output: %w", err)
 	}
 	return &tools.ToolCallResult{
 		Output: string(out),
-		Meta:   h.storage.All(),
+		Meta:   h.storage.All(ctx),
 	}, nil
 }
 
-func (h *todoHandler) createTodo(_ context.Context, params CreateTodoArgs) (*tools.ToolCallResult, error) {
-	created := h.addTodo(params.Description)
-	return h.jsonResult(CreateTodoOutput{
+func (h *todoHandler) createTodo(ctx context.Context, params CreateTodoArgs) (*tools.ToolCallResult, error) {
+	created := h.addTodo(ctx, params.Description)
+	return h.jsonResult(ctx, CreateTodoOutput{
 		Created:  created,
-		AllTodos: h.storage.All(),
-		Reminder: h.incompleteReminder(),
+		AllTodos: h.storage.All(ctx),
+		Reminder: h.incompleteReminder(ctx),
 	})
 }
 
-func (h *todoHandler) createTodos(_ context.Context, params CreateTodosArgs) (*tools.ToolCallResult, error) {
+func (h *todoHandler) createTodos(ctx context.Context, params CreateTodosArgs) (*tools.ToolCallResult, error) {
 	created := make([]Todo, 0, len(params.Descriptions))
 	for _, desc := range params.Descriptions {
-		created = append(created, h.addTodo(desc))
+		created = append(created, h.addTodo(ctx, desc))
 	}
-	return h.jsonResult(CreateTodosOutput{
+	return h.jsonResult(ctx, CreateTodosOutput{
 		Created:  created,
-		AllTodos: h.storage.All(),
-		Reminder: h.incompleteReminder(),
+		AllTodos: h.storage.All(ctx),
+		Reminder: h.incompleteReminder(ctx),
 	})
 }
 
-func (h *todoHandler) updateTodos(_ context.Context, params UpdateTodosArgs) (*tools.ToolCallResult, error) {
+func (h *todoHandler) updateTodos(ctx context.Context, params UpdateTodosArgs) (*tools.ToolCallResult, error) {
 	result := UpdateTodosOutput{}
 
 	for _, update := range params.Updates {
-		idx := h.storage.FindByID(update.ID)
+		idx := h.storage.FindByID(ctx, update.ID)
 		if idx == -1 {
 			result.NotFound = append(result.NotFound, update.ID)
 			continue
 		}
 
-		h.storage.Update(idx, func(t Todo) Todo {
+		h.storage.Update(ctx, idx, func(t Todo) Todo {
 			t.Status = update.Status
 			return t
 		})
@@ -236,7 +236,7 @@ func (h *todoHandler) updateTodos(_ context.Context, params UpdateTodosArgs) (*t
 	}
 
 	if len(result.NotFound) > 0 && len(result.Updated) == 0 {
-		res, err := h.jsonResult(result)
+		res, err := h.jsonResult(ctx, result)
 		if err != nil {
 			return nil, err
 		}
@@ -244,16 +244,16 @@ func (h *todoHandler) updateTodos(_ context.Context, params UpdateTodosArgs) (*t
 		return res, nil
 	}
 
-	result.AllTodos = h.storage.All()
-	result.Reminder = h.incompleteReminder()
+	result.AllTodos = h.storage.All(ctx)
+	result.Reminder = h.incompleteReminder(ctx)
 
-	return h.jsonResult(result)
+	return h.jsonResult(ctx, result)
 }
 
 // incompleteReminder returns a reminder string listing any non-completed todos,
 // or an empty string if all are completed (or storage is empty).
-func (h *todoHandler) incompleteReminder() string {
-	all := h.storage.All()
+func (h *todoHandler) incompleteReminder(ctx context.Context) string {
+	all := h.storage.All(ctx)
 	var pending, inProgress []string
 	for _, todo := range all {
 		switch todo.Status {
@@ -278,14 +278,14 @@ func (h *todoHandler) incompleteReminder() string {
 	return b.String()
 }
 
-func (h *todoHandler) listTodos(_ context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
-	todos := h.storage.All()
+func (h *todoHandler) listTodos(ctx context.Context, _ tools.ToolCall) (*tools.ToolCallResult, error) {
+	todos := h.storage.All(ctx)
 	if todos == nil {
 		todos = []Todo{}
 	}
 	out := ListTodosOutput{Todos: todos}
-	out.Reminder = h.incompleteReminder()
-	return h.jsonResult(out)
+	out.Reminder = h.incompleteReminder(ctx)
+	return h.jsonResult(ctx, out)
 }
 
 func (t *TodoTool) Tools(context.Context) ([]tools.Tool, error) {

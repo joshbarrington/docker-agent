@@ -85,6 +85,8 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 			"agent_switching":        func() Event { return &AgentSwitchingEvent{} },
 			"warning":                func() Event { return &WarningEvent{} },
 			"hook_blocked":           func() Event { return &HookBlockedEvent{} },
+			"hook_started":           func() Event { return &HookStartedEvent{} },
+			"hook_finished":          func() Event { return &HookFinishedEvent{} },
 			"rag_indexing_started":   func() Event { return &RAGIndexingStartedEvent{} },
 			"rag_indexing_progress":  func() Event { return &RAGIndexingProgressEvent{} },
 			"rag_indexing_completed": func() Event { return &RAGIndexingCompletedEvent{} },
@@ -342,7 +344,7 @@ func (c *Client) runAgentWithAgentName(ctx context.Context, sessionID, agent, ag
 		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	eventChan := make(chan Event, 128)
+	eventChan := make(chan Event, defaultEventChannelCapacity)
 
 	go func() {
 		defer close(eventChan)

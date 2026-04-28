@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -139,7 +138,7 @@ func newTestModel() (*appModel, *mockEditor) {
 		pendingSidebarCollapsed: map[string]bool{},
 		chatPage:                page,
 		editor:                  ed,
-		transcriber:             transcribe.New(""),
+		transcriber:             &fakeTranscriber{},
 		notification:            notification.New(),
 		dialogMgr:               dialog.New(),
 		completions:             completion.New(),
@@ -147,18 +146,43 @@ func newTestModel() (*appModel, *mockEditor) {
 	return m, ed
 }
 
-// neutralizeExitFunc replaces the package-level exitFunc with a no-op for the
-// duration of the test so that the safety-net goroutine spawned by cleanupAll
-// doesn't call os.Exit.
+// neutralizeExitFunc replaces the package-level exitFunc with a no-op for
+// the duration of the test so that the safety-net goroutine spawned by
+// cleanupAll doesn't call os.Exit. It also shrinks shutdownTimeout so the
+// safety-net goroutine fires quickly, and waits for it to fire (or for a
+// short timeout) before restoring the originals so that subsequent tests
+// don't race against a pending background goroutine.
+//
+// Tests that call this helper must NOT use t.Parallel(): exitFunc and
+// shutdownTimeout are package-level variables, and concurrent mutation
+// from sibling tests would race with the cleanup that restores them.
 func neutralizeExitFunc(t *testing.T) {
 	t.Helper()
-	orig := exitFunc
-	exitFunc = func(int) {}
-	t.Cleanup(func() { exitFunc = orig })
+
+	origExitFunc := exitFunc
+	origTimeout := shutdownTimeout
+
+	fired := make(chan struct{})
+	var once sync.Once
+	exitFunc = func(int) {
+		once.Do(func() { close(fired) })
+	}
+	shutdownTimeout = 10 * time.Millisecond
+
+	t.Cleanup(func() {
+		// Wait for any pending safety-net goroutine to observe our no-op
+		// exitFunc, but with a deadline so tests that never trigger
+		// cleanupAll don't block.
+		select {
+		case <-fired:
+		case <-time.After(200 * time.Millisecond):
+		}
+		exitFunc = origExitFunc
+		shutdownTimeout = origTimeout
+	})
 }
 
 func TestExitSessionMsg_ExitsImmediately(t *testing.T) {
-	t.Parallel()
 	neutralizeExitFunc(t)
 
 	m, ed := newTestModel()
@@ -172,7 +196,6 @@ func TestExitSessionMsg_ExitsImmediately(t *testing.T) {
 }
 
 func TestExitConfirmedMsg_ExitsImmediately(t *testing.T) {
-	t.Parallel()
 	neutralizeExitFunc(t)
 
 	m, ed := newTestModel()

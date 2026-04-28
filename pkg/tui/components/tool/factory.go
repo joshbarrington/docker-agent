@@ -1,3 +1,8 @@
+// Package tool builds the TUI view for a tool call message.
+//
+// A small lookup table (builders) maps each tool's name to a constructor.
+// Lookup order is: exact tool name, then "category:<category>", then a
+// defaulttool fallback.
 package tool
 
 import (
@@ -21,74 +26,41 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-// Factory creates tool components using the registry.
-// It looks up registered component builders and falls back to a default component
-// if no specific builder is registered for a tool.
-type Factory struct {
-	registry *Registry
+// builder constructs the layout.Model for a tool message.
+type builder func(msg *types.Message, sessionState service.SessionStateReader) layout.Model
+
+// builders maps a tool name (or a "category:<name>" key) to its renderer.
+// Tools sharing the same visual representation point at the same builder.
+var builders = map[string]builder{
+	builtin.ToolNameTransferTask:       transfertask.New,
+	builtin.ToolNameHandoff:            handoff.New,
+	builtin.ToolNameEditFile:           editfile.New,
+	builtin.ToolNameWriteFile:          writefile.New,
+	builtin.ToolNameReadFile:           readfile.New,
+	builtin.ToolNameReadMultipleFiles:  readmultiplefiles.New,
+	builtin.ToolNameListDirectory:      listdirectory.New,
+	builtin.ToolNameDirectoryTree:      directorytree.New,
+	builtin.ToolNameSearchFilesContent: searchfilescontent.New,
+	builtin.ToolNameShell:              shell.New,
+	builtin.ToolNameUserPrompt:         userprompt.New,
+	builtin.ToolNameFetch:              api.New,
+	"category:api":                     api.New,
+	builtin.ToolNameCreateTodo:         todotool.New,
+	builtin.ToolNameCreateTodos:        todotool.New,
+	builtin.ToolNameUpdateTodos:        todotool.New,
+	builtin.ToolNameListTodos:          todotool.New,
 }
 
-func NewFactory(registry *Registry) *Factory {
-	return &Factory{
-		registry: registry,
+// New returns the appropriate tool view for the given message.
+// Lookup order: exact tool name, then "category:<category>", then default.
+func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
+	if b, ok := builders[msg.ToolCall.Function.Name]; ok {
+		return b(msg, sessionState)
 	}
-}
-
-func (f *Factory) Create(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
-	toolName := msg.ToolCall.Function.Name
-
-	// First try to match by exact tool name
-	if builder, ok := f.registry.Get(toolName); ok {
-		return builder(msg, sessionState)
-	}
-
-	// Then try to match by category
-	if msg.ToolDefinition.Category != "" {
-		if builder, ok := f.registry.Get("category:" + msg.ToolDefinition.Category); ok {
-			return builder(msg, sessionState)
+	if cat := msg.ToolDefinition.Category; cat != "" {
+		if b, ok := builders["category:"+cat]; ok {
+			return b(msg, sessionState)
 		}
 	}
-
 	return defaulttool.New(msg, sessionState)
-}
-
-var (
-	defaultRegistry = newDefaultRegistry()
-	defaultFactory  = NewFactory(defaultRegistry)
-)
-
-func newDefaultRegistry() *Registry {
-	registry := NewRegistry()
-
-	// Define tool registrations declaratively.
-	// Tools with the same visual representation share a builder.
-	registry.RegisterAll([]Registration{
-		{[]string{builtin.ToolNameTransferTask}, transfertask.New},
-		{[]string{builtin.ToolNameHandoff}, handoff.New},
-		{[]string{builtin.ToolNameEditFile}, editfile.New},
-		{[]string{builtin.ToolNameWriteFile}, writefile.New},
-		{[]string{builtin.ToolNameReadFile}, readfile.New},
-		{[]string{builtin.ToolNameReadMultipleFiles}, readmultiplefiles.New},
-		{[]string{builtin.ToolNameListDirectory}, listdirectory.New},
-		{[]string{builtin.ToolNameDirectoryTree}, directorytree.New},
-		{[]string{builtin.ToolNameSearchFilesContent}, searchfilescontent.New},
-		{[]string{builtin.ToolNameShell}, shell.New},
-		{[]string{builtin.ToolNameUserPrompt}, userprompt.New},
-		{[]string{builtin.ToolNameFetch, "category:api"}, api.New},
-		{
-			[]string{
-				builtin.ToolNameCreateTodo,
-				builtin.ToolNameCreateTodos,
-				builtin.ToolNameUpdateTodos,
-				builtin.ToolNameListTodos,
-			},
-			todotool.New,
-		},
-	})
-
-	return registry
-}
-
-func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
-	return defaultFactory.Create(msg, sessionState)
 }

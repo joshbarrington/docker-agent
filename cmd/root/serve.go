@@ -13,8 +13,9 @@ func newServeCmd() *cobra.Command {
 
 	cmd.AddCommand(newA2ACmd())
 	cmd.AddCommand(newACPCmd())
-	cmd.AddCommand(newMCPCmd())
 	cmd.AddCommand(newAPICmd())
+	cmd.AddCommand(newChatCmd())
+	cmd.AddCommand(newMCPCmd())
 
 	return cmd
 }

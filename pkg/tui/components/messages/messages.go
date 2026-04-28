@@ -100,12 +100,13 @@ type model struct {
 	height   int
 
 	// Height tracking system fields
-	scrollOffset  int                  // Current scroll position in lines
-	bottomSlack   int                  // Extra blank lines added after content shrinks
-	renderedLines []string             // Cached rendered content as lines (avoids split/join per frame)
-	renderedItems map[int]renderedItem // Cache of rendered items with positions
-	totalHeight   int                  // Total height of all content in lines
-	renderDirty   bool                 // True when rendered content needs rebuild
+	scrollOffset      int                    // Current scroll position in lines
+	bottomSlack       int                    // Extra blank lines added after content shrinks
+	slackAnimationSub animation.Subscription // Subscription to animation ticks while slack > 0
+	renderedLines     []string               // Cached rendered content as lines (avoids split/join per frame)
+	renderedItems     map[int]renderedItem   // Cache of rendered items with positions
+	totalHeight       int                    // Total height of all content in lines
+	renderDirty       bool                   // True when rendered content needs rebuild
 
 	selection selectionState
 
@@ -235,9 +236,6 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
-	case reasoningblock.BlockMsg:
-		return m.forwardToReasoningBlock(msg.GetBlockID(), msg)
-
 	case animation.TickMsg:
 		// Invalidate render cache if there's animated content that needs redrawing.
 		// This ensures fades, spinners, etc. actually update visually on each tick.
@@ -268,6 +266,15 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			// Child state changed (e.g., spinner tick), invalidate render cache
 			m.renderDirty = true
 		}
+	}
+
+	// On animation ticks, decay leftover bottom slack and keep the slack
+	// subscription in sync so empty lines don't persist after thinking text
+	// fades out. Must run after children update so reasoning blocks have
+	// applied their fade state, and before tui.go's HasActive() check so the
+	// subscription is registered when the next tick is scheduled.
+	if _, ok := msg.(animation.TickMsg); ok {
+		cmds = append(cmds, m.handleAnimationTick())
 	}
 
 	return m, tea.Batch(cmds...)
@@ -500,10 +507,10 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	case "pgdown":
 		m.scrollPageDown()
 		return m, nil
-	case "home":
+	case "home", "g":
 		m.scrollToTop()
 		return m, nil
-	case "end":
+	case "end", "G":
 		m.scrollToBottom()
 		return m, nil
 	}
@@ -515,34 +522,16 @@ func (m *model) View() string {
 		return ""
 	}
 
-	prevTotalHeight := m.totalHeight
-	prevScrollableHeight := m.totalHeight + m.bottomSlack
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
+	// Release the slack subscription once it's no longer needed. Starting it
+	// is only done from Update via handleAnimationTick, where the returned
+	// tea.Cmd can be propagated to actually schedule the next tick.
+	if m.bottomSlack == 0 {
+		m.slackAnimationSub.Stop()
+	}
 
 	if m.totalHeight == 0 {
 		return ""
-	}
-
-	if m.userHasScrolled {
-		m.bottomSlack = 0
-	} else {
-		delta := m.totalHeight - prevTotalHeight
-		if delta < 0 {
-			m.bottomSlack += -delta
-		} else if delta > 0 && m.bottomSlack > 0 {
-			consume := min(delta, m.bottomSlack)
-			m.bottomSlack -= consume
-		}
-	}
-
-	scrollableHeight := m.totalHeight + m.bottomSlack
-	maxScrollOffset := max(0, scrollableHeight-m.height)
-
-	// Auto-scroll when content grows beyond any slack.
-	if !m.userHasScrolled && scrollableHeight > prevScrollableHeight {
-		m.scrollOffset = maxScrollOffset
-	} else {
-		m.scrollOffset = max(0, min(m.scrollOffset, maxScrollOffset))
 	}
 
 	// Use cached lines directly - O(1) instead of O(totalHeight) split
@@ -579,6 +568,63 @@ func (m *model) View() string {
 	m.scrollview.SetContent(m.renderedLines, m.totalScrollableHeight())
 	m.scrollview.SetScrollOffset(m.scrollOffset)
 	return m.scrollview.ViewWithLines(visibleLines)
+}
+
+// updateScrollState recomputes rendered content, bottom slack and scroll
+// offset from the current state of the message list. Called both from View()
+// and from Update() on animation ticks so that the slack subscription is
+// registered before tui.go schedules the next tick.
+func (m *model) updateScrollState() {
+	prevTotalHeight := m.totalHeight
+	prevScrollableHeight := m.totalHeight + m.bottomSlack
+	m.ensureAllItemsRendered()
+
+	if m.userHasScrolled {
+		m.bottomSlack = 0
+	} else {
+		delta := m.totalHeight - prevTotalHeight
+		switch {
+		case delta < 0:
+			// Cap so the viewport is never mostly empty after a large
+			// shrinkage (e.g., several tool calls fading out at once).
+			m.bottomSlack = min(m.bottomSlack-delta, m.maxBottomSlack())
+		case delta > 0 && m.bottomSlack > 0:
+			m.bottomSlack = max(0, m.bottomSlack-delta)
+		}
+	}
+
+	scrollableHeight := m.totalHeight + m.bottomSlack
+	maxScrollOffset := max(0, scrollableHeight-m.height)
+
+	// Auto-scroll when content grows beyond any slack.
+	if !m.userHasScrolled && scrollableHeight > prevScrollableHeight {
+		m.scrollOffset = maxScrollOffset
+	} else {
+		m.scrollOffset = max(0, min(m.scrollOffset, maxScrollOffset))
+	}
+}
+
+// maxBottomSlack returns the maximum blank lines added after content shrinks.
+// Small enough that the viewport never feels empty, large enough to absorb a
+// typical tool fade-out (~2 lines) without a visible jump.
+func (m *model) maxBottomSlack() int {
+	return max(1, min(5, m.height/3))
+}
+
+// handleAnimationTick refreshes scroll state, decays any leftover slack by
+// one line, and keeps the slack subscription alive while slack > 0 so
+// further ticks fire even after fade animations finish. Returns the command
+// to schedule the next tick when the subscription transitions to active.
+func (m *model) handleAnimationTick() tea.Cmd {
+	m.updateScrollState()
+	if !m.userHasScrolled && m.bottomSlack > 0 {
+		m.bottomSlack--
+	}
+	if m.bottomSlack > 0 {
+		return m.slackAnimationSub.Start()
+	}
+	m.slackAnimationSub.Stop()
+	return nil
 }
 
 // SetSize sets the dimensions of the component
@@ -1093,21 +1139,6 @@ func (m *model) invalidateAllItems() {
 	m.renderDirty = true
 }
 
-// forwardToReasoningBlock finds the reasoning block with the given ID and forwards the message to it.
-func (m *model) forwardToReasoningBlock(blockID string, msg tea.Msg) (layout.Model, tea.Cmd) {
-	for i, tuiMsg := range m.messages {
-		if tuiMsg.Type == types.MessageTypeAssistantReasoningBlock {
-			if block, ok := m.views[i].(*reasoningblock.Model); ok && block.ID() == blockID {
-				updatedView, cmd := m.views[i].Update(msg)
-				m.views[i] = updatedView
-				m.invalidateItem(i)
-				return m, cmd
-			}
-		}
-	}
-	return m, nil
-}
-
 // Message management methods
 func (m *model) AddUserMessage(content string) tea.Cmd {
 	return m.addMessage(types.User(content))
@@ -1535,7 +1566,7 @@ func (m *model) AdjustBottomSlack(delta int) {
 	if delta == 0 {
 		return
 	}
-	m.bottomSlack = max(0, m.bottomSlack+delta)
+	m.bottomSlack = max(0, min(m.bottomSlack+delta, m.maxBottomSlack()))
 }
 
 // contentWidth returns the width available for content.

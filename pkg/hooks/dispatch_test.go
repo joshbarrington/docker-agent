@@ -6,60 +6,63 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestExecutorHasIsGeneric exercises the generic Has API across all
-// configured event kinds to ensure the eventTable is wired correctly. It
-// guards against regressions where adding a new event to the Config
-// struct silently fails to surface in Has/Dispatch.
+// trueHook is a minimal hook reused as the body of every per-event
+// fixture below — the hook's identity doesn't matter to Has, only its
+// presence does.
+var trueHook = []Hook{{Type: HookTypeCommand, Command: "true"}}
+
+// matcherWildcard wraps trueHook in the structure tool-scoped events
+// (PreToolUse, PostToolUse) require.
+var matcherWildcard = []MatcherConfig{{Matcher: "*", Hooks: trueHook}}
+
+// onlyHooks maps each known event to a Config that lights up exactly
+// that event. The cross-product test below iterates this map (once for
+// the empty check, once for the per-event check), so adding a new
+// event is a one-line update here — the same one-line update
+// compileEvents needs.
+var onlyHooks = map[EventType]*Config{
+	EventPreToolUse:       {PreToolUse: matcherWildcard},
+	EventPostToolUse:      {PostToolUse: matcherWildcard},
+	EventSessionStart:     {SessionStart: trueHook},
+	EventTurnStart:        {TurnStart: trueHook},
+	EventBeforeLLMCall:    {BeforeLLMCall: trueHook},
+	EventAfterLLMCall:     {AfterLLMCall: trueHook},
+	EventSessionEnd:       {SessionEnd: trueHook},
+	EventOnUserInput:      {OnUserInput: trueHook},
+	EventStop:             {Stop: trueHook},
+	EventNotification:     {Notification: trueHook},
+	EventOnError:          {OnError: trueHook},
+	EventOnMaxIterations:  {OnMaxIterations: trueHook},
+	EventBeforeCompaction: {BeforeCompaction: trueHook},
+	EventAfterCompaction:  {AfterCompaction: trueHook},
+}
+
+// TestExecutorHasIsGeneric exercises the generic Has API across every
+// event kind to ensure compileEvents is wired correctly. It guards
+// against regressions where adding a new event to the Config struct
+// silently fails to surface in Has/Dispatch.
 func TestExecutorHasIsGeneric(t *testing.T) {
 	t.Parallel()
 
 	// Empty config: no event has hooks.
 	empty := NewExecutor(nil, "/tmp", nil)
-	for _, ev := range []EventType{
-		EventPreToolUse, EventPostToolUse, EventSessionStart, EventTurnStart,
-		EventBeforeLLMCall, EventAfterLLMCall,
-		EventSessionEnd, EventOnUserInput, EventStop, EventNotification,
-		EventOnError, EventOnMaxIterations,
-	} {
+	for ev := range onlyHooks {
 		assert.Falsef(t, empty.Has(ev), "empty executor must not report Has(%s)", ev)
 	}
 
-	// Each event populated in turn — the cross-product test ensures that
-	// configuring event X never makes Has(Y) true for Y != X.
-	cases := []struct {
-		event  EventType
-		config *Config
-	}{
-		{EventPreToolUse, &Config{PreToolUse: []MatcherConfig{{Matcher: "*", Hooks: []Hook{{Type: HookTypeCommand, Command: "true"}}}}}},
-		{EventPostToolUse, &Config{PostToolUse: []MatcherConfig{{Matcher: "*", Hooks: []Hook{{Type: HookTypeCommand, Command: "true"}}}}}},
-		{EventSessionStart, &Config{SessionStart: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventTurnStart, &Config{TurnStart: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventBeforeLLMCall, &Config{BeforeLLMCall: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventAfterLLMCall, &Config{AfterLLMCall: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventSessionEnd, &Config{SessionEnd: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventOnUserInput, &Config{OnUserInput: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventStop, &Config{Stop: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventNotification, &Config{Notification: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventOnError, &Config{OnError: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-		{EventOnMaxIterations, &Config{OnMaxIterations: []Hook{{Type: HookTypeCommand, Command: "true"}}}},
-	}
-
-	for _, tc := range cases {
-		exec := NewExecutor(tc.config, "/tmp", nil)
-		for _, other := range []EventType{
-			EventPreToolUse, EventPostToolUse, EventSessionStart, EventTurnStart,
-			EventBeforeLLMCall, EventAfterLLMCall,
-			EventSessionEnd, EventOnUserInput, EventStop, EventNotification,
-			EventOnError, EventOnMaxIterations,
-		} {
-			if other == tc.event {
-				assert.Truef(t, exec.Has(other), "configuring %s must light up Has(%s)", tc.event, other)
+	// Cross-product: configuring event ev must light up Has(ev) and
+	// only Has(ev).
+	for ev, cfg := range onlyHooks {
+		exec := NewExecutor(cfg, "/tmp", nil)
+		for other := range onlyHooks {
+			if other == ev {
+				assert.Truef(t, exec.Has(other), "configuring %s must light up Has(%s)", ev, other)
 			} else {
-				assert.Falsef(t, exec.Has(other), "configuring %s must NOT light up Has(%s)", tc.event, other)
+				assert.Falsef(t, exec.Has(other), "configuring %s must NOT light up Has(%s)", ev, other)
 			}
 		}
 	}
 
 	// Unknown events fall through cleanly rather than panicking.
-	assert.False(t, NewExecutor(nil, "/tmp", nil).Has(EventType("does-not-exist")))
+	assert.False(t, empty.Has(EventType("does-not-exist")))
 }

@@ -154,15 +154,8 @@ type model struct {
 	agentClickZones map[int]string // content line -> agent name
 }
 
-// Option is a functional option for configuring the sidebar.
-type Option func(*model)
-
-// WithLayoutConfig sets a custom layout configuration.
-func WithLayoutConfig(cfg LayoutConfig) Option {
-	return func(m *model) { m.layoutCfg = cfg }
-}
-
-func New(sessionState *service.SessionState, opts ...Option) Model {
+// New creates a new sidebar bound to the given session state.
+func New(sessionState *service.SessionState) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Session title"
 	ti.CharLimit = 50
@@ -187,9 +180,6 @@ func New(sessionState *service.SessionState, opts ...Option) Model {
 		preferredWidth:   DefaultWidth,
 		titleInput:       ti,
 		cacheDirty:       true, // Initial render needed
-	}
-	for _, opt := range opts {
-		opt(m)
 	}
 	return m
 }

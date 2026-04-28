@@ -67,3 +67,40 @@ func TestNewSession_ConsistencyBetweenInitialAndSpawned(t *testing.T) {
 	assert.Equal(t, initial.WorkingDir, spawned.WorkingDir)
 	assert.Equal(t, initial.AllowedDirectories(), spawned.AllowedDirectories())
 }
+
+func TestAddAttachedFile(t *testing.T) {
+	t.Run("deduplicates and preserves order", func(t *testing.T) {
+		s := New()
+		s.AddAttachedFile("/abs/foo.go")
+		s.AddAttachedFile("/abs/bar.go")
+		s.AddAttachedFile("/abs/foo.go") // duplicate
+		assert.Equal(t, []string{"/abs/foo.go", "/abs/bar.go"}, s.AttachedFilesSnapshot())
+	})
+
+	t.Run("ignores empty paths", func(t *testing.T) {
+		s := New()
+		s.AddAttachedFile("")
+		assert.Empty(t, s.AttachedFilesSnapshot())
+	})
+
+	t.Run("ignores non-absolute paths", func(t *testing.T) {
+		s := New()
+		s.AddAttachedFile("foo.go")
+		s.AddAttachedFile("./bar.go")
+		s.AddAttachedFile("../baz.go")
+		assert.Empty(t, s.AttachedFilesSnapshot())
+	})
+
+	t.Run("snapshot is independent of session storage", func(t *testing.T) {
+		s := New()
+		s.AddAttachedFile("/abs/foo.go")
+		snap := s.AttachedFilesSnapshot()
+		snap[0] = "mutated"
+		assert.Equal(t, []string{"/abs/foo.go"}, s.AttachedFilesSnapshot())
+	})
+}
+
+func TestWithAttachedFiles(t *testing.T) {
+	s := New(WithAttachedFiles([]string{"/abs/foo.go", "", "relative/path.go", "/abs/bar.go", "/abs/foo.go"}))
+	assert.Equal(t, []string{"/abs/foo.go", "/abs/bar.go"}, s.AttachedFilesSnapshot())
+}

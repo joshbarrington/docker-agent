@@ -165,7 +165,7 @@ func (r *RemoteRuntime) readCurrentAgentConfig(ctx context.Context) latest.Agent
 // RunStream starts the agent's interaction loop and returns a channel of events
 func (r *RemoteRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan Event {
 	slog.Debug("Starting remote runtime stream", "agent", r.currentAgent, "session_id", r.sessionID)
-	events := make(chan Event, 128)
+	events := make(chan Event, defaultEventChannelCapacity)
 
 	go func() {
 		defer close(events)

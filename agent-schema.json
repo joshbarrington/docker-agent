@@ -398,6 +398,10 @@
           "$ref": "#/definitions/HooksConfig",
           "description": "Lifecycle hooks for executing shell commands at various points in the agent's execution"
         },
+        "cache": {
+          "$ref": "#/definitions/CacheConfig",
+          "description": "Optional response cache: when the same user question is asked again, replay the previous answer instead of calling the model."
+        },
         "skills": {
           "description": "Enable skills discovery for this agent. Set to true to load all discovered skills from local filesystem sources; false disables skills. A list can mix sources (\"local\" or an HTTP/HTTPS URL) and/or skill names to include. If only names are given, local sources are loaded and filtered to just those skills.",
           "oneOf": [
@@ -480,6 +484,32 @@
       },
       "additionalProperties": false
     },
+    "CacheConfig": {
+      "type": "object",
+      "description": "Configuration for the agent's response cache. When enabled, the assistant response produced for a given user question is stored and replayed verbatim the next time the same question is asked, skipping the model entirely. Two normalization options control what 'same question' means: case_sensitive (default false) toggles case-insensitive matching, and trim_spaces (default false) strips leading/trailing whitespace before comparison. Set 'path' to persist entries to a JSON file (relative paths resolve against the agent config directory); leave it empty to keep entries in memory only.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Set to true to enable the cache. When false (or when the cache section is omitted), no caching is performed.",
+          "default": false
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "When true, questions must match exactly (including case) to hit the cache. Default: false (case-insensitive matching).",
+          "default": false
+        },
+        "trim_spaces": {
+          "type": "boolean",
+          "description": "When true, leading and trailing whitespace is stripped from questions before they are compared. Default: false.",
+          "default": false
+        },
+        "path": {
+          "type": "string",
+          "description": "Path to a JSON file used to persist cache entries across runs. Relative paths are resolved against the agent's config directory. When empty, the cache lives only in memory."
+        }
+      },
+      "additionalProperties": false
+    },
     "HooksConfig": {
       "type": "object",
       "description": "Lifecycle hooks configuration for an agent. Hooks allow running shell commands at various points in the agent's execution lifecycle.",
@@ -493,7 +523,14 @@
         },
         "post_tool_use": {
           "type": "array",
-          "description": "Hooks that run after a tool completes. Can provide validation or additional context.",
+          "description": "Hooks that run after a tool completes (both success and failure). The result is delivered in tool_response (failed calls carry an is_error flag and any error text). Returning decision=block or exit code 2 stops the run loop after the current tool batch — useful for circuit-breaker patterns.",
+          "items": {
+            "$ref": "#/definitions/HookMatcherConfig"
+          }
+        },
+        "permission_request": {
+          "type": "array",
+          "description": "Hooks that run just before the runtime prompts the user to approve a tool call (i.e. when --yolo and permission rules did not short-circuit the decision). Hooks may auto-allow or auto-deny via hook_specific_output.permission_decision; otherwise control falls through to the interactive confirmation. Tool-matched, like pre_tool_use.",
           "items": {
             "$ref": "#/definitions/HookMatcherConfig"
           }
@@ -501,6 +538,13 @@
         "session_start": {
           "type": "array",
           "description": "Hooks that run when a session begins. Can load context or setup environment.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "user_prompt_submit": {
+          "type": "array",
+          "description": "Hooks that run once per user message, after the user has submitted their prompt and before the first model call of the turn. The submitted text is passed in the prompt field. Hooks can block submission (decision=block / continue=false / exit code 2) or contribute additional_context that is spliced into the conversation as a transient system message for that turn only. Sub-sessions (transferred tasks, background agents) do NOT fire this event because their kick-off message is synthesised by the runtime.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
@@ -529,6 +573,20 @@
         "session_end": {
           "type": "array",
           "description": "Hooks that run when a session ends. Can perform cleanup or logging.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "pre_compact": {
+          "type": "array",
+          "description": "Hooks that run just before the runtime compacts the session transcript into a summary. The trigger is reported in source: 'manual' (user-initiated /compact), 'auto' (proactive threshold), 'overflow' (context-overflow recovery), or 'tool_overflow' (proactive after tool results pushed past the threshold). Hooks may block compaction (decision=block / continue=false / exit code 2) or contribute additional_context that is appended to the compaction prompt — useful for steering the summary without modifying the agent's instruction.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "subagent_stop": {
+          "type": "array",
+          "description": "Hooks that run when a sub-agent (transferred task, background agent, skill sub-session) finishes. Fires against the parent agent's executor so handlers configured on the orchestrator see every child completion. The sub-agent's name is in agent_name and its final assistant message in stop_response.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
@@ -567,6 +625,41 @@
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
+        },
+        "on_agent_switch": {
+          "type": "array",
+          "description": "Hooks that run whenever the runtime moves the active agent to a new one (transfer_task, handoff, or the return after a transferred task completes). Receives from_agent, to_agent, and agent_switch_kind in the input. Observational; useful for audit, transcript, and metrics pipelines that track which agent ran which tools.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "on_session_resume": {
+          "type": "array",
+          "description": "Hooks that run when the user explicitly approves the runtime to continue past its configured max_iterations limit. Receives previous_max_iterations and new_max_iterations in the input. Observational; useful for alerting on extended-runtime sessions or for billing/quota pipelines that meter resumes.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "on_tool_approval_decision": {
+          "type": "array",
+          "description": "Hooks that run after the runtime's tool approval chain (yolo / permissions / readonly / ask) resolves a verdict for a tool call, before the call is executed (allow) or its error response is recorded (deny / canceled). Receives approval_decision (\"allow\" | \"deny\" | \"canceled\") and approval_source (a stable classifier of which step decided). Observational; gives audit pipelines a single \"who approved what\" record without re-implementing the chain.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "before_compaction": {
+          "type": "array",
+          "description": "Hooks that run immediately before a session compaction. The Input carries input_tokens, output_tokens, context_limit, and compaction_reason ('threshold', 'overflow', 'manual'). A hook may veto compaction by setting decision='block' (or exiting with code 2), or supply a custom summary via hookSpecificOutput.summary, in which case the runtime applies that summary verbatim and skips the LLM-based summarization. Be cautious about denying when compaction_reason='overflow': the runtime is recovering from a context-overflow error and a denial there will leave the session unable to make progress.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
+        },
+        "after_compaction": {
+          "type": "array",
+          "description": "Hooks that run after a successful compaction (a summary was applied to the session). Receives the final summary text in Input.summary alongside input_tokens, output_tokens, context_limit and compaction_reason. Purely observational — hook output is ignored.",
+          "items": {
+            "$ref": "#/definitions/HookDefinition"
+          }
         }
       },
       "additionalProperties": false
@@ -602,21 +695,26 @@
       "type": "object",
       "description": "Definition of a single hook command",
       "properties": {
+        "name": {
+          "type": "string",
+          "description": "Optional friendly hook name used in logs and runtime hook events."
+        },
         "type": {
           "type": "string",
-          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime. The docker-agent runtime ships these builtins: 'add_date', 'add_environment_info', 'add_prompt_files'.",
+          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime; 'model' asks an LLM and translates its reply into the hook's native output (used for LLM-as-a-judge pre_tool_use, summarizers, etc., with no Go code). The docker-agent runtime ships these builtins: 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required).",
           "enum": [
             "command",
-            "builtin"
+            "builtin",
+            "model"
           ]
         },
         "command": {
           "type": "string",
-          "description": "Shell command (type=command) or builtin name (type=builtin) to invoke. Command hooks receive JSON input via stdin with tool/session information."
+          "description": "Shell command (type=command) or builtin name (type=builtin) to invoke. Command hooks receive JSON input via stdin with tool/session information. Ignored when type=model."
         },
         "args": {
           "type": "array",
-          "description": "Arbitrary string arguments passed to the hook handler. Builtin handlers receive them as a typed parameter; e.g. 'add_prompt_files' takes the list of prompt files to load.",
+          "description": "Arbitrary string arguments passed to the hook handler. Builtin handlers receive them as a typed parameter; e.g. 'add_prompt_files' takes the list of prompt files to load, 'add_recent_commits' optionally takes a positive integer commit limit, 'add_git_diff' accepts 'full' to emit the full unified diff, and 'max_iterations' takes a positive integer call limit.",
           "items": {
             "type": "string"
           }
@@ -626,13 +724,59 @@
           "description": "Execution timeout in seconds (default: 60)",
           "minimum": 1,
           "default": 60
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment variables to add or override for this hook only.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "working_dir": {
+          "type": "string",
+          "description": "Working directory for this hook. Relative paths are resolved from the agent working directory."
+        },
+        "on_error": {
+          "type": "string",
+          "description": "How non-fail-closed hook failures are handled. 'warn' logs and continues (default), 'ignore' continues silently, and 'block' denies the event.",
+          "enum": [
+            "warn",
+            "ignore",
+            "block"
+          ],
+          "default": "warn"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model spec ('provider/model', e.g. 'openai/gpt-4o-mini') invoked by type=model hooks. Required for that type, ignored otherwise."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "User-message template rendered for each invocation of a type=model hook. Parsed as a Go text/template with the hook Input as the data context: {{ .ToolName }}, {{ .ToolInput }}, {{ .StopResponse }}, etc. Required for type=model."
+        },
+        "schema": {
+          "type": "string",
+          "description": "Well-known response interpretation for type=model hooks. Empty: return the model's reply as additional_context. 'pre_tool_use_decision': ask the model for {decision, reason} JSON and produce a permission_decision verdict (allow|ask|deny)."
         }
       },
       "required": [
-        "type",
-        "command"
+        "type"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "command"}}, "required": ["type"]},
+          "then": {"required": ["command"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "builtin"}}, "required": ["type"]},
+          "then": {"required": ["command"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "model"}}, "required": ["type"]},
+          "then": {"required": ["model", "prompt"]}
+        }
+      ]
     },
     "ModelConfig": {
       "type": "object",

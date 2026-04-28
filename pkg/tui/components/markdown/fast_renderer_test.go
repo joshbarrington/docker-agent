@@ -6,10 +6,13 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/glamour/v2"
 	"github.com/charmbracelet/x/ansi"
 	runewidth "github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // stripANSI removes ANSI escape sequences from a string.
@@ -17,6 +20,19 @@ var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// newGlamourRenderer creates a markdown renderer using glamour.
+// Used as a reference implementation to compare against the fast renderer.
+func newGlamourRenderer(width int) *glamour.TermRenderer {
+	style := styles.MarkdownStyle()
+
+	r, _ := glamour.NewTermRenderer(
+		glamour.WithWordWrap(width),
+		glamour.WithStyles(style),
+		glamour.WithPreservedNewLines(),
+	)
+	return r
 }
 
 func TestFastRendererBasicText(t *testing.T) {
@@ -909,7 +925,7 @@ func BenchmarkFastRenderer(b *testing.B) {
 }
 
 func BenchmarkGlamourRenderer(b *testing.B) {
-	r := NewGlamourRenderer(80)
+	r := newGlamourRenderer(80)
 	for b.Loop() {
 		_, _ = r.Render(benchmarkInput)
 	}
@@ -924,7 +940,7 @@ func BenchmarkFastRendererSmall(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererSmall(b *testing.B) {
-	r := NewGlamourRenderer(80)
+	r := newGlamourRenderer(80)
 	input := "Hello **world**, this is a *test*."
 	for b.Loop() {
 		_, _ = r.Render(input)
@@ -940,7 +956,7 @@ func BenchmarkFastRendererCodeBlock(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererCodeBlock(b *testing.B) {
-	r := NewGlamourRenderer(80)
+	r := newGlamourRenderer(80)
 	input := "```go\nfunc main() {\n\tfmt.Println(\"hello`\")\n}\n```"
 	for b.Loop() {
 		_, _ = r.Render(input)
@@ -962,7 +978,7 @@ func BenchmarkFastRendererTable(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererTable(b *testing.B) {
-	r := NewGlamourRenderer(80)
+	r := newGlamourRenderer(80)
 	for b.Loop() {
 		_, _ = r.Render(benchmarkTableInput)
 	}
@@ -976,7 +992,7 @@ func BenchmarkFastRendererTableWidth20(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererTableWidth20(b *testing.B) {
-	r := NewGlamourRenderer(20)
+	r := newGlamourRenderer(20)
 	for b.Loop() {
 		_, _ = r.Render(benchmarkTableInput)
 	}
@@ -990,7 +1006,7 @@ func BenchmarkFastRendererTableWidth200(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererTableWidth200(b *testing.B) {
-	r := NewGlamourRenderer(200)
+	r := newGlamourRenderer(200)
 	for b.Loop() {
 		_, _ = r.Render(benchmarkTableInput)
 	}
@@ -1734,7 +1750,7 @@ func BenchmarkStreamingGlamourRenderer(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		r := NewGlamourRenderer(80)
+		r := newGlamourRenderer(80)
 		var accumulated strings.Builder
 		for _, chunk := range chunks {
 			accumulated.WriteString(chunk)

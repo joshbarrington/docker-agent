@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,15 +13,23 @@ import (
 
 func TestBuildTaskSystemMessage(t *testing.T) {
 	t.Run("with expected output", func(t *testing.T) {
-		msg := buildTaskSystemMessage("do the thing", "a result")
+		msg := buildTaskSystemMessage("do the thing", "a result", nil)
 		assert.Contains(t, msg, "<task>\ndo the thing\n</task>")
 		assert.Contains(t, msg, "<expected_output>\na result\n</expected_output>")
+		assert.NotContains(t, msg, "<attached_files>")
 	})
 
 	t.Run("without expected output", func(t *testing.T) {
-		msg := buildTaskSystemMessage("do the thing", "")
+		msg := buildTaskSystemMessage("do the thing", "", nil)
 		assert.Contains(t, msg, "<task>\ndo the thing\n</task>")
 		assert.NotContains(t, msg, "expected_output")
+		assert.NotContains(t, msg, "<attached_files>")
+	})
+
+	t.Run("with attached files", func(t *testing.T) {
+		msg := buildTaskSystemMessage("do the thing", "", []string{"/abs/foo.go", "/abs/bar.go"})
+		assert.Contains(t, msg, "<task>\ndo the thing\n</task>")
+		assert.Contains(t, msg, "<attached_files>\n- /abs/foo.go\n- /abs/bar.go\n</attached_files>")
 	})
 }
 
@@ -192,4 +201,52 @@ func TestSubSessionConfig_InheritsAgentLimits(t *testing.T) {
 		assert.Equal(t, 0, s.MaxIterations)
 		assert.Equal(t, 0, s.MaxConsecutiveToolCalls)
 	})
+}
+
+func TestSubSessionInheritsAttachedFiles(t *testing.T) {
+	parent := session.New(session.WithUserMessage("hello"))
+	parent.AddAttachedFile("/abs/foo.go")
+	parent.AddAttachedFile("/abs/bar.go")
+	parent.AddAttachedFile("/abs/foo.go") // duplicate, should be ignored
+
+	childAgent := agent.New("worker", "")
+	cfg := SubSessionConfig{
+		Task:      "refactor",
+		AgentName: "worker",
+		Title:     "Refactor",
+	}
+
+	s := newSubSession(parent, cfg, childAgent)
+
+	// Child session inherits parent's attached files (deduplicated, ordered).
+	assert.Equal(t, []string{"/abs/foo.go", "/abs/bar.go"}, s.AttachedFilesSnapshot())
+
+	// The system message lists them so the sub-agent sees them up-front.
+	sysMsg := s.GetMessages(childAgent)
+	require.NotEmpty(t, sysMsg)
+	var joined strings.Builder
+	for _, m := range sysMsg {
+		joined.WriteString(m.Content)
+		joined.WriteString("\n")
+	}
+	assert.Contains(t, joined.String(), "<attached_files>\n- /abs/foo.go\n- /abs/bar.go\n</attached_files>")
+}
+
+func TestSubSessionWithoutAttachedFilesOmitsBlock(t *testing.T) {
+	parent := session.New(session.WithUserMessage("hello"))
+	childAgent := agent.New("worker", "")
+	cfg := SubSessionConfig{
+		Task:      "refactor",
+		AgentName: "worker",
+		Title:     "Refactor",
+	}
+
+	s := newSubSession(parent, cfg, childAgent)
+	assert.Empty(t, s.AttachedFilesSnapshot())
+
+	msgs := s.GetMessages(childAgent)
+	require.NotEmpty(t, msgs)
+	for _, m := range msgs {
+		assert.NotContains(t, m.Content, "<attached_files>")
+	}
 }

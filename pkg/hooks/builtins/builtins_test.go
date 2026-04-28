@@ -21,12 +21,19 @@ func TestRegisterInstallsAllBuiltins(t *testing.T) {
 	t.Parallel()
 
 	r := hooks.NewRegistry()
-	require.NoError(t, builtins.Register(r))
+	_, err := builtins.Register(r)
+	require.NoError(t, err)
 
 	for _, name := range []string{
 		builtins.AddDate,
 		builtins.AddEnvironmentInfo,
 		builtins.AddPromptFiles,
+		builtins.AddGitStatus,
+		builtins.AddGitDiff,
+		builtins.AddDirectoryListing,
+		builtins.AddUserInfo,
+		builtins.AddRecentCommits,
+		builtins.MaxIterations,
 	} {
 		fn, ok := r.LookupBuiltin(name)
 		assert.True(t, ok, "builtin %q must be registered", name)
@@ -167,7 +174,8 @@ func TestAddPromptFilesNoArgsIsNoop(t *testing.T) {
 func lookup(t *testing.T, name string) hooks.BuiltinFunc {
 	t.Helper()
 	r := hooks.NewRegistry()
-	require.NoError(t, builtins.Register(r))
+	_, err := builtins.Register(r)
+	require.NoError(t, err)
 	fn, ok := r.LookupBuiltin(name)
 	require.True(t, ok, "builtin %q must be registered", name)
 	require.NotNil(t, fn)
@@ -181,7 +189,6 @@ func lookup(t *testing.T, name string) hooks.BuiltinFunc {
 func TestApplyAgentDefaultsNilOnAllZero(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, builtins.AgentDefaults{}.IsZero())
 	assert.Nil(t, builtins.ApplyAgentDefaults(nil, builtins.AgentDefaults{}))
 	assert.Nil(t, builtins.ApplyAgentDefaults(&hooks.Config{}, builtins.AgentDefaults{}))
 }

@@ -1,7 +1,6 @@
 package listdirectory
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/tools/builtin"
@@ -35,10 +34,10 @@ func extractResult(msg *types.Message) string {
 
 	var parts []string
 	if fileCount > 0 {
-		parts = append(parts, formatCount(fileCount, "file", "files"))
+		parts = append(parts, toolcommon.Pluralize(fileCount, "file", "files"))
 	}
 	if dirCount > 0 {
-		parts = append(parts, formatCount(dirCount, "directory", "directories"))
+		parts = append(parts, toolcommon.Pluralize(dirCount, "directory", "directories"))
 	}
 
 	result := strings.Join(parts, " and ")
@@ -46,12 +45,4 @@ func extractResult(msg *types.Message) string {
 		result += " (truncated)"
 	}
 	return result
-}
-
-// formatCount returns a formatted count with proper singular/plural form.
-func formatCount(count int, singular, plural string) string {
-	if count == 1 {
-		return fmt.Sprintf("%d %s", count, singular)
-	}
-	return fmt.Sprintf("%d %s", count, plural)
 }

@@ -483,3 +483,31 @@ func TestExternalDepthContext(t *testing.T) {
 	ctx = contextWithExternalDepth(ctx, 7)
 	assert.Equal(t, 7, externalDepthFromContext(ctx))
 }
+
+func TestLoadWithConfig_CachePathTraversal(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	tmpDir := t.TempDir()
+
+	// Create a config file with a path traversal attempt
+	configPath := filepath.Join(tmpDir, "agent.yaml")
+	configContent := `
+agents:
+  root:
+    model: openai/gpt-4o
+    description: Test agent
+    instruction: You are a test agent.
+    cache:
+      enabled: true
+      path: ../../../../etc/passwd
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0o600))
+
+	source := config.NewFileSource(configPath)
+	runConfig := &config.RuntimeConfig{}
+	runConfig.WorkingDir = tmpDir
+
+	_, err := LoadWithConfig(t.Context(), source, runConfig)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes parent directory")
+}

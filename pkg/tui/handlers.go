@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -25,7 +26,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
-	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -169,7 +169,7 @@ func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd
 
 func (m *appModel) handleSetSessionTitle(title string) (tea.Model, tea.Cmd) {
 	if err := m.application.UpdateSessionTitle(context.Background(), title); err != nil {
-		if isErrTitleGenerating(err) {
+		if errors.Is(err, app.ErrTitleGenerating) {
 			return m, notification.WarningCmd("Title is being generated, please wait")
 		}
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to set session title: %v", err))
@@ -186,7 +186,7 @@ func (m *appModel) handleRegenerateTitle() (tea.Model, tea.Cmd) {
 		return m, notification.ErrorCmd("Cannot regenerate title: no user message in session")
 	}
 	if err := m.application.RegenerateSessionTitle(context.Background()); err != nil {
-		if isErrTitleGenerating(err) {
+		if errors.Is(err, app.ErrTitleGenerating) {
 			return m, notification.WarningCmd("Title is being generated, please wait")
 		}
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to regenerate title: %v", err))
@@ -206,10 +206,6 @@ func (m *appModel) handleDeleteSession(sessionID string) (tea.Model, tea.Cmd) {
 	}
 
 	return m, notification.SuccessCmd("Session deleted.")
-}
-
-func isErrTitleGenerating(err error) bool {
-	return err != nil && err.Error() == app.ErrTitleGenerating.Error()
 }
 
 // --- Eval / Export / Compact / Copy ---
@@ -236,14 +232,7 @@ func (m *appModel) handleCopySessionToClipboard() (tea.Model, tea.Cmd) {
 	if transcript == "" {
 		return m, notification.SuccessCmd("Conversation is empty; nothing copied.")
 	}
-	return m, tea.Sequence(
-		tea.SetClipboard(transcript),
-		func() tea.Msg {
-			_ = clipboard.WriteAll(transcript)
-			return nil
-		},
-		notification.SuccessCmd("Conversation copied to clipboard."),
-	)
+	return m, copyToClipboard(transcript, "Conversation copied to clipboard.")
 }
 
 func (m *appModel) handleCopyLastResponseToClipboard() (tea.Model, tea.Cmd) {
@@ -255,13 +244,20 @@ func (m *appModel) handleCopyLastResponseToClipboard() (tea.Model, tea.Cmd) {
 	if lastResponse == "" {
 		return m, notification.InfoCmd("No assistant response to copy.")
 	}
-	return m, tea.Sequence(
-		tea.SetClipboard(lastResponse),
+	return m, copyToClipboard(lastResponse, "Last response copied to clipboard.")
+}
+
+// copyToClipboard returns a sequenced command that copies text to the system
+// clipboard using both the OSC 52 escape sequence (for SSH/tmux compatibility)
+// and the platform-native clipboard API, then shows a success notification.
+func copyToClipboard(text, successMsg string) tea.Cmd {
+	return tea.Sequence(
+		tea.SetClipboard(text),
 		func() tea.Msg {
-			_ = clipboard.WriteAll(lastResponse)
+			_ = clipboard.WriteAll(text)
 			return nil
 		},
-		notification.SuccessCmd("Last response copied to clipboard."),
+		notification.SuccessCmd(successMsg),
 	)
 }
 
@@ -272,9 +268,10 @@ func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to switch to agent '%s': %v", agentName, err))
 	}
 	m.sessionState.SetCurrentAgentName(agentName)
-	updated, cmd := m.chatPage.Update(messages.SessionToggleChangedMsg{})
-	m.chatPage = updated.(chat.Page)
-	return m, tea.Batch(cmd, notification.SuccessCmd(fmt.Sprintf("Switched to agent '%s'", agentName)))
+	return m, tea.Batch(
+		m.updateChatCmd(messages.SessionToggleChangedMsg{}),
+		notification.SuccessCmd(fmt.Sprintf("Switched to agent '%s'", agentName)),
+	)
 }
 
 func (m *appModel) handleCycleAgent() (tea.Model, tea.Cmd) {
@@ -310,15 +307,11 @@ func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 	sess := m.application.Session()
 	sess.ToolsApproved = !sess.ToolsApproved
 	m.sessionState.SetYoloMode(sess.ToolsApproved)
-	updated, cmd := m.chatPage.Update(messages.SessionToggleChangedMsg{})
-	m.chatPage = updated.(chat.Page)
-	return m, cmd
+	return m.forwardChat(messages.SessionToggleChangedMsg{})
 }
 
 func (m *appModel) handleToggleHideToolResults() (tea.Model, tea.Cmd) {
-	updated, cmd := m.chatPage.Update(messages.ToggleHideToolResultsMsg{})
-	m.chatPage = updated.(chat.Page)
-	return m, cmd
+	return m.forwardChat(messages.ToggleHideToolResultsMsg{})
 }
 
 func (m *appModel) handleToggleSplitDiff() (tea.Model, tea.Cmd) {
@@ -326,29 +319,30 @@ func (m *appModel) handleToggleSplitDiff() (tea.Model, tea.Cmd) {
 	enabled := m.sessionState.SplitDiffView()
 
 	// Persist to global userconfig
-	go func() {
-		cfg, err := userconfig.Load()
-		if err != nil {
-			slog.Warn("Failed to load userconfig for split diff toggle", "error", err)
-			return
-		}
-		if cfg.Settings == nil {
-			cfg.Settings = &userconfig.Settings{}
-		}
-		cfg.Settings.SplitDiffView = &enabled
-		if err := cfg.Save(); err != nil {
-			slog.Warn("Failed to persist split diff setting to userconfig", "error", err)
-		}
-	}()
+	go persistSplitDiffView(enabled)
 
-	var cmds []tea.Cmd
-	updated, cmd := m.chatPage.Update(editfile.ToggleDiffViewMsg{})
-	m.chatPage = updated.(chat.Page)
-	cmds = append(cmds, cmd)
-	updated, cmd = m.chatPage.Update(messages.SessionToggleChangedMsg{})
-	m.chatPage = updated.(chat.Page)
-	cmds = append(cmds, cmd)
-	return m, tea.Batch(cmds...)
+	return m, tea.Batch(
+		m.updateChatCmd(editfile.ToggleDiffViewMsg{}),
+		m.updateChatCmd(messages.SessionToggleChangedMsg{}),
+	)
+}
+
+// persistSplitDiffView writes the current split-diff toggle to the user
+// config without blocking the UI. Errors are logged but otherwise ignored
+// because losing the persistence is non-fatal.
+func persistSplitDiffView(enabled bool) {
+	cfg, err := userconfig.Load()
+	if err != nil {
+		slog.Warn("Failed to load userconfig for split diff toggle", "error", err)
+		return
+	}
+	if cfg.Settings == nil {
+		cfg.Settings = &userconfig.Settings{}
+	}
+	cfg.Settings.SplitDiffView = &enabled
+	if err := cfg.Save(); err != nil {
+		slog.Warn("Failed to persist split diff setting to userconfig", "error", err)
+	}
 }
 
 // --- Dialogs ---
@@ -508,18 +502,10 @@ func (m *appModel) invalidateCachesForThemeChange() {
 
 func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
 	m.invalidateCachesForThemeChange()
-
-	var cmds []tea.Cmd
-
-	dialogUpdated, dialogCmd := m.dialogMgr.Update(messages.ThemeChangedMsg{})
-	m.dialogMgr = dialogUpdated.(dialog.Manager)
-	cmds = append(cmds, dialogCmd)
-
-	chatUpdated, chatCmd := m.chatPage.Update(messages.ThemeChangedMsg{})
-	m.chatPage = chatUpdated.(chat.Page)
-	cmds = append(cmds, chatCmd)
-
-	return m, tea.Batch(cmds...)
+	return m, tea.Batch(
+		m.updateDialogCmd(messages.ThemeChangedMsg{}),
+		m.updateChatCmd(messages.ThemeChangedMsg{}),
+	)
 }
 
 // handleThemeFileChanged hot-reloads a theme that was modified on disk.

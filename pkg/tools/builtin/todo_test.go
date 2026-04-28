@@ -42,7 +42,7 @@ func TestTodoTool_CreateTodo(t *testing.T) {
 	assert.Equal(t, "todo_1", output.AllTodos[0].ID)
 	assert.Contains(t, output.Reminder, "todo_1")
 
-	require.Equal(t, 1, storage.Len())
+	require.Equal(t, 1, storage.Len(t.Context()))
 	requireMeta(t, result, 1)
 }
 
@@ -70,7 +70,7 @@ func TestTodoTool_CreateTodos(t *testing.T) {
 	assert.Contains(t, output.Reminder, "todo_2")
 	assert.Contains(t, output.Reminder, "todo_3")
 
-	assert.Equal(t, 3, storage.Len())
+	assert.Equal(t, 3, storage.Len(t.Context()))
 	requireMeta(t, result, 3)
 
 	// A second call continues the ID sequence and includes all 4 items
@@ -83,7 +83,7 @@ func TestTodoTool_CreateTodos(t *testing.T) {
 	require.Len(t, output.Created, 1)
 	assert.Equal(t, "todo_4", output.Created[0].ID)
 	require.Len(t, output.AllTodos, 4)
-	assert.Equal(t, 4, storage.Len())
+	assert.Equal(t, 4, storage.Len(t.Context()))
 	requireMeta(t, result, 4)
 }
 
@@ -167,7 +167,7 @@ func TestTodoTool_UpdateTodos(t *testing.T) {
 	assert.Contains(t, output.Reminder, "todo_3")
 	assert.NotContains(t, output.Reminder, "todo_1") // completed, should not appear
 
-	todos := storage.All()
+	todos := storage.All(t.Context())
 	require.Len(t, todos, 3)
 	assert.Equal(t, "completed", todos[0].Status)
 	assert.Equal(t, "pending", todos[1].Status)
@@ -204,7 +204,7 @@ func TestTodoTool_UpdateTodos_PartialFailure(t *testing.T) {
 	// Reminder should mention the still-pending todo
 	assert.Contains(t, output.Reminder, "todo_2")
 
-	todos := storage.All()
+	todos := storage.All(t.Context())
 	require.Len(t, todos, 2)
 	assert.Equal(t, "completed", todos[0].Status)
 	assert.Equal(t, "pending", todos[1].Status)
@@ -258,7 +258,7 @@ func TestTodoTool_UpdateTodos_AllCompleted_NoAutoRemoval(t *testing.T) {
 	assert.Equal(t, "completed", output.AllTodos[1].Status)
 
 	// Todos remain in storage (no auto-clear on completion)
-	assert.Equal(t, 2, storage.Len())
+	assert.Equal(t, 2, storage.Len(t.Context()))
 	requireMeta(t, result, 2)
 }
 
@@ -269,8 +269,8 @@ func TestTodoTool_WithStorage(t *testing.T) {
 	_, err := tool.handler.createTodo(t.Context(), CreateTodoArgs{Description: "Test item"})
 	require.NoError(t, err)
 
-	assert.Equal(t, 1, storage.Len())
-	assert.Equal(t, "Test item", storage.All()[0].Description)
+	assert.Equal(t, 1, storage.Len(t.Context()))
+	assert.Equal(t, "Test item", storage.All(t.Context())[0].Description)
 }
 
 func TestTodoTool_WithStorage_NilPanics(t *testing.T) {

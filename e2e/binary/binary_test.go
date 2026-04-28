@@ -54,12 +54,13 @@ func TestAutoComplete(t *testing.T) {
 		res, err := Exec(binDir+"/docker-agent", "__complete", "serve", "")
 		require.NoError(t, err)
 		props := lines(res.Stdout)
-		require.Greater(t, len(props), 4)
+		require.Greater(t, len(props), 5)
 		require.Contains(t, props[0], "a2a")
 		require.Contains(t, props[0], "Start an agent as an A2A")
 		require.Contains(t, props[1], "acp")
 		require.Contains(t, props[2], "api")
-		require.Contains(t, props[3], "mcp")
+		require.Contains(t, props[3], "chat")
+		require.Contains(t, props[4], "mcp")
 	})
 
 	t.Run("cli plugin auto-complete docker agent", func(t *testing.T) {

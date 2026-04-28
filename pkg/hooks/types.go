@@ -6,7 +6,6 @@ package hooks
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // EventType identifies a hook event.
@@ -15,21 +14,64 @@ type EventType string
 const (
 	// EventPreToolUse fires before a tool call. Can allow/deny/modify it.
 	EventPreToolUse EventType = "pre_tool_use"
-	// EventPostToolUse fires after a tool completes successfully.
+	// EventPostToolUse fires after a tool completes — both success and
+	// failure. The result is delivered in [Input.ToolResponse]; failed
+	// calls carry an is_error flag and any error text. Returning
+	// decision="block" (or continue=false / exit code 2) stops the run
+	// loop after the current tool batch — useful for circuit-breaker
+	// patterns like a tool-call loop detector.
 	EventPostToolUse EventType = "post_tool_use"
+	// EventPermissionRequest fires just before the runtime would prompt
+	// the user to confirm a tool call (i.e. when neither --yolo nor a
+	// permissions rule short-circuited the decision and the tool is not
+	// read-only). The hook can short-circuit the prompt by returning
+	// [HookSpecificOutput.PermissionDecision] = "allow" (sets
+	// [Result.PermissionAllowed] true — the runtime invokes the tool
+	// without asking) or "deny" (sets [Result.Allowed] false — the
+	// runtime rejects the tool with the hook's reason). Returning
+	// nothing falls through to the interactive confirmation.
+	//
+	// Unlike pre_tool_use — where allow is the implicit default and only
+	// deny carries new information — here allow is the explicit
+	// auto-approve verdict; that asymmetry is why permission_request
+	// has its own [Result.PermissionAllowed] flag separate from
+	// [Result.Allowed].
+	EventPermissionRequest EventType = "permission_request"
 	// EventSessionStart fires when a session begins or resumes.
 	EventSessionStart EventType = "session_start"
+	// EventUserPromptSubmit fires once per user prompt, after the user
+	// has submitted their message and before the first model call of
+	// the turn. Returning decision="block" (or continue=false / exit
+	// code 2) stops the run loop before the model is invoked.
+	// AdditionalContext is spliced into the conversation as a transient
+	// system message for that turn only.
+	EventUserPromptSubmit EventType = "user_prompt_submit"
 	// EventTurnStart fires at the start of every agent turn (each model
 	// call). AdditionalContext is injected transiently and never persisted.
 	EventTurnStart EventType = "turn_start"
-	// EventBeforeLLMCall fires immediately before each model call. Output
-	// is informational; use turn_start to contribute system messages.
+	// EventBeforeLLMCall fires immediately before each model call.
+	// Returning decision="block" (or continue=false / exit code 2)
+	// stops the run loop before the model is invoked — useful for hard
+	// budget guards. Use turn_start to contribute system messages;
+	// this event's AdditionalContext is not consumed.
 	EventBeforeLLMCall EventType = "before_llm_call"
 	// EventAfterLLMCall fires immediately after a successful model call,
 	// before the response is recorded. Failed calls fire EventOnError.
 	EventAfterLLMCall EventType = "after_llm_call"
 	// EventSessionEnd fires when a session terminates.
 	EventSessionEnd EventType = "session_end"
+	// EventPreCompact fires just before the runtime compacts the session
+	// transcript. The trigger is reported in [Input.Source]: "manual",
+	// "auto", "overflow", or "tool_overflow". Returning decision="block"
+	// (or continue=false / exit code 2) cancels the compaction.
+	// AdditionalContext is appended to the compaction prompt and lets
+	// the hook steer the summary without modifying the agent's instruction.
+	EventPreCompact EventType = "pre_compact"
+	// EventSubagentStop fires when a sub-agent (transferred task,
+	// background agent, skill sub-session) finishes. The sub-agent's
+	// name is in [Input.AgentName] and its final assistant message in
+	// [Input.StopResponse].
+	EventSubagentStop EventType = "subagent_stop"
 	// EventOnUserInput fires when the agent needs input from the user.
 	EventOnUserInput EventType = "on_user_input"
 	// EventStop fires when the model finishes its response.
@@ -40,71 +82,60 @@ const (
 	EventOnError EventType = "on_error"
 	// EventOnMaxIterations fires when the runtime reaches its max_iterations limit.
 	EventOnMaxIterations EventType = "on_max_iterations"
+	// EventOnAgentSwitch fires whenever the runtime moves the active
+	// agent to a new one — either delegating a task (transfer_task),
+	// handing off the conversation (handoff), or returning to the
+	// caller after a transferred task completes. Observational; useful
+	// for audit, transcript, and metrics pipelines that track which
+	// agent ran which tools without subscribing to the runtime event
+	// channel.
+	EventOnAgentSwitch EventType = "on_agent_switch"
+	// EventOnSessionResume fires when the user explicitly approves the
+	// runtime to continue past its configured max_iterations limit.
+	// Observational; useful for alerting on extended-runtime sessions
+	// or for pipelines that bill / quota-track per resume.
+	EventOnSessionResume EventType = "on_session_resume"
+	// EventOnToolApprovalDecision fires after the runtime's tool
+	// approval chain (yolo / permissions / readonly / ask) has resolved
+	// a verdict for a tool call, before the call is executed (for
+	// allow) or its error response is recorded (for deny / canceled).
+	// Observational; gives audit pipelines a single, structured "who
+	// approved what" record without re-implementing the chain.
+	EventOnToolApprovalDecision EventType = "on_tool_approval_decision"
+	// EventBeforeCompaction fires immediately before a session compaction
+	// runs. The hook can:
+	//   - veto the compaction by returning Decision == "block" (the runtime
+	//     skips compaction entirely);
+	//   - replace the LLM-generated summary by returning a non-empty
+	//     [HookSpecificOutput.Summary] (the runtime applies that summary
+	//     verbatim and skips the model call).
+	// The Input carries [Input.InputTokens], [Input.OutputTokens],
+	// [Input.ContextLimit] and [Input.CompactionReason] ("threshold",
+	// "overflow", or "manual") so handlers can decide based on real
+	// session pressure.
+	//
+	// [Input.ContextLimit] may be 0 when the model definition is
+	// unavailable (e.g. an unknown model ID); hooks should treat 0 as
+	// "unknown" rather than as a real limit.
+	//
+	// Hook authors should be cautious about denying when
+	// CompactionReason == "overflow": the runtime is recovering from a
+	// context-overflow error. A denial here means the next LLM call will
+	// hit the same overflow; the runtime allows at most one
+	// retry-with-compaction (see maxOverflowCompactions in loop.go), so a
+	// second denial fails the turn and surfaces the overflow as an Error
+	// event.
+	EventBeforeCompaction EventType = "before_compaction"
+	// EventAfterCompaction fires after a session compaction completes
+	// successfully (a summary was applied to the session). The Input
+	// carries the produced [Input.Summary] together with the
+	// *pre-compaction* [Input.InputTokens] / [Input.OutputTokens] (what
+	// was summarized) so observability handlers can naturally express
+	// "compacted from X to Y". The post-compaction counts are reflected
+	// in the next runtime token-usage event. AfterCompaction is purely
+	// observational; output is ignored.
+	EventAfterCompaction EventType = "after_compaction"
 )
-
-// HookType identifies the kind of handler used to run a hook.
-type HookType string
-
-const (
-	// HookTypeCommand runs a shell command.
-	HookTypeCommand HookType = "command"
-	// HookTypeBuiltin dispatches to a named in-process Go function
-	// registered via [Registry.RegisterBuiltin]. The name is stored in
-	// [Hook.Command].
-	HookTypeBuiltin HookType = "builtin"
-)
-
-// Hook is a single hook configuration entry.
-type Hook struct {
-	Type    HookType `json:"type" yaml:"type"`
-	Command string   `json:"command,omitempty" yaml:"command,omitempty"`
-	// Args are arbitrary string arguments passed to the hook handler.
-	// Builtin hooks receive them as the args parameter of [BuiltinFunc].
-	Args []string `json:"args,omitempty" yaml:"args,omitempty"`
-	// Timeout is the execution timeout in seconds (default: 60).
-	Timeout int `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-}
-
-// GetTimeout returns the timeout duration, defaulting to 60 seconds.
-func (h *Hook) GetTimeout() time.Duration {
-	if h.Timeout <= 0 {
-		return 60 * time.Second
-	}
-	return time.Duration(h.Timeout) * time.Second
-}
-
-// MatcherConfig is a hook matcher with its hooks. Matcher is a regex
-// pattern matched against tool names; "" or "*" matches all tools.
-type MatcherConfig struct {
-	Matcher string `json:"matcher,omitempty" yaml:"matcher,omitempty"`
-	Hooks   []Hook `json:"hooks" yaml:"hooks"`
-}
-
-// Config is the hooks configuration for an agent.
-type Config struct {
-	PreToolUse      []MatcherConfig `json:"pre_tool_use,omitempty" yaml:"pre_tool_use,omitempty"`
-	PostToolUse     []MatcherConfig `json:"post_tool_use,omitempty" yaml:"post_tool_use,omitempty"`
-	SessionStart    []Hook          `json:"session_start,omitempty" yaml:"session_start,omitempty"`
-	TurnStart       []Hook          `json:"turn_start,omitempty" yaml:"turn_start,omitempty"`
-	BeforeLLMCall   []Hook          `json:"before_llm_call,omitempty" yaml:"before_llm_call,omitempty"`
-	AfterLLMCall    []Hook          `json:"after_llm_call,omitempty" yaml:"after_llm_call,omitempty"`
-	SessionEnd      []Hook          `json:"session_end,omitempty" yaml:"session_end,omitempty"`
-	OnUserInput     []Hook          `json:"on_user_input,omitempty" yaml:"on_user_input,omitempty"`
-	Stop            []Hook          `json:"stop,omitempty" yaml:"stop,omitempty"`
-	Notification    []Hook          `json:"notification,omitempty" yaml:"notification,omitempty"`
-	OnError         []Hook          `json:"on_error,omitempty" yaml:"on_error,omitempty"`
-	OnMaxIterations []Hook          `json:"on_max_iterations,omitempty" yaml:"on_max_iterations,omitempty"`
-}
-
-// IsEmpty returns true if no hooks are configured.
-func (c *Config) IsEmpty() bool {
-	return len(c.PreToolUse) == 0 && len(c.PostToolUse) == 0 &&
-		len(c.SessionStart) == 0 && len(c.TurnStart) == 0 &&
-		len(c.BeforeLLMCall) == 0 && len(c.AfterLLMCall) == 0 &&
-		len(c.SessionEnd) == 0 && len(c.OnUserInput) == 0 &&
-		len(c.Stop) == 0 && len(c.Notification) == 0 &&
-		len(c.OnError) == 0 && len(c.OnMaxIterations) == 0
-}
 
 // Input is the JSON-serializable payload passed to hooks via stdin.
 type Input struct {
@@ -112,29 +143,100 @@ type Input struct {
 	Cwd           string    `json:"cwd"`
 	HookEventName EventType `json:"hook_event_name"`
 
-	// Tool-related fields (PreToolUse and PostToolUse).
+	// AgentName identifies the agent dispatching the event. Useful for
+	// builtin hooks that need to look up per-agent state via a runtime
+	// closure (e.g. response cache).
+	AgentName string `json:"agent_name,omitempty"`
+
+	// LastUserMessage is the text content of the latest user message in
+	// the session at dispatch time. Populated for events that respond to
+	// a user turn (stop, after_llm_call). Empty for events that aren't
+	// turn-scoped (session_start, session_end, notification, ...).
+	LastUserMessage string `json:"last_user_message,omitempty"`
+
+	// Tool-related fields (PreToolUse, PostToolUse, PermissionRequest).
 	ToolName  string         `json:"tool_name,omitempty"`
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	ToolInput map[string]any `json:"tool_input,omitempty"`
 
 	// PostToolUse specific.
-	ToolResponse any `json:"tool_response,omitempty"`
+	ToolResponse any  `json:"tool_response,omitempty"`
+	ToolError    bool `json:"tool_error,omitempty"`
 
 	// SessionStart specific: "startup", "resume", "clear", "compact".
+	// PreCompact specific: "manual", "auto", "overflow", "tool_overflow".
 	Source string `json:"source,omitempty"`
 	// SessionEnd specific: "clear", "logout", "prompt_input_exit", "other".
 	Reason string `json:"reason,omitempty"`
-	// Stop / AfterLLMCall: the model's final response content.
+	// Stop / AfterLLMCall / SubagentStop: the model's final response content.
 	StopResponse string `json:"stop_response,omitempty"`
+	// UserPromptSubmit specific: the text the user just submitted.
+	Prompt string `json:"prompt,omitempty"`
+	// SubagentStop populates [Input.AgentName] (above) with the name of
+	// the sub-agent that just finished.
+	// SubagentStop specific: ID of the parent session that spawned the sub-agent.
+	ParentSessionID string `json:"parent_session_id,omitempty"`
 	// Notification specific.
 	NotificationLevel   string `json:"notification_level,omitempty"`
 	NotificationMessage string `json:"notification_message,omitempty"`
+
+	// OnAgentSwitch specific: the agent the runtime is moving away
+	// from (FromAgent) and the one it's switching to (ToAgent), plus
+	// the cause of the transition ("transfer_task", "handoff",
+	// "transfer_task_return"). Empty FromAgent is valid for the
+	// initial switch into the team's default agent.
+	FromAgent       string `json:"from_agent,omitempty"`
+	ToAgent         string `json:"to_agent,omitempty"`
+	AgentSwitchKind string `json:"agent_switch_kind,omitempty"`
+
+	// OnSessionResume specific: the iteration cap that was reached
+	// (PreviousMaxIterations) and the new cap after the user approved
+	// continuation (NewMaxIterations). Carrying both lets audit
+	// pipelines compute how much extra runtime was granted without
+	// reconstructing it from the iteration counter.
+	PreviousMaxIterations int `json:"previous_max_iterations,omitempty"`
+	NewMaxIterations      int `json:"new_max_iterations,omitempty"`
+
+	// OnToolApprovalDecision specific: the verdict resolved by the
+	// approval chain ("allow", "deny", "canceled") and a stable
+	// classifier for what produced it ("yolo",
+	// "session_permissions_allow", "session_permissions_deny",
+	// "team_permissions_allow", "team_permissions_deny",
+	// "readonly_hint", "user_approved", "user_approved_session",
+	// "user_approved_tool", "user_rejected", "context_canceled").
+	ApprovalDecision string `json:"approval_decision,omitempty"`
+	ApprovalSource   string `json:"approval_source,omitempty"`
+
+	// Compaction fields (BeforeCompaction, AfterCompaction).
+	InputTokens  int64 `json:"input_tokens,omitempty"`
+	OutputTokens int64 `json:"output_tokens,omitempty"`
+	// ContextLimit is the model's context-window size in tokens. It is
+	// 0 when the model definition is unavailable (e.g. an unknown
+	// model ID); hooks should treat 0 as "unknown" rather than as a
+	// real limit.
+	ContextLimit int64 `json:"context_limit,omitempty"`
+	// CompactionReason is one of "threshold", "overflow", "manual".
+	CompactionReason string `json:"compaction_reason,omitempty"`
+	// Summary is the produced compaction summary text. It is populated
+	// only on AfterCompaction (BeforeCompaction fires before any
+	// summary exists); on AfterCompaction it carries the actual text
+	// applied to the session so observability handlers can audit /
+	// archive what was summarized.
+	Summary string `json:"summary,omitempty"`
 }
 
 // ToJSON serializes the input.
 func (i *Input) ToJSON() ([]byte, error) { return json.Marshal(i) }
 
-// Decision is a permission decision returned by a hook.
+// ErrorPolicy controls what happens when a non-fail-closed hook fails.
+type ErrorPolicy string
+
+const (
+	ErrorPolicyWarn   ErrorPolicy = "warn"
+	ErrorPolicyIgnore ErrorPolicy = "ignore"
+	ErrorPolicyBlock  ErrorPolicy = "block"
+)
+
 type Decision string
 
 const (
@@ -170,6 +272,7 @@ type Output struct {
 	// SystemMessage is a warning to show the user.
 	SystemMessage string `json:"system_message,omitempty"`
 	// Decision is for blocking operations ("block", ...).
+	// In-process builtin hooks should use [DecisionBlockValue].
 	Decision string `json:"decision,omitempty"`
 	// Reason explains the decision.
 	Reason string `json:"reason,omitempty"`
@@ -180,8 +283,12 @@ type Output struct {
 // ShouldContinue reports whether execution should continue.
 func (o *Output) ShouldContinue() bool { return o.Continue == nil || *o.Continue }
 
+// DecisionBlockValue is the canonical value of [Output.Decision] used
+// by hooks to signal a deny/terminate verdict on the current event.
+const DecisionBlockValue = "block"
+
 // IsBlocked reports whether the decision is "block".
-func (o *Output) IsBlocked() bool { return o.Decision == "block" }
+func (o *Output) IsBlocked() bool { return o.Decision == DecisionBlockValue }
 
 // HookSpecificOutput holds event-specific output fields.
 type HookSpecificOutput struct {
@@ -194,12 +301,21 @@ type HookSpecificOutput struct {
 
 	// PostToolUse / SessionStart / TurnStart / Stop fields.
 	AdditionalContext string `json:"additional_context,omitempty"`
+
+	// BeforeCompaction: when non-empty, the runtime applies this string as
+	// the compaction summary verbatim and skips the LLM-based
+	// summarization. Ignored on every other event.
+	Summary string `json:"summary,omitempty"`
 }
 
 // Result is the aggregated outcome of dispatching one event.
 type Result struct {
 	// Allowed indicates if the operation should proceed.
 	Allowed bool
+	// PermissionAllowed is set when a [EventPermissionRequest] hook
+	// returned permission_decision="allow". The runtime treats this as
+	// an explicit auto-approve and skips the interactive confirmation.
+	PermissionAllowed bool
 	// Message is feedback to include in the response.
 	Message string
 	// ModifiedInput contains modifications to tool input (PreToolUse).
@@ -212,4 +328,24 @@ type Result struct {
 	ExitCode int
 	// Stderr captures stderr from a failing hook.
 	Stderr string
+	// Summary is set by EventBeforeCompaction hooks to override the
+	// LLM-generated compaction summary. When multiple hooks return a
+	// non-empty summary, the first one wins.
+	Summary string
+
+	// Decision is the most-restrictive PreToolUse verdict reported by
+	// any matching hook in the chain ("" when no hook produced one).
+	// Most-restrictive ordering: Deny > Ask > Allow > "".
+	//
+	// The runtime's tool-approval flow consults this BEFORE asking the
+	// user, so an LLM-judge hook that returns Allow can auto-approve a
+	// call that would otherwise prompt, and Ask can force a prompt for
+	// a call that would otherwise auto-run.
+	//
+	// Always empty for non-PreToolUse events.
+	Decision Decision
+	// DecisionReason is the human-readable rationale paired with
+	// Decision (the reason from the most-restrictive hook). Empty when
+	// Decision is empty.
+	DecisionReason string
 }

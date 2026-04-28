@@ -466,7 +466,7 @@ func (r *LocalRuntime) getAvailableProviders(ctx context.Context) map[string]boo
 	}
 
 	// Check credentials for each alias provider
-	for name, alias := range provider.Aliases {
+	for name, alias := range provider.EachAlias() {
 		if alias.TokenEnvVar == "" {
 			continue
 		}

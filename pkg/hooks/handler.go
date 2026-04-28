@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/shellpath"
@@ -125,13 +127,52 @@ func newCommandFactory() HandlerFactory {
 			return nil, errors.New("command hook requires a non-empty command")
 		}
 		return &commandHandler{
-			workingDir: env.WorkingDir,
-			env:        env.Env,
+			workingDir: hookWorkingDir(env.WorkingDir, hook.WorkingDir),
+			env:        hookEnv(env.Env, hook.Env),
 			shell:      shell,
 			shellArgs:  shellArgs,
 			command:    hook.Command,
 		}, nil
 	}
+}
+
+func hookWorkingDir(base, override string) string {
+	if override == "" || filepath.IsAbs(override) {
+		return override
+	}
+	if base == "" {
+		return override
+	}
+	return filepath.Join(base, override)
+}
+
+func hookEnv(base []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return base
+	}
+	env := append([]string{}, base...)
+	if len(env) == 0 {
+		env = os.Environ()
+	}
+	index := make(map[string]int, len(env))
+	for i, entry := range env {
+		for j, ch := range entry {
+			if ch == '=' {
+				index[entry[:j]] = i
+				break
+			}
+		}
+	}
+	for key, value := range overrides {
+		entry := key + "=" + value
+		if i, ok := index[key]; ok {
+			env[i] = entry
+			continue
+		}
+		index[key] = len(env)
+		env = append(env, entry)
+	}
+	return env
 }
 
 // commandHandler runs a hook by exec'ing its command under a shell.

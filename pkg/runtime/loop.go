@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -16,10 +15,9 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/compaction"
-	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin"
 	bgagent "github.com/docker/docker-agent/pkg/tools/builtin/agent"
@@ -106,6 +104,26 @@ func appendNewlineToQueuedMessage(sm QueuedMessage) QueuedMessage {
 	return sm
 }
 
+// emitHookDrivenShutdown fans out the standard Error /
+// notification(level=error) / on_error stanzas when a hook
+// (post_tool_use or before_llm_call) signals run termination.
+func (r *LocalRuntime) emitHookDrivenShutdown(
+	ctx context.Context,
+	a *agent.Agent,
+	sess *session.Session,
+	message string,
+	events chan Event,
+) {
+	if message == "" {
+		// aggregate() always populates Result.Message on a deny
+		// verdict; the fallback covers any future hook that returns
+		// block without a reason.
+		message = "Agent terminated by a hook."
+	}
+	events <- Error(message)
+	r.notifyError(ctx, a, sess.ID, message)
+}
+
 // finalizeEventChannel performs cleanup at the end of a RunStream goroutine:
 // restores the previous elicitation channel, emits the StreamStopped event,
 // fires hooks, and closes the events channel.
@@ -113,7 +131,7 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 	// Swap back the parent's elicitation channel before closing this
 	// stream's channel. This prevents a send-on-closed-channel panic
 	// and restores elicitation for the parent session.
-	r.swapElicitationEventsChannel(prevElicitationCh)
+	r.elicitation.swap(prevElicitationCh)
 
 	defer close(events)
 
@@ -127,7 +145,7 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 
 	r.executeOnUserInputHooks(ctx, sess.ID, "stream stopped")
 
-	telemetry.RecordSessionEnd(ctx)
+	r.telemetry.RecordSessionEnd(ctx)
 }
 
 // RunStream starts the agent's interaction loop and returns a channel of events.
@@ -137,30 +155,133 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 // or the iteration limit is reached.
 func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan Event {
 	slog.Debug("Starting runtime stream", "agent", r.CurrentAgentName(), "session_id", sess.ID)
-	events := make(chan Event, 128)
+	events := make(chan Event, defaultEventChannelCapacity)
 
-	go func() {
-		telemetry.RecordSessionStart(ctx, r.CurrentAgentName(), sess.ID)
+	go r.runStreamLoop(ctx, sess, events)
+	return r.observe(ctx, sess, events)
+}
 
-		ctx, sessionSpan := r.startSpan(ctx, "runtime.session", trace.WithAttributes(
-			attribute.String("agent", r.CurrentAgentName()),
-			attribute.String("session.id", sess.ID),
-		))
-		defer sessionSpan.End()
+// runStreamLoop is the body of RunStream. Pulled out of the anonymous
+// goroutine so it has a real name in stack traces and is easier to navigate
+// in editors.
+func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session, events chan Event) {
+	r.telemetry.RecordSessionStart(ctx, r.CurrentAgentName(), sess.ID)
 
-		// Swap in this stream's events channel for elicitation and save the
-		// previous one so it can be restored on teardown. This allows nested
-		// RunStream calls to temporarily own elicitation without losing the
-		// parent's channel.
-		prevElicitationCh := r.swapElicitationEventsChannel(events)
+	ctx, sessionSpan := r.startSpan(ctx, "runtime.session", trace.WithAttributes(
+		attribute.String("agent", r.CurrentAgentName()),
+		attribute.String("session.id", sess.ID),
+	))
+	defer sessionSpan.End()
 
-		a := r.resolveSessionAgent(sess)
+	// Swap in this stream's events channel for elicitation and save the
+	// previous one so it can be restored on teardown. This allows nested
+	// RunStream calls to temporarily own elicitation without losing the
+	// parent's channel.
+	prevElicitationCh := r.elicitation.swap(events)
 
-		// Execute session start hooks
-		r.executeSessionStartHooks(ctx, sess, a, events)
+	a := r.resolveSessionAgent(sess)
 
-		// Emit team information
-		events <- TeamInfo(r.agentDetailsFromTeam(), a.Name())
+	// session_start fires once per RunStream. Its AdditionalContext
+	// (typically the AddEnvironmentInfo env block) is held as transient
+	// extras and threaded into every model call below — never persisted,
+	// to keep the visible transcript clean and the user message tail
+	// stable.
+	sessionStartMsgs := r.executeSessionStartHooks(ctx, sess, a, events)
+
+	// Emit team information
+	events <- TeamInfo(r.agentDetailsFromTeam(), a.Name())
+
+	r.emitAgentWarnings(a, chanSend(events))
+	r.configureToolsetHandlers(a, events)
+
+	agentTools, err := r.getTools(ctx, a, sessionSpan, events, true)
+	if err != nil {
+		events <- Error(fmt.Sprintf("failed to get tools: %v", err))
+		return
+	}
+	agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
+
+	events <- ToolsetInfo(len(agentTools), false, a.Name())
+
+	messages := sess.GetMessages(a)
+
+	// Sub-sessions (transferred tasks, background agents, skill
+	// sub-sessions) carry a synthesised "Please proceed." message that
+	// no human authored. SendUserMessage is the same flag the runtime
+	// uses to gate the UserMessageEvent, which is exactly the right
+	// signal here too: "a real user prompt is at the tail of the session".
+	var userPromptMsgs []chat.Message
+	if sess.SendUserMessage && len(messages) > 0 {
+		lastMsg := messages[len(messages)-1]
+		events <- UserMessage(lastMsg.Content, sess.ID, lastMsg.MultiContent, len(sess.Messages)-1)
+
+		// user_prompt_submit fires once per real user message, after
+		// session_start and before the first model call.
+		if lastMsg.Role == chat.MessageRoleUser {
+			stop, msg, ctxMsgs := r.executeUserPromptSubmitHooks(ctx, sess, a, lastMsg.Content, events)
+			if stop {
+				slog.Warn("user_prompt_submit hook signalled run termination",
+					"agent", a.Name(), "session_id", sess.ID, "reason", msg)
+				r.emitHookDrivenShutdown(ctx, a, sess, msg, events)
+				return
+			}
+			userPromptMsgs = ctxMsgs
+		}
+	}
+
+	events <- StreamStarted(sess.ID, a.Name())
+
+	defer r.finalizeEventChannel(ctx, sess, prevElicitationCh, events)
+
+	// Response cache lookup. On a hit, replay the stored answer and
+	// skip the model entirely. The matching storage half is
+	// implemented as the cache_response stop-hook builtin (see
+	// runtime/cache.go and getHooksExecutor).
+	if r.tryReplayCachedResponse(ctx, sess, a, events) {
+		return
+	}
+
+	iteration := 0
+	// Use a runtime copy of maxIterations so we don't modify the session's persistent config
+	runtimeMaxIterations := sess.MaxIterations
+
+	// Initialize consecutive duplicate tool call detector
+	//
+	// Polling tools (view_background_agent, view_background_job) are
+	// expected to be called repeatedly with identical arguments while a
+	// background task is in progress. Exempt them so they never trigger
+	// the loop-termination path.
+	loopThreshold := sess.MaxConsecutiveToolCalls
+	if loopThreshold == 0 {
+		loopThreshold = 5 // default: always active
+	}
+	loopDetector := toolexec.NewLoopDetector(loopThreshold,
+		bgagent.ToolNameViewBackgroundAgent,
+		builtin.ToolNameViewBackgroundJob,
+	)
+
+	// overflowCompactions counts how many consecutive context-overflow
+	// auto-compactions have been attempted without a successful model
+	// call in between. The cap (r.maxOverflowCompactions) prevents an
+	// infinite loop when compaction cannot reduce the context below the
+	// model's limit; see defaultMaxOverflowCompactions for the default
+	// and WithMaxOverflowCompactions for the test seam.
+	var overflowCompactions int
+
+	// toolModelOverride holds the per-toolset model from the most recent
+	// tool calls. It applies for one LLM turn, then resets.
+	var toolModelOverride string
+	var prevAgentName string
+
+	for {
+		a = r.resolveSessionAgent(sess)
+
+		// Clear per-tool model override on agent switch so it doesn't
+		// leak from one agent's toolset into another agent's turn.
+		if a.Name() != prevAgentName {
+			toolModelOverride = ""
+			prevAgentName = a.Name()
+		}
 
 		r.emitAgentWarnings(a, chanSend(events))
 		r.configureToolsetHandlers(a, events)
@@ -172,382 +293,234 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 		}
 		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
 
+		// Emit updated tool count. After a ToolListChanged MCP notification
+		// the cache is invalidated, so getTools above re-fetches from the
+		// server and may return a different count.
 		events <- ToolsetInfo(len(agentTools), false, a.Name())
 
-		messages := sess.GetMessages(a)
-		if sess.SendUserMessage && len(messages) > 0 {
-			lastMsg := messages[len(messages)-1]
-			events <- UserMessage(lastMsg.Content, sess.ID, lastMsg.MultiContent, len(sess.Messages)-1)
+		// Check iteration limit
+		newMax, decision := r.enforceMaxIterations(ctx, sess, a, iteration, runtimeMaxIterations, events)
+		if decision == iterationStop {
+			return
+		}
+		runtimeMaxIterations = newMax
+
+		iteration++
+
+		// Exit immediately if the stream context has been cancelled (e.g., Ctrl+C)
+		if err := ctx.Err(); err != nil {
+			slog.Debug("Runtime stream context cancelled, stopping loop", "agent", a.Name(), "session_id", sess.ID)
+			return
+		}
+		slog.Debug("Starting conversation loop iteration", "agent", a.Name())
+
+		streamCtx, streamSpan := r.startSpan(ctx, "runtime.stream", trace.WithAttributes(
+			attribute.String("agent", a.Name()),
+			attribute.String("session.id", sess.ID),
+		))
+
+		model := a.Model()
+
+		// Per-tool model routing: use a cheaper model for this turn
+		// if the previous tool calls specified one, then reset.
+		if toolModelOverride != "" {
+			if overrideModel, err := r.resolveModelRef(ctx, toolModelOverride); err != nil {
+				slog.Warn("Failed to resolve per-tool model override; using agent default",
+					"model_override", toolModelOverride, "error", err)
+			} else {
+				slog.Info("Using per-tool model override for this turn",
+					"agent", a.Name(), "override", overrideModel.ID(), "primary", model.ID())
+				model = overrideModel
+			}
+			toolModelOverride = ""
 		}
 
-		events <- StreamStarted(sess.ID, a.Name())
+		modelID := model.ID()
 
-		defer r.finalizeEventChannel(ctx, sess, prevElicitationCh, events)
+		// Notify sidebar of the model for this turn. For rule-based
+		// routing, the actual routed model is emitted from within the
+		// stream once the first chunk arrives.
+		events <- AgentInfo(a.Name(), modelID, a.Description(), a.WelcomeMessage())
 
-		iteration := 0
-		// Use a runtime copy of maxIterations so we don't modify the session's persistent config
-		runtimeMaxIterations := sess.MaxIterations
-
-		// Initialize consecutive duplicate tool call detector
-		//
-		// Polling tools (view_background_agent, view_background_job) are
-		// expected to be called repeatedly with identical arguments while a
-		// background task is in progress. Exempt them so they never trigger
-		// the loop-termination path.
-		loopThreshold := sess.MaxConsecutiveToolCalls
-		if loopThreshold == 0 {
-			loopThreshold = 5 // default: always active
+		slog.Debug("Using agent", "agent", a.Name(), "model", modelID)
+		slog.Debug("Getting model definition", "model_id", modelID)
+		m, err := r.modelsStore.GetModel(ctx, modelID)
+		if err != nil {
+			slog.Debug("Failed to get model definition", "error", err)
 		}
-		loopDetector := newToolLoopDetector(loopThreshold,
-			bgagent.ToolNameViewBackgroundAgent,
-			builtin.ToolNameViewBackgroundJob,
-		)
+		// We can only compact if we know the limit.
+		var contextLimit int64
+		if m != nil {
+			contextLimit = int64(m.Limit.Context)
 
-		// overflowCompactions counts how many consecutive context-overflow
-		// auto-compactions have been attempted without a successful model
-		// call in between. This prevents an infinite loop when compaction
-		// cannot reduce the context below the model's limit.
-		const maxOverflowCompactions = 1
-		var overflowCompactions int
-
-		// toolModelOverride holds the per-toolset model from the most recent
-		// tool calls. It applies for one LLM turn, then resets.
-		var toolModelOverride string
-		var prevAgentName string
-
-		for {
-			a = r.resolveSessionAgent(sess)
-
-			// Clear per-tool model override on agent switch so it doesn't
-			// leak from one agent's toolset into another agent's turn.
-			if a.Name() != prevAgentName {
-				toolModelOverride = ""
-				prevAgentName = a.Name()
+			if r.sessionCompaction && compaction.ShouldCompact(sess.InputTokens, sess.OutputTokens, 0, contextLimit) {
+				r.compactWithReason(ctx, sess, "", compactionReasonThreshold, events)
 			}
+		}
 
-			r.emitAgentWarnings(a, chanSend(events))
-			r.configureToolsetHandlers(a, events)
+		// Drain steer messages queued while idle or before the first model call
+		// (covers idle-window and first-turn-miss races).
+		if drained, messageCountBeforeSteer := r.drainAndEmitSteered(ctx, sess, events); drained {
+			r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeSteer, events)
+		}
 
-			agentTools, err := r.getTools(ctx, a, sessionSpan, events, true)
-			if err != nil {
-				events <- Error(fmt.Sprintf("failed to get tools: %v", err))
-				return
-			}
-			agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
+		// Run turn_start hooks BEFORE building messages so their
+		// AdditionalContext, alongside the session_start extras captured
+		// once at the top of RunStream, can be spliced after the invariant
+		// cache checkpoint and before the conversation history. Neither
+		// hook's output is persisted, so per-turn signals (date, prompt
+		// files) refresh every turn while session-level context (cwd, OS,
+		// arch) stays stable — all without bloating the stored history.
+		turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
+		messages := sess.GetMessages(a, slices.Concat(sessionStartMsgs, userPromptMsgs, turnStartMsgs)...)
+		slog.Debug("Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
 
-			// Emit updated tool count. After a ToolListChanged MCP notification
-			// the cache is invalidated, so getTools above re-fetches from the
-			// server and may return a different count.
-			events <- ToolsetInfo(len(agentTools), false, a.Name())
+		// Strip image content from messages if the model doesn't support image input.
+		// This prevents API errors when conversation history contains images (e.g. from
+		// tool results or user attachments) but the current model is text-only.
+		if m != nil && len(m.Modalities.Input) > 0 && !slices.Contains(m.Modalities.Input, "image") {
+			messages = stripImageContent(messages)
+		}
 
-			// Check iteration limit
-			if runtimeMaxIterations > 0 && iteration >= runtimeMaxIterations {
-				slog.Debug(
-					"Maximum iterations reached",
-					"agent", a.Name(),
-					"iterations", iteration,
-					"max", runtimeMaxIterations,
-				)
-
-				events <- MaxIterationsReached(runtimeMaxIterations)
-
-				maxIterMsg := fmt.Sprintf("Maximum iterations reached (%d)", runtimeMaxIterations)
-				r.executeNotificationHooks(ctx, a, sess.ID, "warning", maxIterMsg)
-				r.executeOnMaxIterationsHooks(ctx, a, sess.ID, maxIterMsg)
-				r.executeOnUserInputHooks(ctx, sess.ID, "max iterations reached")
-
-				// In non-interactive mode (e.g. MCP server), auto-stop instead of
-				// blocking forever waiting for user input.
-				if sess.NonInteractive {
-					slog.Debug("Auto-stopping after max iterations (non-interactive)", "agent", a.Name())
-
-					assistantMessage := chat.Message{
-						Role: chat.MessageRoleAssistant,
-						Content: fmt.Sprintf(
-							"Execution stopped after reaching the configured max_iterations limit (%d).",
-							runtimeMaxIterations,
-						),
-						CreatedAt: time.Now().Format(time.RFC3339),
-					}
-
-					addAgentMessage(sess, a, &assistantMessage, events)
-					return
-				}
-
-				// Wait for user decision (resume / reject)
-				select {
-				case req := <-r.resumeChan:
-					if req.Type == ResumeTypeApprove {
-						slog.Debug("User chose to continue after max iterations", "agent", a.Name())
-						runtimeMaxIterations = iteration + 10
-					} else {
-						slog.Debug("User rejected continuation", "agent", a.Name())
-
-						assistantMessage := chat.Message{
-							Role: chat.MessageRoleAssistant,
-							Content: fmt.Sprintf(
-								"Execution stopped after reaching the configured max_iterations limit (%d).",
-								runtimeMaxIterations,
-							),
-							CreatedAt: time.Now().Format(time.RFC3339),
-						}
-
-						addAgentMessage(sess, a, &assistantMessage, events)
-						return
-					}
-
-				case <-ctx.Done():
-					slog.Debug(
-						"Context cancelled while waiting for resume confirmation",
-						"agent", a.Name(),
-						"session_id", sess.ID,
-					)
-					return
-				}
-			}
-
-			iteration++
-
-			// Exit immediately if the stream context has been cancelled (e.g., Ctrl+C)
-			if err := ctx.Err(); err != nil {
-				slog.Debug("Runtime stream context cancelled, stopping loop", "agent", a.Name(), "session_id", sess.ID)
-				return
-			}
-			slog.Debug("Starting conversation loop iteration", "agent", a.Name())
-
-			streamCtx, streamSpan := r.startSpan(ctx, "runtime.stream", trace.WithAttributes(
-				attribute.String("agent", a.Name()),
-				attribute.String("session.id", sess.ID),
-			))
-
-			model := a.Model()
-
-			// Per-tool model routing: use a cheaper model for this turn
-			// if the previous tool calls specified one, then reset.
-			if toolModelOverride != "" {
-				if overrideModel, err := r.resolveModelRef(ctx, toolModelOverride); err != nil {
-					slog.Warn("Failed to resolve per-tool model override; using agent default",
-						"model_override", toolModelOverride, "error", err)
-				} else {
-					slog.Info("Using per-tool model override for this turn",
-						"agent", a.Name(), "override", overrideModel.ID(), "primary", model.ID())
-					model = overrideModel
-				}
-				toolModelOverride = ""
-			}
-
-			modelID := model.ID()
-
-			// Notify sidebar of the model for this turn. For rule-based
-			// routing, the actual routed model is emitted from within the
-			// stream once the first chunk arrives.
-			events <- AgentInfo(a.Name(), modelID, a.Description(), a.WelcomeMessage())
-
-			slog.Debug("Using agent", "agent", a.Name(), "model", modelID)
-			slog.Debug("Getting model definition", "model_id", modelID)
-			m, err := r.modelsStore.GetModel(ctx, modelID)
-			if err != nil {
-				slog.Debug("Failed to get model definition", "error", err)
-			}
-
-			// We can only compact if we know the limit.
-			var contextLimit int64
-			if m != nil {
-				contextLimit = int64(m.Limit.Context)
-
-				if r.sessionCompaction && compaction.ShouldCompact(sess.InputTokens, sess.OutputTokens, 0, contextLimit) {
-					r.Summarize(ctx, sess, "", events)
-				}
-			}
-
-			// Drain steer messages queued while idle or before the first model call
-			// (covers idle-window and first-turn-miss races).
-			if drained, messageCountBeforeSteer := r.drainAndEmitSteered(ctx, sess, events); drained {
-				r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeSteer, events)
-			}
-
-			// Run turn_start hooks BEFORE building messages so their
-			// AdditionalContext can be spliced after the invariant cache
-			// checkpoint and before the conversation history. The hook
-			// output is not persisted to the session, so per-turn signals
-			// (date, prompt files) refresh every turn without bloating the
-			// stored history.
-			turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
-			messages := sess.GetMessages(a, turnStartMsgs...)
-			slog.Debug("Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
-
-			// Strip image content from messages if the model doesn't support image input.
-			// This prevents API errors when conversation history contains images (e.g. from
-			// tool results or user attachments) but the current model is text-only.
-			if m != nil && len(m.Modalities.Input) > 0 && !slices.Contains(m.Modalities.Input, "image") {
-				messages = stripImageContent(messages)
-			}
-
-			// before_llm_call hooks fire just before the model is invoked.
-			// They are observational only (no deny semantics today); use
-			// turn_start to contribute system messages.
-			r.executeBeforeLLMCallHooks(ctx, sess, a)
-
-			// Try primary model with fallback chain if configured
-			res, usedModel, err := r.tryModelWithFallback(streamCtx, a, model, messages, agentTools, sess, m, events)
-			if err != nil {
-				// Treat context cancellation as a graceful stop
-				if errors.Is(err, context.Canceled) {
-					slog.Debug("Model stream canceled by context", "agent", a.Name(), "session_id", sess.ID)
-					streamSpan.End()
-					return
-				}
-
-				// Auto-recovery: if the error is a context overflow and
-				// session compaction is enabled, compact the conversation
-				// and retry the request instead of surfacing raw errors.
-				// We allow at most maxOverflowCompactions consecutive attempts
-				// to avoid an infinite loop when compaction cannot reduce
-				// the context enough.
-				if _, ok := errors.AsType[*modelerrors.ContextOverflowError](err); ok && r.sessionCompaction && overflowCompactions < maxOverflowCompactions {
-					overflowCompactions++
-					slog.Warn("Context window overflow detected, attempting auto-compaction",
-						"agent", a.Name(),
-						"session_id", sess.ID,
-						"input_tokens", sess.InputTokens,
-						"output_tokens", sess.OutputTokens,
-						"context_limit", contextLimit,
-						"attempt", overflowCompactions,
-					)
-					events <- Warning(
-						"The conversation has exceeded the model's context window. Automatically compacting the conversation history...",
-						a.Name(),
-					)
-					r.Summarize(ctx, sess, "", events)
-
-					// After compaction, loop back to retry with the
-					// compacted context. The next iteration will re-fetch
-					// messages from the (now compacted) session.
-					streamSpan.End()
-					continue
-				}
-
-				streamSpan.RecordError(err)
-				streamSpan.SetStatus(codes.Error, "error handling stream")
-				slog.Error("All models failed", "agent", a.Name(), "error", err)
-				// Track error in telemetry
-				telemetry.RecordError(ctx, err.Error())
-				errMsg := modelerrors.FormatError(err)
-				events <- Error(errMsg)
-				r.executeNotificationHooks(ctx, a, sess.ID, "error", errMsg)
-				r.executeOnErrorHooks(ctx, a, sess.ID, errMsg)
-				streamSpan.End()
-				return
-			}
-
-			// A successful model call resets the overflow compaction counter.
-			overflowCompactions = 0
-
-			// after_llm_call hooks fire on success only; failed calls
-			// fire on_error above. The assistant text content is passed
-			// via stop_response, matching the stop event's payload, so
-			// handlers can reuse the same parsing.
-			r.executeAfterLLMCallHooks(ctx, sess, a, res.Content)
-
-			if usedModel != nil && usedModel.ID() != model.ID() {
-				slog.Info("Used fallback model", "agent", a.Name(), "primary", model.ID(), "used", usedModel.ID())
-				events <- AgentInfo(a.Name(), usedModel.ID(), a.Description(), a.WelcomeMessage())
-			}
-			streamSpan.SetAttributes(
-				attribute.Int("tool.calls", len(res.Calls)),
-				attribute.Int("content.length", len(res.Content)),
-				attribute.Bool("stopped", res.Stopped),
-			)
+		// before_llm_call hooks fire just before the model is invoked.
+		// A terminating verdict (e.g. from the max_iterations builtin)
+		// stops the run loop here, before any tokens are spent.
+		if stop, msg := r.executeBeforeLLMCallHooks(ctx, sess, a); stop {
+			slog.Warn("before_llm_call hook signalled run termination",
+				"agent", a.Name(), "session_id", sess.ID, "reason", msg)
+			r.emitHookDrivenShutdown(ctx, a, sess, msg, events)
 			streamSpan.End()
-			slog.Debug("Stream processed", "agent", a.Name(), "tool_calls", len(res.Calls), "content_length", len(res.Content), "stopped", res.Stopped)
+			return
+		}
 
-			msgUsage := r.recordAssistantMessage(sess, a, res, agentTools, modelID, m, events)
+		// Try primary model with fallback chain if configured
+		res, usedModel, err := r.fallback.execute(streamCtx, a, model, messages, agentTools, sess, m, events)
+		if err != nil {
+			outcome := r.handleStreamError(ctx, sess, a, err, contextLimit, &overflowCompactions, streamSpan, events)
+			streamSpan.End()
+			if outcome == streamErrorRetry {
+				continue
+			}
+			return
+		}
 
-			usage := SessionUsage(sess, contextLimit)
-			usage.LastMessage = msgUsage
-			events <- NewTokenUsageEvent(sess.ID, a.Name(), usage)
+		// A successful model call resets the overflow compaction counter.
+		overflowCompactions = 0
 
-			// Record the message count before tool calls so we can
-			// measure how much content was added by tool results.
-			messageCountBeforeTools := len(sess.GetAllMessages())
+		// after_llm_call hooks fire on success only; failed calls
+		// fire on_error above. The assistant text content is passed
+		// via stop_response, matching the stop event's payload, so
+		// handlers can reuse the same parsing.
+		r.executeAfterLLMCallHooks(ctx, sess, a, res.Content)
 
-			r.processToolCalls(ctx, sess, res.Calls, agentTools, events)
+		if usedModel != nil && usedModel.ID() != model.ID() {
+			slog.Info("Used fallback model", "agent", a.Name(), "primary", model.ID(), "used", usedModel.ID())
+			events <- AgentInfo(a.Name(), usedModel.ID(), a.Description(), a.WelcomeMessage())
+		}
+		streamSpan.SetAttributes(
+			attribute.Int("tool.calls", len(res.Calls)),
+			attribute.Int("content.length", len(res.Content)),
+			attribute.Bool("stopped", res.Stopped),
+		)
+		streamSpan.End()
+		slog.Debug("Stream processed", "agent", a.Name(), "tool_calls", len(res.Calls), "content_length", len(res.Content), "stopped", res.Stopped)
 
-			// Re-probe toolsets after tool calls: an install/setup tool call may
-			// have made a previously-unavailable LSP or MCP connectable. reprobe()
-			// calls ensureToolSetsAreStarted, emits recovery notices, and updates
-			// the TUI tool-count immediately.
-			//
-			// The new tools are picked up by the next iteration's getTools() call
-			// at the top of this loop, so the model sees them on its very next
-			// response — within the same user turn, without requiring a new user
-			// message. reprobe's return value is intentionally discarded here;
-			// the top-of-loop getTools() is the authoritative source.
+		msgUsage := r.recordAssistantMessage(sess, a, res, agentTools, modelID, m, events)
+
+		usage := SessionUsage(sess, contextLimit)
+		usage.LastMessage = msgUsage
+		events <- NewTokenUsageEvent(sess.ID, a.Name(), usage)
+
+		// Record the message count before tool calls so we can
+		// measure how much content was added by tool results.
+		messageCountBeforeTools := len(sess.GetAllMessages())
+
+		stopRun, stopMsg := r.processToolCalls(ctx, sess, res.Calls, agentTools, events)
+
+		// Re-probe toolsets after tool calls: an install/setup tool call may
+		// have made a previously-unavailable LSP or MCP connectable. reprobe()
+		// calls ensureToolSetsAreStarted, emits recovery notices, and updates
+		// the TUI tool-count immediately.
+		//
+		// The new tools are picked up by the next iteration's getTools() call
+		// at the top of this loop, so the model sees them on its very next
+		// response — within the same user turn, without requiring a new user
+		// message. reprobe's return value is intentionally discarded here;
+		// the top-of-loop getTools() is the authoritative source.
+		if len(res.Calls) > 0 {
+			r.reprobe(ctx, sess, a, agentTools, sessionSpan, events)
+		}
+
+		// Check for degenerate tool call loops
+		if loopDetector.Record(res.Calls) {
+			toolName := "unknown"
 			if len(res.Calls) > 0 {
-				r.reprobe(ctx, sess, a, agentTools, sessionSpan, events)
+				toolName = res.Calls[0].Function.Name
 			}
+			consecutive := loopDetector.Consecutive()
+			slog.Warn("Repetitive tool call loop detected",
+				"agent", a.Name(), "tool", toolName,
+				"consecutive", consecutive, "session_id", sess.ID)
+			errMsg := fmt.Sprintf(
+				"Agent terminated: detected %d consecutive identical calls to %s. "+
+					"This indicates a degenerate loop where the model is not making progress.",
+				consecutive, toolName)
+			events <- Error(errMsg)
+			r.notifyError(ctx, a, sess.ID, errMsg)
+			loopDetector.Reset()
+			return
+		}
 
-			// Check for degenerate tool call loops
-			if loopDetector.record(res.Calls) {
-				toolName := "unknown"
-				if len(res.Calls) > 0 {
-					toolName = res.Calls[0].Function.Name
-				}
-				slog.Warn("Repetitive tool call loop detected",
-					"agent", a.Name(), "tool", toolName,
-					"consecutive", loopDetector.consecutive, "session_id", sess.ID)
-				errMsg := fmt.Sprintf(
-					"Agent terminated: detected %d consecutive identical calls to %s. "+
-						"This indicates a degenerate loop where the model is not making progress.",
-					loopDetector.consecutive, toolName)
-				events <- Error(errMsg)
-				r.executeNotificationHooks(ctx, a, sess.ID, "error", errMsg)
-				r.executeOnErrorHooks(ctx, a, sess.ID, errMsg)
-				loopDetector.reset()
-				return
-			}
+		// post_tool_use hook signalled run termination via a deny
+		// verdict (decision="block" / continue=false / exit 2).
+		// User-authored hooks can use this to stop the run; the
+		// runtime fans out the standard Error / notification /
+		// on_error stanzas before exiting.
+		if stopRun {
+			slog.Warn("post_tool_use hook signalled run termination",
+				"agent", a.Name(), "session_id", sess.ID, "reason", stopMsg)
+			r.emitHookDrivenShutdown(ctx, a, sess, stopMsg, events)
+			return
+		}
 
-			// Record per-toolset model override for the next LLM turn.
-			toolModelOverride = resolveToolCallModelOverride(res.Calls, agentTools)
+		// Record per-toolset model override for the next LLM turn.
+		toolModelOverride = toolexec.ResolveModelOverride(res.Calls, agentTools)
 
-			// Drain steer messages that arrived during tool calls.
+		// Drain steer messages that arrived during tool calls.
+		if drained, _ := r.drainAndEmitSteered(ctx, sess, events); drained {
+			r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
+			continue
+		}
+
+		if res.Stopped {
+			slog.Debug("Conversation stopped", "agent", a.Name())
+			r.executeStopHooks(ctx, sess, a, res.Content, events)
+
+			// Re-check steer queue: closes the race between the mid-loop drain and this stop.
 			if drained, _ := r.drainAndEmitSteered(ctx, sess, events); drained {
 				r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
 				continue
 			}
 
-			if res.Stopped {
-				slog.Debug("Conversation stopped", "agent", a.Name())
-				r.executeStopHooks(ctx, sess, a, res.Content, events)
-
-				// Re-check steer queue: closes the race between the mid-loop drain and this stop.
-				if drained, _ := r.drainAndEmitSteered(ctx, sess, events); drained {
-					r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
-					continue
-				}
-
-				// --- FOLLOW-UP: end-of-turn injection ---
-				// Pop exactly one follow-up message. Unlike steered
-				// messages, follow-ups are plain user messages that start
-				// a new turn — the model sees them as fresh input, not a
-				// mid-stream interruption. Each follow-up gets a full
-				// undivided agent turn.
-				if followUp, ok := r.followUpQueue.Dequeue(ctx); ok {
-					userMsg := session.UserMessage(followUp.Content, followUp.MultiContent...)
-					sess.AddMessage(userMsg)
-					events <- UserMessage(followUp.Content, sess.ID, followUp.MultiContent, len(sess.Messages)-1)
-					r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
-					continue // re-enter the loop for a new turn
-				}
-
-				break
+			// --- FOLLOW-UP: end-of-turn injection ---
+			// Pop exactly one follow-up message. Unlike steered
+			// messages, follow-ups are plain user messages that start
+			// a new turn — the model sees them as fresh input, not a
+			// mid-stream interruption. Each follow-up gets a full
+			// undivided agent turn.
+			if followUp, ok := r.followUpQueue.Dequeue(ctx); ok {
+				userMsg := session.UserMessage(followUp.Content, followUp.MultiContent...)
+				sess.AddMessage(userMsg)
+				events <- UserMessage(followUp.Content, sess.ID, followUp.MultiContent, len(sess.Messages)-1)
+				r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
+				continue // re-enter the loop for a new turn
 			}
 
-			r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
+			break
 		}
-	}()
 
-	return events
+		r.compactIfNeeded(ctx, sess, a, m, contextLimit, messageCountBeforeTools, events)
+	}
 }
 
 // Run executes the agent loop synchronously and returns the final session
@@ -613,7 +586,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 		ThoughtSignature:  res.ThoughtSignature,
 		ToolCalls:         res.Calls,
 		ToolDefinitions:   toolDefs,
-		CreatedAt:         time.Now().Format(time.RFC3339),
+		CreatedAt:         r.now().Format(time.RFC3339),
 		Usage:             res.Usage,
 		Model:             messageModel,
 		Cost:              messageCost,
@@ -671,7 +644,7 @@ func (r *LocalRuntime) compactIfNeeded(
 		"estimated_total", sess.InputTokens+sess.OutputTokens+addedTokens,
 		"context_limit", contextLimit,
 	)
-	r.Summarize(ctx, sess, "", events)
+	r.compactWithReason(ctx, sess, "", compactionReasonThreshold, events)
 }
 
 // getTools executes tool retrieval with automatic OAuth handling.
@@ -688,7 +661,7 @@ func (r *LocalRuntime) getTools(ctx context.Context, a *agent.Agent, sessionSpan
 		slog.Error("Failed to get agent tools", "agent", a.Name(), "error", err)
 		sessionSpan.RecordError(err)
 		sessionSpan.SetStatus(codes.Error, "failed to get tools")
-		telemetry.RecordError(ctx, err.Error())
+		r.telemetry.RecordError(ctx, err.Error())
 		return nil, err
 	}
 

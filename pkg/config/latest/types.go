@@ -381,6 +381,27 @@ type AgentConfig struct {
 	StructuredOutput        *StructuredOutput `json:"structured_output,omitempty"`
 	Skills                  SkillsConfig      `json:"skills,omitzero"`
 	Hooks                   *HooksConfig      `json:"hooks,omitempty"`
+	Cache                   *CacheConfig      `json:"cache,omitempty"`
+}
+
+// CacheConfig configures the agent's response cache. When set and Enabled
+// is true, the agent stores the assistant response produced for a given
+// user question and replays it when the same question is asked again,
+// skipping the model entirely.
+//
+// Two normalization options control what "same question" means:
+//   - CaseSensitive: when false (the default), question matching is
+//     case-insensitive ("Hello" == "hello").
+//   - TrimSpaces: when true, leading and trailing whitespace is stripped
+//     before comparison ("  hello  " == "hello").
+//
+// Storage is in-memory by default. Set Path to persist entries to a JSON
+// file that is reloaded on startup.
+type CacheConfig struct {
+	Enabled       bool   `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	CaseSensitive bool   `json:"case_sensitive,omitempty" yaml:"case_sensitive,omitempty"`
+	TrimSpaces    bool   `json:"trim_spaces,omitempty" yaml:"trim_spaces,omitempty"`
+	Path          string `json:"path,omitempty" yaml:"path,omitempty"`
 }
 
 const SkillSourceLocal = "local"
@@ -1624,11 +1645,35 @@ type HooksConfig struct {
 	// PreToolUse hooks run before tool execution
 	PreToolUse []HookMatcherConfig `json:"pre_tool_use,omitempty" yaml:"pre_tool_use,omitempty"`
 
-	// PostToolUse hooks run after tool execution
+	// PostToolUse hooks run after a tool completes — both success and
+	// failure: a failed tool call still fires this event, with the
+	// failure surfaced in tool_response (notably the is_error flag and
+	// any error text). Use post_tool_use to react to either outcome
+	// (logging, audits, circuit-breakers); branch on tool_response.is_error
+	// in the handler when you only want to act on one of them.
 	PostToolUse []HookMatcherConfig `json:"post_tool_use,omitempty" yaml:"post_tool_use,omitempty"`
+
+	// PermissionRequest hooks run just before the runtime would prompt
+	// the user to approve a tool call (i.e. when neither --yolo nor a
+	// permissions rule short-circuited the decision). Hooks may auto-allow
+	// or auto-deny via hook_specific_output.permission_decision so the
+	// user is not prompted; otherwise the runtime falls through to the
+	// usual interactive confirmation. Tool-matched, like pre_tool_use.
+	PermissionRequest []HookMatcherConfig `json:"permission_request,omitempty" yaml:"permission_request,omitempty"`
 
 	// SessionStart hooks run when a session begins
 	SessionStart []HookDefinition `json:"session_start,omitempty" yaml:"session_start,omitempty"`
+
+	// UserPromptSubmit hooks run once per user message, after the user
+	// has submitted their prompt and before the first model call of the
+	// turn. The submitted text is passed in the prompt field. Hooks can
+	// block submission (decision="block" / continue=false / exit code 2)
+	// or contribute additional_context that is spliced into the
+	// conversation as a transient system message for that turn only.
+	// Sub-sessions (transferred tasks, background agents) do not fire
+	// this event because their kick-off message is synthesised by the
+	// runtime, not authored by the user.
+	UserPromptSubmit []HookDefinition `json:"user_prompt_submit,omitempty" yaml:"user_prompt_submit,omitempty"`
 
 	// TurnStart hooks run at the start of every agent turn (each model
 	// call). Their AdditionalContext is appended as transient system
@@ -1652,6 +1697,24 @@ type HooksConfig struct {
 	// SessionEnd hooks run when a session ends
 	SessionEnd []HookDefinition `json:"session_end,omitempty" yaml:"session_end,omitempty"`
 
+	// PreCompact hooks run just before the runtime compacts the session
+	// transcript into a summary. The trigger is reported in the source
+	// field: "manual" (user-initiated /compact), "auto" (proactive
+	// threshold), "overflow" (context-overflow recovery), or
+	// "tool_overflow" (proactive after tool results pushed past the
+	// threshold). Hooks may block compaction (decision="block" /
+	// continue=false / exit code 2) or contribute additional_context
+	// that is appended to the compaction prompt — useful for steering
+	// the summary without modifying the agent's instruction.
+	PreCompact []HookDefinition `json:"pre_compact,omitempty" yaml:"pre_compact,omitempty"`
+
+	// SubagentStop hooks run when a sub-agent (transferred task,
+	// background agent, skill sub-session) finishes. The sub-agent's
+	// name is passed in agent_name and its final assistant message in
+	// stop_response. Useful for handoff auditing and per-sub-agent
+	// metrics, separately from the parent's stop event.
+	SubagentStop []HookDefinition `json:"subagent_stop,omitempty" yaml:"subagent_stop,omitempty"`
+
 	// OnUserInput hooks run when the agent needs user input
 	OnUserInput []HookDefinition `json:"on_user_input,omitempty" yaml:"on_user_input,omitempty"`
 
@@ -1670,6 +1733,36 @@ type HooksConfig struct {
 	// max_iterations limit. Fires alongside Notification with
 	// level="warning".
 	OnMaxIterations []HookDefinition `json:"on_max_iterations,omitempty" yaml:"on_max_iterations,omitempty"`
+
+	// OnAgentSwitch hooks run whenever the runtime moves the active
+	// agent to a new one — transfer_task, handoff, or the return
+	// after a transferred task completes. Observational; useful for
+	// audit, transcript, and metrics pipelines.
+	OnAgentSwitch []HookDefinition `json:"on_agent_switch,omitempty" yaml:"on_agent_switch,omitempty"`
+
+	// OnSessionResume hooks run when the user explicitly approves the
+	// runtime to continue past its configured max_iterations limit.
+	// Observational; useful for alerting on extended-runtime sessions.
+	OnSessionResume []HookDefinition `json:"on_session_resume,omitempty" yaml:"on_session_resume,omitempty"`
+
+	// OnToolApprovalDecision hooks run after the runtime's tool
+	// approval chain resolves a verdict for a tool call. Observational;
+	// gives audit pipelines a structured "who approved what" record
+	// without re-implementing the chain.
+	OnToolApprovalDecision []HookDefinition `json:"on_tool_approval_decision,omitempty" yaml:"on_tool_approval_decision,omitempty"`
+
+	// BeforeCompaction hooks run immediately before a session compaction.
+	// Hooks may veto compaction (Decision: "block") or supply a custom
+	// summary via HookSpecificOutput.summary, in which case the runtime
+	// applies that summary verbatim and skips the LLM call. Hooks receive
+	// the current input/output token counts, the model context limit, and
+	// a compaction_reason of "threshold", "overflow", or "manual".
+	BeforeCompaction []HookDefinition `json:"before_compaction,omitempty" yaml:"before_compaction,omitempty"`
+
+	// AfterCompaction hooks run after a successful compaction (a summary
+	// was applied to the session). The Input.summary field carries the
+	// produced summary text. AfterCompaction is purely observational.
+	AfterCompaction []HookDefinition `json:"after_compaction,omitempty" yaml:"after_compaction,omitempty"`
 }
 
 // IsEmpty returns true if no hooks are configured
@@ -1679,16 +1772,25 @@ func (h *HooksConfig) IsEmpty() bool {
 	}
 	return len(h.PreToolUse) == 0 &&
 		len(h.PostToolUse) == 0 &&
+		len(h.PermissionRequest) == 0 &&
 		len(h.SessionStart) == 0 &&
+		len(h.UserPromptSubmit) == 0 &&
 		len(h.TurnStart) == 0 &&
 		len(h.BeforeLLMCall) == 0 &&
 		len(h.AfterLLMCall) == 0 &&
 		len(h.SessionEnd) == 0 &&
+		len(h.PreCompact) == 0 &&
+		len(h.SubagentStop) == 0 &&
 		len(h.OnUserInput) == 0 &&
 		len(h.Stop) == 0 &&
 		len(h.Notification) == 0 &&
 		len(h.OnError) == 0 &&
-		len(h.OnMaxIterations) == 0
+		len(h.OnMaxIterations) == 0 &&
+		len(h.OnAgentSwitch) == 0 &&
+		len(h.OnSessionResume) == 0 &&
+		len(h.OnToolApprovalDecision) == 0 &&
+		len(h.BeforeCompaction) == 0 &&
+		len(h.AfterCompaction) == 0
 }
 
 // HookMatcherConfig represents a hook matcher with its hooks.
@@ -1704,6 +1806,9 @@ type HookMatcherConfig struct {
 
 // HookDefinition represents a single hook configuration
 type HookDefinition struct {
+	// Name gives the hook a friendly label for logs and runtime events.
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+
 	// Type specifies the hook type. Supported values:
 	//   - "command":  run a shell command (default)
 	//   - "builtin":  invoke a named, in-process Go function (the name
@@ -1711,6 +1816,10 @@ type HookDefinition struct {
 	//                 is owned by the runtime; the docker-agent runtime
 	//                 ships add_date, add_environment_info, and
 	//                 add_prompt_files.
+	//   - "model":    ask an LLM and translate its reply into the hook's
+	//                 native output. See Model / Prompt / Schema. Used to
+	//                 implement "LLM as a judge" pre_tool_use hooks,
+	//                 turn-start summarizers, etc., with no Go code.
 	Type string `json:"type" yaml:"type"`
 
 	// Command is the shell command (Type==command) or the builtin name
@@ -1725,6 +1834,55 @@ type HookDefinition struct {
 
 	// Timeout is the execution timeout in seconds (default: 60)
 	Timeout int `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+
+	// Env adds or overrides environment variables for this hook only.
+	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+
+	// WorkingDir overrides the runtime working directory for this hook.
+	WorkingDir string `json:"working_dir,omitempty" yaml:"working_dir,omitempty"`
+
+	// OnError controls non-fail-closed hook failures: warn (default), ignore, or block.
+	OnError string `json:"on_error,omitempty" yaml:"on_error,omitempty"`
+
+	// Model is the model spec ("provider/model", e.g. "openai/gpt-4o-mini")
+	// invoked by Type==model hooks. Required for that type, ignored
+	// otherwise.
+	Model string `json:"model,omitempty" yaml:"model,omitempty"`
+
+	// Prompt is the user-message template rendered for each invocation
+	// of a Type==model hook. It is parsed as a Go text/template with the
+	// hook [Input] as the data context (so {{ .ToolName }},
+	// {{ .ToolInput }}, etc. work). Required for Type==model.
+	Prompt string `json:"prompt,omitempty" yaml:"prompt,omitempty"`
+
+	// Schema selects a well-known response interpretation for Type==model
+	// hooks. The empty value means "return the model's reply as
+	// additional_context". Other values (registered by the runtime) ask
+	// the provider for strict-JSON output and translate the result into
+	// the right Output shape (e.g. "pre_tool_use_decision" produces a
+	// permission_decision verdict).
+	Schema string `json:"schema,omitempty" yaml:"schema,omitempty"`
+}
+
+// GetTimeout returns the per-hook execution timeout, defaulting to 60
+// seconds when [HookDefinition.Timeout] is zero or negative.
+func (h *HookDefinition) GetTimeout() time.Duration {
+	if h.Timeout <= 0 {
+		return 60 * time.Second
+	}
+	return time.Duration(h.Timeout) * time.Second
+}
+
+// DisplayName returns a human-friendly identifier for the hook: the
+// configured Name when set, otherwise the Command, otherwise the Type.
+func (h *HookDefinition) DisplayName() string {
+	if h.Name != "" {
+		return h.Name
+	}
+	if h.Command != "" {
+		return h.Command
+	}
+	return h.Type
 }
 
 // validate validates the HooksConfig
@@ -1743,9 +1901,23 @@ func (h *HooksConfig) validate() error {
 		}
 	}
 
+	// Validate PermissionRequest matchers
+	for i, m := range h.PermissionRequest {
+		if err := m.validate("permission_request", i); err != nil {
+			return err
+		}
+	}
+
 	// Validate SessionStart hooks
 	for i, hook := range h.SessionStart {
 		if err := hook.validate("session_start", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate UserPromptSubmit hooks
+	for i, hook := range h.UserPromptSubmit {
+		if err := hook.validate("user_prompt_submit", i); err != nil {
 			return err
 		}
 	}
@@ -1774,6 +1946,20 @@ func (h *HooksConfig) validate() error {
 	// Validate SessionEnd hooks
 	for i, hook := range h.SessionEnd {
 		if err := hook.validate("session_end", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate PreCompact hooks
+	for i, hook := range h.PreCompact {
+		if err := hook.validate("pre_compact", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate SubagentStop hooks
+	for i, hook := range h.SubagentStop {
+		if err := hook.validate("subagent_stop", i); err != nil {
 			return err
 		}
 	}
@@ -1813,6 +1999,41 @@ func (h *HooksConfig) validate() error {
 		}
 	}
 
+	// Validate OnAgentSwitch hooks
+	for i, hook := range h.OnAgentSwitch {
+		if err := hook.validate("on_agent_switch", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate OnSessionResume hooks
+	for i, hook := range h.OnSessionResume {
+		if err := hook.validate("on_session_resume", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate OnToolApprovalDecision hooks
+	for i, hook := range h.OnToolApprovalDecision {
+		if err := hook.validate("on_tool_approval_decision", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate BeforeCompaction hooks
+	for i, hook := range h.BeforeCompaction {
+		if err := hook.validate("before_compaction", i); err != nil {
+			return err
+		}
+	}
+
+	// Validate AfterCompaction hooks
+	for i, hook := range h.AfterCompaction {
+		if err := hook.validate("after_compaction", i); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -1846,8 +2067,15 @@ func (h *HookDefinition) validate(prefix string, index int) error {
 		if h.Command == "" {
 			return fmt.Errorf("hooks.%s[%d]: command must name the builtin to invoke", prefix, index)
 		}
+	case "model":
+		if h.Model == "" {
+			return fmt.Errorf("hooks.%s[%d]: model is required for model hooks (e.g. 'openai/gpt-4o-mini')", prefix, index)
+		}
+		if h.Prompt == "" {
+			return fmt.Errorf("hooks.%s[%d]: prompt is required for model hooks", prefix, index)
+		}
 	default:
-		return fmt.Errorf("hooks.%s[%d]: unsupported hook type '%s' (supported: 'command', 'builtin')", prefix, index, h.Type)
+		return fmt.Errorf("hooks.%s[%d]: unsupported hook type '%s' (supported: 'command', 'builtin', 'model')", prefix, index, h.Type)
 	}
 
 	return nil

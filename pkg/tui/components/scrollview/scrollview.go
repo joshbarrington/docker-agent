@@ -53,9 +53,6 @@ func ReadOnlyScrollKeyMap() *ScrollKeyMap {
 
 type Option func(*Model)
 
-// WithGapWidth sets the space columns between content and scrollbar (default 1).
-func WithGapWidth(n int) Option { return func(m *Model) { m.gapWidth = n } }
-
 // WithReserveScrollbarSpace always reserves gap+scrollbar columns, preventing layout shifts.
 func WithReserveScrollbarSpace(v bool) Option {
 	return func(m *Model) { m.reserveScrollbarSpace = v }

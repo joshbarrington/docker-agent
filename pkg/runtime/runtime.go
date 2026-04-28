@@ -163,7 +163,7 @@ type LocalRuntime struct {
 
 	// transforms is the runtime's [MessageTransform] chain, applied to
 	// every LLM call in registration order. Populated by
-	// [NewLocalRuntime] (for the runtime-shipped strippers) and by
+	// [NewLocalRuntime] (for the runtime-shipped strip transform) and by
 	// [WithMessageTransform] (for embedder-supplied transforms).
 	// Read-only after construction.
 	transforms []registeredTransform

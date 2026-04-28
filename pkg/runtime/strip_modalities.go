@@ -31,33 +31,36 @@ const BuiltinStripUnsupportedModalities = "strip_unsupported_modalities"
 const modalityImage = "image"
 
 // stripUnsupportedModalitiesTransform is the [MessageTransform]
-// registered under [BuiltinStripUnsupportedModalities]. It resolves
-// the agent (and therefore its current model) from
-// [hooks.Input.AgentName], looks up the model's input modalities, and
-// applies [stripImageContent] when image is missing from the list.
+// registered under [BuiltinStripUnsupportedModalities]. It looks up
+// the model definition from [hooks.Input.ModelID] (populated by the
+// runtime with the actual model the loop chose, including per-tool
+// overrides and alloy-mode selection) and applies
+// [stripImageContent] when image is missing from the model's input
+// modalities.
 //
 // The transform is a no-op for every "we don't know enough to act"
-// case (missing agent, missing model, models.dev miss, empty
-// modalities, image already supported): erring on the side of "send
-// the messages as-is" matches the previous inline behavior in
-// runStreamLoop, where an unknown model also fell through.
+// case (missing ModelID, models.dev miss, empty modalities, image
+// already supported): erring on the side of "send the messages
+// as-is" matches the previous inline behavior in runStreamLoop,
+// where an unknown model also fell through. Each fall-through emits
+// a Debug log so operators can tell strip_unsupported_modalities
+// from a transform that's silently inactive.
 func (r *LocalRuntime) stripUnsupportedModalitiesTransform(
 	ctx context.Context,
 	in *hooks.Input,
 	msgs []chat.Message,
 ) ([]chat.Message, error) {
-	if in == nil || in.AgentName == "" {
+	if in == nil || in.ModelID == "" {
+		slog.Debug("strip_unsupported_modalities: skipping, no ModelID on input")
 		return msgs, nil
 	}
-	a, err := r.team.Agent(in.AgentName)
-	if err != nil || a == nil || a.Model() == nil {
-		return msgs, nil
-	}
-	m, err := r.modelsStore.GetModel(ctx, a.Model().ID())
+	m, err := r.modelsStore.GetModel(ctx, in.ModelID)
 	if err != nil || m == nil {
 		// Unknown model: keep the previous (inline) behavior of
 		// passing messages through untouched. The model call will
 		// surface any modality mismatch as a provider error.
+		slog.Debug("strip_unsupported_modalities: skipping, model definition unavailable",
+			"model_id", in.ModelID, "error", err)
 		return msgs, nil
 	}
 	if len(m.Modalities.Input) == 0 || slices.Contains(m.Modalities.Input, modalityImage) {

@@ -65,10 +65,17 @@ func WithMessageTransform(name string, fn MessageTransform) Opt {
 // Errors from individual transforms are logged at warn level and the
 // chain continues with the previous slice — a transform failure must
 // never break the run loop.
+//
+// modelID is the canonical model identifier the loop has just
+// resolved (after per-tool overrides and alloy-mode selection);
+// transforms read it via [hooks.Input.ModelID]. Calling
+// agent.Model() from a transform would re-randomize the alloy pick
+// and miss the per-tool override.
 func (r *LocalRuntime) applyBeforeLLMCallTransforms(
 	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
+	modelID string,
 	msgs []chat.Message,
 ) []chat.Message {
 	if len(r.transforms) == 0 {
@@ -77,6 +84,7 @@ func (r *LocalRuntime) applyBeforeLLMCallTransforms(
 	in := &hooks.Input{
 		SessionID:     sess.ID,
 		AgentName:     a.Name(),
+		ModelID:       modelID,
 		HookEventName: hooks.EventBeforeLLMCall,
 		Cwd:           r.workingDir,
 	}

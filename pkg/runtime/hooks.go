@@ -284,9 +284,16 @@ func (r *LocalRuntime) executeOnToolApprovalDecisionHooks(
 // / exit 2) stops the run loop — see [hooks.EventBeforeLLMCall] for
 // the contract. Hooks that just want to contribute system messages
 // should target turn_start instead.
-func (r *LocalRuntime) executeBeforeLLMCallHooks(ctx context.Context, sess *session.Session, a *agent.Agent) (stop bool, message string) {
+//
+// modelID is the canonical model identifier the loop has just
+// resolved (after per-tool overrides and alloy-mode selection); it's
+// surfaced to hooks via [hooks.Input.ModelID] so handlers don't need
+// to recompute it from the agent.
+func (r *LocalRuntime) executeBeforeLLMCallHooks(ctx context.Context, sess *session.Session, a *agent.Agent, modelID string) (stop bool, message string) {
 	result := r.dispatchHook(ctx, a, hooks.EventBeforeLLMCall, &hooks.Input{
 		SessionID: sess.ID,
+		AgentName: a.Name(),
+		ModelID:   modelID,
 	}, nil)
 	if result == nil || result.Allowed {
 		return false, ""

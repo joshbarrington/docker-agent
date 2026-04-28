@@ -1,3 +1,4 @@
+// TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap covers the hot
 package runtime
 
 import (
@@ -30,6 +31,20 @@ type modalityModelStore struct {
 
 func (m modalityModelStore) GetModel(_ context.Context, _ string) (*modelsdev.Model, error) {
 	return m.model, m.err
+}
+
+// modalityByIDStore returns a different [modelsdev.Model] depending
+// on the requested ID, letting tests prove the transform consulted
+// the right ID (via [hooks.Input.ModelID]) rather than recomputing
+// it from the agent.
+type modalityByIDStore struct {
+	ModelStore
+
+	models map[string]*modelsdev.Model
+}
+
+func (m modalityByIDStore) GetModel(_ context.Context, id string) (*modelsdev.Model, error) {
+	return m.models[id], nil
 }
 
 // recordingMsgProvider captures the messages each model call sees so
@@ -70,13 +85,15 @@ func TestStripUnsupportedModalitiesTransform(t *testing.T) {
 	cases := []struct {
 		name      string
 		store     modalityModelStore
+		modelID   string
 		wantStrip bool
 	}{
-		{name: "text-only model strips images", store: modalityModelStore{model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text"}}}}, wantStrip: true},
-		{name: "multimodal model passes through", store: modalityModelStore{model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}}}},
-		{name: "nil model passes through", store: modalityModelStore{model: nil}},
-		{name: "lookup error passes through", store: modalityModelStore{err: errors.New("not found")}},
-		{name: "empty modalities passes through", store: modalityModelStore{model: &modelsdev.Model{}}},
+		{name: "text-only model strips images", modelID: "test/text", store: modalityModelStore{model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text"}}}}, wantStrip: true},
+		{name: "multimodal model passes through", modelID: "test/multimodal", store: modalityModelStore{model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}}}},
+		{name: "nil model passes through", modelID: "test/unknown", store: modalityModelStore{model: nil}},
+		{name: "lookup error passes through", modelID: "test/unknown", store: modalityModelStore{err: errors.New("not found")}},
+		{name: "empty modalities passes through", modelID: "test/empty", store: modalityModelStore{model: &modelsdev.Model{}}},
+		{name: "empty ModelID passes through", modelID: "", store: modalityModelStore{model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text"}}}}},
 	}
 
 	for _, tc := range cases {
@@ -85,7 +102,7 @@ func TestStripUnsupportedModalitiesTransform(t *testing.T) {
 			require.NoError(t, err)
 
 			got, err := r.stripUnsupportedModalitiesTransform(t.Context(),
-				&hooks.Input{AgentName: "root"}, []chat.Message{imgMsg})
+				&hooks.Input{ModelID: tc.modelID}, []chat.Message{imgMsg})
 			require.NoError(t, err)
 			require.Len(t, got, 1)
 			if tc.wantStrip {
@@ -98,7 +115,56 @@ func TestStripUnsupportedModalitiesTransform(t *testing.T) {
 	}
 }
 
-// TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap covers the hot
+// TestStripUnsupportedModalitiesTransform_UsesInputModelID pins the
+// fix for an alloy-mode / per-tool-override correctness bug: the
+// transform must trust [hooks.Input.ModelID] (populated by the loop
+// with the model it actually picked) and NOT recompute the model by
+// calling agent.Model() — doing so would re-randomize the alloy
+// pick and miss any per-tool override the loop had applied.
+//
+// The test wires a store that reports text-only for one ID and
+// multimodal for another. Querying by the text-only ID must strip;
+// querying by the multimodal ID must pass through. The agent's own
+// model (its pool) is irrelevant — it's never consulted.
+func TestStripUnsupportedModalitiesTransform_UsesInputModelID(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/agent-pool-model", stream: &mockStream{}}
+	a := agent.New("root", "instructions", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(a))
+
+	store := modalityByIDStore{models: map[string]*modelsdev.Model{
+		"text/only":             {Modalities: modelsdev.Modalities{Input: []string{"text"}}},
+		"multi/modal":           {Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}},
+		"test/agent-pool-model": {Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}},
+	}}
+	r, err := NewLocalRuntime(tm, WithModelStore(store))
+	require.NoError(t, err)
+
+	imgMsg := chat.Message{
+		Role: chat.MessageRoleUser,
+		MultiContent: []chat.MessagePart{
+			{Type: chat.MessagePartTypeText, Text: "describe"},
+			{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+		},
+	}
+
+	// ModelID = text-only — strip must happen even though the agent's
+	// pool model is multimodal.
+	stripped, err := r.stripUnsupportedModalitiesTransform(t.Context(),
+		&hooks.Input{ModelID: "text/only"}, []chat.Message{imgMsg})
+	require.NoError(t, err)
+	require.Len(t, stripped[0].MultiContent, 1, "image must be stripped when ModelID is text-only")
+	assert.Equal(t, chat.MessagePartTypeText, stripped[0].MultiContent[0].Type)
+
+	// ModelID = multimodal — strip must NOT happen even if some other
+	// model in scope is text-only. Proves the lookup keys off ModelID.
+	passed, err := r.stripUnsupportedModalitiesTransform(t.Context(),
+		&hooks.Input{ModelID: "multi/modal"}, []chat.Message{imgMsg})
+	require.NoError(t, err)
+	assert.Equal(t, imgMsg, passed[0], "images must reach a multimodal ModelID untouched")
+}
+
 // path: a runtime with no registered transforms returns the input
 // slice as-is without allocating a [hooks.Input].
 func TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap(t *testing.T) {
@@ -117,7 +183,7 @@ func TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap(t *testing.T) {
 	sess := session.New(session.WithUserMessage("hi"))
 	msgs := []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}
 
-	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, msgs)
+	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "", msgs)
 	assert.Equal(t, msgs, got)
 }
 
@@ -151,7 +217,7 @@ func TestApplyBeforeLLMCallTransforms_OrderAndChain(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("hi"))
-	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a,
+	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "test/mock-model",
 		[]chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}})
 
 	require.Len(t, calls, 2, "expected tag_a + tag_b to fire exactly once each")
@@ -193,7 +259,7 @@ func TestApplyBeforeLLMCallTransforms_ErrorsAreSwallowed(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("hi"))
-	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a,
+	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "test/mock-model",
 		[]chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}})
 
 	var contents []string
@@ -224,12 +290,10 @@ func TestRunStream_StripsImagesForTextOnlyModel(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New()
-	sess.AddMessage(session.UserMessage(""))
-	last := &sess.Messages[len(sess.Messages)-1]
-	last.Message.Message.MultiContent = []chat.MessagePart{
-		{Type: chat.MessagePartTypeText, Text: "describe"},
-		{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
-	}
+	sess.AddMessage(session.UserMessage("",
+		chat.MessagePart{Type: chat.MessagePartTypeText, Text: "describe"},
+		chat.MessagePart{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+	))
 
 	for range r.RunStream(t.Context(), sess) {
 		// drain — only the recorded provider state matters

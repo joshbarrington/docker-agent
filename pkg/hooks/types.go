@@ -148,6 +148,17 @@ type Input struct {
 	// closure (e.g. response cache).
 	AgentName string `json:"agent_name,omitempty"`
 
+	// ModelID identifies the model the runtime is about to call (for
+	// before_llm_call) or just called (for after_llm_call), in the
+	// canonical "<provider>/<model>" form expected by
+	// [modelsdev.Store.GetModel]. Populated from the loop's resolved
+	// model so it reflects per-tool model overrides and alloy-mode
+	// random selection — do NOT call Agent.Model() from a hook to
+	// recompute it, since alloy mode would re-randomize and a per-tool
+	// override would be invisible. Empty for events that aren't
+	// model-call-scoped.
+	ModelID string `json:"model_id,omitempty"`
+
 	// LastUserMessage is the text content of the latest user message in
 	// the session at dispatch time. Populated for events that respond to
 	// a user turn (stop, after_llm_call). Empty for events that aren't

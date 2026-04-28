@@ -55,6 +55,15 @@ func (h *fetchHandler) CallTool(ctx context.Context, params FetchToolArgs) (*too
 	client := &http.Client{
 		Timeout:   h.timeout,
 		Transport: remote.NewTransport(ctx),
+		// Re-check the domain allow/deny lists on every redirect: without this,
+		// an allowed origin could redirect into a denied one and bypass the
+		// policy. The 10-redirect cap mirrors the net/http default.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return h.checkDomainAllowed(req.URL)
+		},
 	}
 	if params.Timeout > 0 {
 		client.Timeout = time.Duration(params.Timeout) * time.Second
@@ -291,9 +300,13 @@ func (h *fetchHandler) checkDomainAllowed(u *url.URL) error {
 // ("docs.example.com"); it does NOT match unrelated hosts that share a suffix
 // ("badexample.com"). A pattern with a leading dot (".example.com") matches
 // strict subdomains only — the apex "example.com" is excluded.
+//
+// Trailing dots used in FQDN form ("example.com.") are stripped from both
+// host and pattern before matching, so a URL like http://example.com./ cannot
+// be used to bypass a deny-list entry for example.com.
 func matchesDomain(host, pattern string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	pattern = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pattern)), ".")
 	if host == "" || pattern == "" || pattern == "." {
 		return false
 	}

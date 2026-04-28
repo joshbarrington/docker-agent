@@ -298,6 +298,35 @@ agents:
 `,
 			wantErr: "blocked_domains can only be used with type 'fetch'",
 		},
+		{
+			name: "empty allowed_domains entry is rejected",
+			config: `
+version: "8"
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: fetch
+        allowed_domains:
+          - ""
+          - docker.com
+`,
+			wantErr: "allowed_domains[0] must not be empty",
+		},
+		{
+			name: "whitespace-only blocked_domains entry is rejected",
+			config: `
+version: "8"
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: fetch
+        blocked_domains:
+          - "   "
+`,
+			wantErr: "blocked_domains[0] must not be empty",
+		},
 	}
 
 	for _, tt := range tests {

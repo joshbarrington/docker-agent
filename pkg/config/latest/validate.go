@@ -88,6 +88,12 @@ func (t *Toolset) validate() error {
 	if len(t.AllowedDomains) > 0 && len(t.BlockedDomains) > 0 {
 		return errors.New("allowed_domains and blocked_domains are mutually exclusive")
 	}
+	if err := validateDomainPatterns("allowed_domains", t.AllowedDomains); err != nil {
+		return err
+	}
+	if err := validateDomainPatterns("blocked_domains", t.BlockedDomains); err != nil {
+		return err
+	}
 	if len(t.Models) > 0 && t.Type != "model_picker" {
 		return errors.New("models can only be used with type 'model_picker'")
 	}
@@ -200,6 +206,18 @@ func (t *Toolset) validate() error {
 		// no additional validation needed
 	}
 
+	return nil
+}
+
+// validateDomainPatterns rejects empty / whitespace-only entries in a fetch
+// allow- or block-list, since they silently match nothing and turn the list
+// into a foot-gun (e.g. allowed_domains: [""] would reject every URL).
+func validateDomainPatterns(field string, patterns []string) error {
+	for i, p := range patterns {
+		if strings.TrimSpace(p) == "" {
+			return fmt.Errorf("%s[%d] must not be empty", field, i)
+		}
+	}
 	return nil
 }
 

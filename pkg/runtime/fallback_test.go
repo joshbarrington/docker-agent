@@ -329,24 +329,24 @@ func TestFallbackCooldownState(t *testing.T) {
 		agentName := "test-agent"
 
 		// Initially no cooldown
-		assert.Nil(t, rt.cooldowns.Get(agentName), "should have no cooldown initially")
+		assert.Nil(t, rt.fallback.cooldowns.Get(agentName), "should have no cooldown initially")
 
 		// Set cooldown with short duration for testing
-		rt.cooldowns.Set(agentName, 0, 100*time.Millisecond)
-		state := rt.cooldowns.Get(agentName)
+		rt.fallback.cooldowns.Set(agentName, 0, 100*time.Millisecond)
+		state := rt.fallback.cooldowns.Get(agentName)
 		require.NotNil(t, state, "should have cooldown state")
 		assert.Equal(t, 0, state.fallbackIndex)
 
 		// Advance fake time past the cooldown
 		time.Sleep(101 * time.Millisecond)
-		assert.Nil(t, rt.cooldowns.Get(agentName), "cooldown should have expired")
+		assert.Nil(t, rt.fallback.cooldowns.Get(agentName), "cooldown should have expired")
 
 		// Set cooldown again and then clear it
-		rt.cooldowns.Set(agentName, 1, 1*time.Hour)
-		require.NotNil(t, rt.cooldowns.Get(agentName))
+		rt.fallback.cooldowns.Set(agentName, 1, 1*time.Hour)
+		require.NotNil(t, rt.fallback.cooldowns.Get(agentName))
 
-		rt.cooldowns.Clear(agentName)
-		assert.Nil(t, rt.cooldowns.Get(agentName), "cooldown should be cleared")
+		rt.fallback.cooldowns.Clear(agentName)
+		assert.Nil(t, rt.fallback.cooldowns.Get(agentName), "cooldown should be cleared")
 	})
 }
 

@@ -161,16 +161,13 @@ type LocalRuntime struct {
 	// construction, so no locking is needed.
 	hooksExecByAgent map[string]*hooks.Executor
 
-	// retryOnRateLimit enables retry-with-backoff for HTTP 429 (rate limit) errors
-	// when no fallback models are configured. When false (default), 429 errors are
-	// treated as non-retryable and immediately fail or skip to the next model.
-	// Library consumers can enable this via WithRetryOnRateLimit().
-	retryOnRateLimit bool
+	fallback *fallbackExecutor
 
-	// cooldowns owns the per-agent fallback-cooldown state. See
-	// cooldown_manager.go for the eviction contract; the manager reads
-	// the runtime's clock so WithClock makes cooldown windows testable.
-	cooldowns *cooldownManager
+	// fallback owns the model-fallback chain (primary + configured
+	// fallbacks), per-attempt retry/backoff for transient errors, and
+	// the per-agent "sticky" cooldown after a fallback succeeds. It
+	// holds the cooldownManager and rate-limit retry flag so that state
+	// stays out of LocalRuntime. See [fallbackExecutor].
 
 	// steerQueue stores urgent mid-turn messages. The agent loop drains
 	// ALL pending messages after tool execution, before the stop check.
@@ -330,7 +327,7 @@ func WithMaxOverflowCompactions(n int) Opt {
 // regardless of this setting.
 func WithRetryOnRateLimit() Opt {
 	return func(r *LocalRuntime) {
-		r.retryOnRateLimit = true
+		r.fallback.retryOnRateLimit = true
 	}
 }
 
@@ -361,6 +358,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		sessionStore:           session.NewInMemorySessionStore(),
 		hooksRegistry:          hooksRegistry,
 		builtinsState:          builtinsState,
+		fallback:               newFallbackExecutor(),
 		now:                    time.Now,
 		telemetry:              defaultTelemetry{},
 		maxOverflowCompactions: defaultMaxOverflowCompactions,
@@ -371,10 +369,11 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		opt(r)
 	}
 
-	// Build the cooldown manager after opts so it picks up the final clock
-	// (WithClock may have replaced r.now). Doing this once after opts also
-	// avoids the previous "build, then rebuild" dance.
-	r.cooldowns = newCooldownManager(r.now)
+	// Build the cooldown manager and wire the fallback executor's
+	// runtime-bound dependencies after opts so they pick up the final
+	// clock and telemetry sink ([WithClock] / [WithTelemetry]).
+	r.fallback.cooldowns = newCooldownManager(r.now)
+	r.fallback.telemetry = r.telemetry
 
 	// Default the runtime's working directory to the process CWD when no
 	// caller supplied one. This matches the session's default and ensures
@@ -608,7 +607,7 @@ func getAgentModelID(a *agent.Agent) string {
 // for any active fallback cooldown. During a cooldown period, this returns the fallback
 // model ID instead of the configured primary model, so the UI reflects the actual model in use.
 func (r *LocalRuntime) getEffectiveModelID(a *agent.Agent) string {
-	cooldownState := r.cooldowns.Get(a.Name())
+	cooldownState := r.fallback.cooldowns.Get(a.Name())
 	if cooldownState != nil {
 		fallbacks := a.FallbackModels()
 		if cooldownState.fallbackIndex >= 0 && cooldownState.fallbackIndex < len(fallbacks) {
@@ -629,7 +628,7 @@ func (r *LocalRuntime) agentDetailsFromTeam() []AgentDetails {
 		modelName := info.Model
 
 		// Check if this agent has an active fallback cooldown
-		cooldownState := r.cooldowns.Get(info.Name)
+		cooldownState := r.fallback.cooldowns.Get(info.Name)
 		if cooldownState != nil {
 			// Get the agent to access fallback models
 			if a, err := r.team.Agent(info.Name); err == nil && a != nil {

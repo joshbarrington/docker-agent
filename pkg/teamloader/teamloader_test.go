@@ -76,9 +76,51 @@ func TestGetToolsForAgent_ContinuesOnCreateToolError(t *testing.T) {
 func TestLoadExamples(t *testing.T) {
 	examples := collectExamples(t)
 
-	// Collect required env vars from all examples by checking configs directly.
-	// This avoids calling Load() twice for each example.
-	missingEnvs := make(map[string]bool)
+	// Set every env var referenced by the examples to a dummy value so model
+	// and tool initialisation succeeds without real credentials.
+	for env := range gatherExampleEnvVars(t, examples) {
+		t.Setenv(env, "dummy")
+	}
+
+	for _, agentFilename := range examples {
+		t.Run(agentFilename, func(t *testing.T) {
+			t.Parallel()
+
+			data, err := os.ReadFile(agentFilename)
+			require.NoError(t, err)
+
+			// Examples must not pin a version: they should always parse with
+			// the latest config schema.
+			var v struct {
+				Version string `yaml:"version"`
+			}
+			require.NoError(t, yaml.Unmarshal(data, &v))
+			require.Empty(t, v.Version, "example %s should not define a version", agentFilename)
+
+			// Use a bytes source (ParentDir == "") plus a temp WorkingDir so
+			// toolsets that write to disk (memory, RAG, cache, ...) land in
+			// the temp dir instead of the examples/ tree.
+			agentSource := config.NewBytesSource(agentFilename, data)
+			runConfig := &config.RuntimeConfig{}
+			runConfig.WorkingDir = t.TempDir()
+
+			teams, err := Load(t.Context(), agentSource, runConfig)
+			if errors.Is(err, dmr.ErrNotInstalled) && filepath.Base(agentFilename) == "dmr.yaml" {
+				t.Skip("Skipping DMR example: Docker Model Runner not installed")
+			}
+			require.NoError(t, err)
+			assert.NotEmpty(t, teams)
+		})
+	}
+}
+
+// gatherExampleEnvVars returns the union of env vars referenced by the given
+// example files (both for models and toolsets). The set is collected up-front
+// so t.Setenv can be called before any subtest starts.
+func gatherExampleEnvVars(t *testing.T, examples []string) map[string]bool {
+	t.Helper()
+
+	envs := make(map[string]bool)
 	for _, agentFilename := range examples {
 		agentSource, err := config.Resolve(agentFilename, nil)
 		require.NoError(t, err)
@@ -87,57 +129,14 @@ func TestLoadExamples(t *testing.T) {
 		require.NoError(t, err)
 
 		for _, env := range config.GatherEnvVarsForModels(cfg) {
-			missingEnvs[env] = true
+			envs[env] = true
 		}
-
 		toolEnvs, _ := config.GatherEnvVarsForTools(t.Context(), cfg)
 		for _, env := range toolEnvs {
-			missingEnvs[env] = true
+			envs[env] = true
 		}
 	}
-
-	for name := range missingEnvs {
-		t.Setenv(name, "dummy")
-	}
-
-	type versioned struct {
-		Version string `yaml:"version"`
-	}
-
-	// Load all the examples.
-	for _, agentFilename := range examples {
-		t.Run(agentFilename, func(t *testing.T) {
-			t.Parallel()
-
-			data, err := os.ReadFile(agentFilename)
-			require.NoError(t, err)
-
-			// First make sure it doesn't define a version
-			var v versioned
-			err = yaml.Unmarshal(data, &v)
-			require.NoError(t, err)
-			require.Empty(t, v.Version, "example %s should not define a version", agentFilename)
-
-			// Use a bytes source (ParentDir == "") combined with a temp WorkingDir
-			// so toolsets that create files on disk write into the temp dir.
-			agentSource := config.NewBytesSource(agentFilename, data)
-			runConfig := &config.RuntimeConfig{
-				Config: config.Config{
-					WorkingDir: t.TempDir(),
-				},
-			}
-
-			// Then make sure the config loads successfully
-			teams, err := Load(t.Context(), agentSource, runConfig)
-			if err != nil {
-				if errors.Is(err, dmr.ErrNotInstalled) && filepath.Base(agentFilename) == "dmr.yaml" {
-					t.Skip("Skipping DMR example: Docker Model Runner not installed")
-				}
-			}
-			require.NoError(t, err)
-			assert.NotEmpty(t, teams)
-		})
-	}
+	return envs
 }
 
 func TestLoadDefaultAgent(t *testing.T) {

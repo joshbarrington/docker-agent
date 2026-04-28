@@ -31,12 +31,17 @@ var eventSpecs = []EventSpec{
 	{Type: EventAfterLLMCall},
 	{Type: EventSessionEnd},
 	{Type: EventPreCompact, StdoutPolicy: StdoutAdditionalContext},
+	{Type: EventBeforeCompaction},
+	{Type: EventAfterCompaction},
 	{Type: EventSubagentStop},
 	{Type: EventOnUserInput},
 	{Type: EventStop, StdoutPolicy: StdoutAdditionalContext},
 	{Type: EventNotification},
 	{Type: EventOnError},
 	{Type: EventOnMaxIterations},
+	{Type: EventOnAgentSwitch},
+	{Type: EventOnSessionResume},
+	{Type: EventOnToolApprovalDecision},
 }
 
 var eventSpecByType = func() map[EventType]EventSpec {

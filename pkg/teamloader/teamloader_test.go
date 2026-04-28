@@ -100,28 +100,32 @@ func TestLoadExamples(t *testing.T) {
 		t.Setenv(name, "dummy")
 	}
 
-	runConfig := &config.RuntimeConfig{}
-
 	type versioned struct {
 		Version string `yaml:"version"`
 	}
 
 	// Load all the examples.
-	// Note: don't use t.Parallel() to avoid SQLite lock contention when
-	// multiple RAG examples share the same relative database paths (e.g., ./bm25.db).
 	for _, agentFilename := range examples {
 		t.Run(agentFilename, func(t *testing.T) {
-			agentSource, err := config.Resolve(agentFilename, nil)
+			t.Parallel()
+
+			data, err := os.ReadFile(agentFilename)
 			require.NoError(t, err)
 
 			// First make sure it doesn't define a version
-			data, err := agentSource.Read(t.Context())
-			require.NoError(t, err)
-
 			var v versioned
 			err = yaml.Unmarshal(data, &v)
 			require.NoError(t, err)
 			require.Empty(t, v.Version, "example %s should not define a version", agentFilename)
+
+			// Use a bytes source (ParentDir == "") combined with a temp WorkingDir
+			// so toolsets that create files on disk write into the temp dir.
+			agentSource := config.NewBytesSource(agentFilename, data)
+			runConfig := &config.RuntimeConfig{
+				Config: config.Config{
+					WorkingDir: t.TempDir(),
+				},
+			}
 
 			// Then make sure the config loads successfully
 			teams, err := Load(t.Context(), agentSource, runConfig)

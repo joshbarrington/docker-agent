@@ -701,15 +701,16 @@
         },
         "type": {
           "type": "string",
-          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime. The docker-agent runtime ships these builtins: 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required).",
+          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime; 'model' asks an LLM and translates its reply into the hook's native output (used for LLM-as-a-judge pre_tool_use, summarizers, etc., with no Go code). The docker-agent runtime ships these builtins: 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required).",
           "enum": [
             "command",
-            "builtin"
+            "builtin",
+            "model"
           ]
         },
         "command": {
           "type": "string",
-          "description": "Shell command (type=command) or builtin name (type=builtin) to invoke. Command hooks receive JSON input via stdin with tool/session information."
+          "description": "Shell command (type=command) or builtin name (type=builtin) to invoke. Command hooks receive JSON input via stdin with tool/session information. Ignored when type=model."
         },
         "args": {
           "type": "array",
@@ -744,13 +745,38 @@
             "block"
           ],
           "default": "warn"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model spec ('provider/model', e.g. 'openai/gpt-4o-mini') invoked by type=model hooks. Required for that type, ignored otherwise."
+        },
+        "prompt": {
+          "type": "string",
+          "description": "User-message template rendered for each invocation of a type=model hook. Parsed as a Go text/template with the hook Input as the data context: {{ .ToolName }}, {{ .ToolInput }}, {{ .StopResponse }}, etc. Required for type=model."
+        },
+        "schema": {
+          "type": "string",
+          "description": "Well-known response interpretation for type=model hooks. Empty: return the model's reply as additional_context. 'pre_tool_use_decision': ask the model for {decision, reason} JSON and produce a permission_decision verdict (allow|ask|deny)."
         }
       },
       "required": [
-        "type",
-        "command"
+        "type"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"type": {"const": "command"}}, "required": ["type"]},
+          "then": {"required": ["command"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "builtin"}}, "required": ["type"]},
+          "then": {"required": ["command"]}
+        },
+        {
+          "if": {"properties": {"type": {"const": "model"}}, "required": ["type"]},
+          "then": {"required": ["model", "prompt"]}
+        }
+      ]
     },
     "ModelConfig": {
       "type": "object",

@@ -251,6 +251,8 @@ const (
 	ApprovalSourceSessionPermissionsDeny  = "session_permissions_deny"
 	ApprovalSourceTeamPermissionsAllow    = "team_permissions_allow"
 	ApprovalSourceTeamPermissionsDeny     = "team_permissions_deny"
+	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
+	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
 	ApprovalSourceReadOnlyHint            = "readonly_hint"
 	ApprovalSourceUserApproved            = "user_approved"
 	ApprovalSourceUserApprovedSession     = "user_approved_session"

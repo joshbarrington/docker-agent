@@ -471,6 +471,66 @@ hooks:
 
 Return nothing to fall through to the usual interactive confirmation.
 
+### LLM as a Judge (Auto-Approving Tool Calls)
+
+The `model` hook type asks an LLM and translates its reply into the
+hook's native output — no Go code, no shell glue, no JSON parsing on
+your side. Combined with the well-known `pre_tool_use_decision`
+schema it gives you a fully-configurable LLM judge that decides
+`allow` / `ask` / `deny` per tool call.
+
+```yaml
+hooks:
+  pre_tool_use:
+    - matcher: "shell|edit_file|mcp:.*"
+      hooks:
+        - type: model
+          model: openai/gpt-4o-mini
+          timeout: 15
+          schema: pre_tool_use_decision
+          prompt: |
+            You are a security judge for an autonomous agent.
+            Decide whether this tool call is safe to auto-approve.
+
+            Tool: {{ .ToolName }}
+            Args: {{ .ToolInput | toJSON }}
+
+            Project rules:
+            - Reads under the working directory are safe.
+            - Writes to ~/.ssh / ~/.aws / ~/.docker are deny.
+```
+
+| Field    | Required          | Description                                                                                                                                                                |
+| -------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model`  | yes               | Model spec (`provider/model`, e.g. `openai/gpt-4o-mini`). The judge model — small/cheap is recommended.                                                                    |
+| `prompt` | yes               | Go [`text/template`](https://pkg.go.dev/text/template) body. Sees the hook [Input](#hook-input) as data, plus the `toJSON` and `truncate <n>` helpers.                     |
+| `schema` | no                | Well-known response interpretation. `pre_tool_use_decision` produces a `permission_decision` verdict; omit for free-form text injected as `additional_context`.            |
+| `timeout`| no (default 60s)  | Per-call timeout. **Timeouts fail closed (deny) for `pre_tool_use`** regardless of any other setting. Match it to your judge model's typical latency plus a small buffer. |
+
+The `pre_tool_use_decision` schema constrains the judge to reply with
+strict `{decision, reason}` JSON. Providers that honor structured
+output (OpenAI, ...) are asked to emit that shape directly; on
+providers that ignore it the framework still parses tolerant
+JSON-in-text. Anything unparseable propagates as a hook error and the
+executor falls closed (deny) on `pre_tool_use`.
+
+Pair it with deterministic `permissions:` rules so destructive calls
+(e.g. `sudo`, `rm -rf`) are blocked even if the judge is misled, and
+obvious read-only calls bypass the LLM entirely. See
+[`examples/llm_judge.yaml`](https://github.com/docker/docker-agent/blob/main/examples/llm_judge.yaml)
+for a complete configuration.
+
+**Security considerations**:
+
+- **Sensitive data**: Tool arguments (including file paths, command
+  arguments, and any other parameters) are sent to the judge LLM. Avoid
+  using the judge on tools that handle secrets, or ensure your judge
+  model is self-hosted.
+- **Defense in depth**: The judge should not be your only security
+  layer. Use deterministic `permissions:` rules to block obviously
+  dangerous operations (e.g., `sudo`, `rm -rf`) before the judge sees
+  them, as shown in the example configuration.
+
 </div>
 
 ## CLI Flags

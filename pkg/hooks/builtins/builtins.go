@@ -23,6 +23,10 @@
 // stable for its duration. max_iterations is stateful: its
 // per-session counter lives on the [State] returned by [Register];
 // the runtime clears it via [State.ClearSession] from session_end.
+//
+// LLM-as-a-judge hooks are NOT shipped here: write `type: model` with
+// `schema: pre_tool_use_decision` instead — see
+// pkg/hooks/shape_pre_tool_use_decision.go and examples/llm_judge.yaml.
 package builtins
 
 import (

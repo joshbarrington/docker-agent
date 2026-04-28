@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -184,11 +185,25 @@ type oauthTransport struct {
 	managed     bool
 	oauthConfig *latest.RemoteOAuthConfig
 
-	// mu protects refreshFailedAt from concurrent access.
+	// mu protects refreshFailedAt and lastErr* from concurrent access.
 	mu sync.Mutex
 	// refreshFailedAt tracks the last time a silent token refresh failed,
 	// so we avoid retrying on every request.
 	refreshFailedAt time.Time
+	// lastErrStatus and lastErrBody capture the status code and (truncated)
+	// response body of the most recent non-2xx HTTP response received by the
+	// transport. They're read by callers of Initialize() to enrich bubbled-up
+	// errors with the server's own explanation, which the MCP SDK otherwise
+	// swallows in favor of a bare http.StatusText.
+	lastErrStatus int
+	lastErrBody   []byte
+	// lastAuthRequired records when the transport short-circuited an
+	// interactive OAuth flow because the request context disallowed
+	// prompts (see WithoutInteractivePrompts). The MCP SDK wraps transport
+	// errors with %v, breaking errors.As, so callers must use this field
+	// instead of unwrapping to know that OAuth was deferred rather than
+	// failed for some other reason.
+	lastAuthRequired bool
 }
 
 func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -221,6 +236,22 @@ func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Respo
 	if resp.StatusCode == http.StatusUnauthorized && !isRetry {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
 		if wwwAuth != "" {
+			// If the caller asked for non-interactive operation (e.g. the
+			// runtime is populating sidebar tool counts during startup),
+			// don't block on an OAuth elicitation that the TUI is not yet
+			// ready to surface. Surface a recognisable error instead so
+			// the toolset can be flagged "needs auth" without freezing
+			// the agent and without making Ctrl-C wait for a user response
+			// that will never come.
+			if !interactivePromptsAllowed(req.Context()) {
+				slog.Debug("Skipping OAuth elicitation in non-interactive context", "url", t.baseURL)
+				resp.Body.Close()
+				t.mu.Lock()
+				t.lastAuthRequired = true
+				t.mu.Unlock()
+				return nil, &AuthorizationRequiredError{URL: t.baseURL}
+			}
+
 			resp.Body.Close()
 
 			authServer := req.URL.Scheme + "://" + req.URL.Host
@@ -236,15 +267,172 @@ func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Respo
 		}
 	}
 
+	// On the authenticated retry, log the response body when the server
+	// rejects us with an error status. Otherwise the failure bubbles up as
+	// a generic "Bad Request" / "Forbidden" / ... with no detail, making it
+	// very hard to understand why the server refused the token we just
+	// obtained (e.g. a scope mismatch, insufficient permissions, or
+	// provider-specific payload complaints).
+	//
+	// We also log on the first attempt when the status is something other
+	// than a plain 401 we're going to handle via OAuth. In particular, some
+	// servers return a non-standard 400 instead of 401 when a stored token
+	// is no longer accepted (for example, Slack's MCP endpoint answers
+	// `400 Bad Request` with a JSON-RPC error payload when the app has
+	// lost access — "App is not enabled for Slack MCP server access"),
+	// and surfacing the body is the only way to see the real cause.
+	if resp.StatusCode >= 400 {
+		t.logErrorResponse(req, resp)
+	}
+
 	return resp, nil
+}
+
+// logErrorResponse peeks at an error response body (up to a reasonable cap)
+// and logs it so the user can see what the server is actually complaining
+// about, without preventing the caller from reading the body themselves.
+//
+// Many MCP server failures come back as short JSON-RPC error envelopes
+// (e.g. `{"error":{"code":-32000,"message":"insufficient_scope"}}`) that
+// are invaluable for diagnosis but are otherwise swallowed by the MCP SDK
+// which only surfaces `http.StatusText(resp.StatusCode)`.
+func (t *oauthTransport) logErrorResponse(req *http.Request, resp *http.Response) {
+	const maxBody = 2048
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		slog.Warn("Authenticated MCP request failed; could not read response body",
+			"url", req.URL.String(),
+			"status", resp.StatusCode,
+			"error", err,
+		)
+		// Ensure the body reader is in a usable state for the caller.
+		resp.Body = io.NopCloser(bytes.NewReader(nil))
+		return
+	}
+
+	// Drain and replace the body so downstream consumers can still read it.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+
+	// Remember the last server-side failure so higher layers (Initialize /
+	// doStart) can enrich their error with a human-readable explanation
+	// rather than the SDK's bare "Bad Request".
+	t.mu.Lock()
+	t.lastErrStatus = resp.StatusCode
+	t.lastErrBody = body
+	t.mu.Unlock()
+
+	slog.Warn("Authenticated MCP request was rejected by the server",
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+		"www_authenticate", resp.Header.Get("WWW-Authenticate"),
+		"content_type", resp.Header.Get("Content-Type"),
+		"body", string(body),
+	)
+}
+
+// lastServerError returns the status code and a short, human-readable
+// explanation drawn from the most recent non-2xx response seen by this
+// transport. The string is empty when no such response has been captured
+// or when the body yielded no useful text.
+//
+// This is how the transport surfaces provider-specific errors (e.g. Slack's
+// "App is not enabled for Slack MCP server access") that would otherwise
+// be hidden behind the MCP SDK's generic http.StatusText-derived messages.
+func (t *oauthTransport) lastServerError() (int, string) {
+	t.mu.Lock()
+	status := t.lastErrStatus
+	body := t.lastErrBody
+	t.mu.Unlock()
+	if status == 0 {
+		return 0, ""
+	}
+	return status, extractServerMessage(body)
+}
+
+// authorizationRequired reports whether the transport short-circuited an
+// interactive OAuth flow because the request context disallowed prompts.
+// Callers can use this to recognise the deferred-OAuth case even though
+// the MCP SDK destroys the underlying error chain by wrapping with %v.
+func (t *oauthTransport) authorizationRequired() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastAuthRequired
+}
+
+// extractServerMessage extracts a short, human-readable message from a
+// server response body. It tries, in order:
+//
+//  1. A JSON-RPC envelope: {"error":{"message":"..."}}
+//  2. A Slack-style envelope: {"error":"some_code"}
+//  3. A top-level {"message":"..."}
+//  4. The raw body, trimmed and collapsed to a single line.
+//
+// Returns "" when the body is empty or contains only whitespace.
+func extractServerMessage(body []byte) string {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return ""
+	}
+
+	var envelope struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil {
+		// Nested object: {"error":{"message":"..."}}.
+		var nested struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(envelope.Error, &nested) == nil && nested.Message != "" {
+			return nested.Message
+		}
+		// Plain string: {"error":"some_code"}.
+		var s string
+		if json.Unmarshal(envelope.Error, &s) == nil && s != "" {
+			return s
+		}
+		if envelope.Message != "" {
+			return envelope.Message
+		}
+	}
+
+	// Fall back to the raw body, collapsed to a single line so it's safe
+	// to embed in an error message. Caps the length conservatively.
+	const maxLen = 400
+	text := strings.Join(strings.Fields(string(body)), " ")
+	if len(text) > maxLen {
+		text = text[:maxLen] + "\u2026"
+	}
+	return text
 }
 
 // getValidToken returns a non-expired token for the server, silently refreshing
 // an expired token when a refresh token is available. Returns nil if no usable
 // token can be obtained.
+//
+// If the stored token's recorded RequestedScopes no longer cover the scopes
+// currently requested by the config, the stored token is discarded so that
+// the next request triggers a fresh OAuth flow. This keeps us from reusing a
+// token that was provisioned with too-narrow (or entirely wrong) scopes
+// — typically after the user edits the scope list in their agent config.
 func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 	token, err := t.tokenStore.GetToken(t.baseURL)
 	if err != nil {
+		return nil
+	}
+
+	if !t.tokenCoversConfiguredScopes(token) {
+		slog.Debug("Stored token scopes no longer cover configured scopes; discarding to force re-auth",
+			"url", t.baseURL,
+			"stored", token.RequestedScopes,
+			"configured", configuredScopes(t.oauthConfig),
+		)
+		if err := t.tokenStore.RemoveToken(t.baseURL); err != nil {
+			slog.Debug("Failed to remove stale token", "url", t.baseURL, "error", err)
+		}
 		return nil
 	}
 
@@ -284,6 +472,7 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 		return nil
 	}
 	newToken.AuthServer = authServer
+	newToken.RequestedScopes = token.RequestedScopes
 
 	t.mu.Lock()
 	t.refreshFailedAt = time.Time{} // reset on success
@@ -295,6 +484,45 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 
 	slog.Debug("Token refreshed successfully", "url", t.baseURL)
 	return newToken
+}
+
+// tokenCoversConfiguredScopes reports whether the stored token was obtained
+// with a scope set that still satisfies the config.
+//
+// Scoping rules (kept deliberately simple):
+//   - If the config declares no scopes, any token is considered sufficient.
+//   - If the stored token has no RequestedScopes (legacy tokens stored before
+//     this field was introduced), it is treated as sufficient to avoid
+//     forcing a re-auth on upgrade.
+//   - Otherwise, every configured scope must appear in the token's
+//     RequestedScopes.
+func (t *oauthTransport) tokenCoversConfiguredScopes(token *OAuthToken) bool {
+	configured := configuredScopes(t.oauthConfig)
+	if len(configured) == 0 {
+		return true
+	}
+	if len(token.RequestedScopes) == 0 {
+		return true
+	}
+	stored := make(map[string]struct{}, len(token.RequestedScopes))
+	for _, s := range token.RequestedScopes {
+		stored[s] = struct{}{}
+	}
+	for _, s := range configured {
+		if _, ok := stored[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// configuredScopes is a nil-safe accessor for the Scopes slice on the
+// optional RemoteOAuthConfig.
+func configuredScopes(c *latest.RemoteOAuthConfig) []string {
+	if c == nil {
+		return nil
+	}
+	return c.Scopes
 }
 
 // handleOAuthFlow performs the OAuth flow when a 401 response is received
@@ -455,6 +683,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	token.ClientID = clientID
 	token.ClientSecret = clientSecret
 	token.AuthServer = resourceMetadata.AuthorizationServers[0]
+	token.RequestedScopes = scopes
 
 	if err := t.tokenStore.StoreToken(t.baseURL, token); err != nil {
 		return fmt.Errorf("failed to store token: %w", err)
@@ -555,6 +784,9 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 
 	if refreshToken, ok := tokenData["refresh_token"].(string); ok {
 		token.RefreshToken = refreshToken
+	}
+	if t.oauthConfig != nil {
+		token.RequestedScopes = t.oauthConfig.Scopes
 	}
 	if err := t.tokenStore.StoreToken(t.baseURL, token); err != nil {
 		return fmt.Errorf("failed to store token: %w", err)

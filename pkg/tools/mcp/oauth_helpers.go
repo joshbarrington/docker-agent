@@ -73,19 +73,105 @@ func ExchangeCodeForToken(ctx context.Context, tokenEndpoint, code, codeVerifier
 		return nil, fmt.Errorf("token exchange failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var token OAuthToken
-	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+	token, err := parseTokenResponse(resp.Body)
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode token response: %w", err)
+	}
+
+	token.ClientID = clientID
+	token.ClientSecret = clientSecret
+
+	return token, nil
+}
+
+// tokenResponse is the on-the-wire shape of an OAuth 2.0 token response.
+//
+// It accepts both:
+//
+//   - the standard flat shape defined by RFC 6749 §5.1 (access_token, token_type,
+//     expires_in, refresh_token at the top level); and
+//
+//   - Slack's user-token flow (`oauth.v2.user.access`), which returns the user
+//     token nested inside an `authed_user` object and signals application-level
+//     success/failure with an `ok` boolean and `error` string rather than via
+//     HTTP status alone.
+//
+// Fields that do not exist in one variant are simply left at their zero value.
+type tokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+
+	// Slack application-level status. OK is a pointer so we can distinguish
+	// "field absent" (standard OAuth response) from "ok:false" (Slack error).
+	OK    *bool  `json:"ok,omitempty"`
+	Error string `json:"error,omitempty"`
+
+	// Slack user-token flow nests the actual token under authed_user.
+	AuthedUser *struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int    `json:"expires_in,omitempty"`
+		RefreshToken string `json:"refresh_token,omitempty"`
+		Scope        string `json:"scope,omitempty"`
+	} `json:"authed_user,omitempty"`
+}
+
+// parseTokenResponse decodes a JSON token response body and normalizes it to
+// an OAuthToken, supporting both the standard flat OAuth 2.0 shape and
+// Slack's nested `authed_user` shape. It returns an error when the response
+// signals `ok:false` or contains no usable access token.
+func parseTokenResponse(body io.Reader) (*OAuthToken, error) {
+	var resp tokenResponse
+	if err := json.NewDecoder(body).Decode(&resp); err != nil {
+		return nil, err
+	}
+
+	// Slack surfaces application-level failures with HTTP 200 + ok:false.
+	if resp.OK != nil && !*resp.OK {
+		if resp.Error != "" {
+			return nil, fmt.Errorf("token endpoint returned error: %s", resp.Error)
+		}
+		return nil, errors.New("token endpoint returned ok:false with no error details")
+	}
+
+	token := &OAuthToken{
+		AccessToken:  resp.AccessToken,
+		TokenType:    resp.TokenType,
+		ExpiresIn:    resp.ExpiresIn,
+		RefreshToken: resp.RefreshToken,
+		Scope:        resp.Scope,
+	}
+
+	// Fall back to authed_user for providers that nest the user token there
+	// (notably Slack's oauth.v2.user.access endpoint).
+	if token.AccessToken == "" && resp.AuthedUser != nil && resp.AuthedUser.AccessToken != "" {
+		token.AccessToken = resp.AuthedUser.AccessToken
+		if token.TokenType == "" {
+			token.TokenType = resp.AuthedUser.TokenType
+		}
+		if token.ExpiresIn == 0 {
+			token.ExpiresIn = resp.AuthedUser.ExpiresIn
+		}
+		if token.RefreshToken == "" {
+			token.RefreshToken = resp.AuthedUser.RefreshToken
+		}
+		if token.Scope == "" {
+			token.Scope = resp.AuthedUser.Scope
+		}
+	}
+
+	if token.AccessToken == "" {
+		return nil, errors.New("token response did not contain an access_token")
 	}
 
 	if token.ExpiresIn > 0 {
 		token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 
-	token.ClientID = clientID
-	token.ClientSecret = clientSecret
-
-	return &token, nil
+	return token, nil
 }
 
 // RequestAuthorizationCode requests the user to open the authorization URL and waits for the callback
@@ -194,13 +280,9 @@ func RefreshAccessToken(ctx context.Context, tokenEndpoint, refreshToken, client
 		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var token OAuthToken
-	if err := json.NewDecoder(resp.Body).Decode(&token); err != nil {
+	token, err := parseTokenResponse(resp.Body)
+	if err != nil {
 		return nil, fmt.Errorf("failed to decode refresh response: %w", err)
-	}
-
-	if token.ExpiresIn > 0 {
-		token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
 
 	// Preserve the refresh token if the server didn't issue a new one
@@ -212,5 +294,5 @@ func RefreshAccessToken(ctx context.Context, tokenEndpoint, refreshToken, client
 	token.ClientID = clientID
 	token.ClientSecret = clientSecret
 
-	return &token, nil
+	return token, nil
 }

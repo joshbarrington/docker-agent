@@ -2,11 +2,15 @@ package mcp
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
 // TestExchangeCodeForToken_PreservesClientCredentials verifies that
@@ -367,5 +371,413 @@ func TestCallbackServer_RejectsCallbackBeforeStateSet(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d — callback accepted without expected state set", resp.StatusCode)
+	}
+}
+
+// TestExchangeCodeForToken_SlackNestedResponse verifies that Slack's
+// oauth.v2.user.access response shape (where the user access_token is
+// nested inside an `authed_user` object) is decoded correctly. Before
+// this was supported, we would silently store an empty bearer token and
+// every subsequent request to the MCP server would be rejected with 401.
+func TestExchangeCodeForToken_SlackNestedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":     true,
+			"app_id": "A12345678",
+			"authed_user": map[string]any{
+				"id":            "U12345678",
+				"scope":         "search:read.public,users:read",
+				"token_type":    "user",
+				"access_token":  "xoxp-slack-user-token",
+				"expires_in":    43200,
+				"refresh_token": "xoxe-1-slack-refresh",
+			},
+			"team": map[string]any{"id": "T12345678", "name": "My Workspace"},
+		})
+	}))
+	defer srv.Close()
+
+	token, err := ExchangeCodeForToken(t.Context(), srv.URL, "code", "verifier", "cid", "csec", "http://localhost/callback")
+	if err != nil {
+		t.Fatalf("ExchangeCodeForToken: %v", err)
+	}
+
+	if token.AccessToken != "xoxp-slack-user-token" {
+		t.Errorf("AccessToken = %q, want %q", token.AccessToken, "xoxp-slack-user-token")
+	}
+	if token.TokenType != "user" {
+		t.Errorf("TokenType = %q, want %q", token.TokenType, "user")
+	}
+	if token.RefreshToken != "xoxe-1-slack-refresh" {
+		t.Errorf("RefreshToken = %q, want %q", token.RefreshToken, "xoxe-1-slack-refresh")
+	}
+	if token.ExpiresIn != 43200 {
+		t.Errorf("ExpiresIn = %d, want 43200", token.ExpiresIn)
+	}
+	if token.ExpiresAt.IsZero() {
+		t.Error("ExpiresAt should be set when expires_in is non-zero")
+	}
+	if token.Scope != "search:read.public,users:read" {
+		t.Errorf("Scope = %q, want %q", token.Scope, "search:read.public,users:read")
+	}
+}
+
+// TestExchangeCodeForToken_SlackOkFalse verifies that a Slack-style
+// {"ok":false,"error":"..."} payload — returned with HTTP 200 — surfaces
+// as a meaningful error rather than being silently accepted as an empty
+// token.
+func TestExchangeCodeForToken_SlackOkFalse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":    false,
+			"error": "invalid_code",
+		})
+	}))
+	defer srv.Close()
+
+	_, err := ExchangeCodeForToken(t.Context(), srv.URL, "code", "verifier", "cid", "csec", "http://localhost/callback")
+	if err == nil {
+		t.Fatal("expected an error for ok:false response, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid_code") {
+		t.Errorf("error = %q, want it to contain the Slack error code %q", err.Error(), "invalid_code")
+	}
+}
+
+// TestExchangeCodeForToken_MissingAccessToken verifies that a 200 response
+// missing any access_token (top-level or nested) is rejected with an
+// explicit error instead of silently producing an empty bearer token.
+func TestExchangeCodeForToken_MissingAccessToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token_type": "Bearer",
+		})
+	}))
+	defer srv.Close()
+
+	_, err := ExchangeCodeForToken(t.Context(), srv.URL, "code", "verifier", "cid", "csec", "http://localhost/callback")
+	if err == nil {
+		t.Fatal("expected an error for response with no access_token, got nil")
+	}
+	if !strings.Contains(err.Error(), "access_token") {
+		t.Errorf("error = %q, want it to mention access_token", err.Error())
+	}
+}
+
+// TestOAuthTransport_RetryFailureExposesResponseBody verifies that when
+// the authenticated retry after a successful OAuth flow still fails with
+// a non-2xx status, the response body is logged and preserved for the
+// caller. Without this, diagnosing post-OAuth server errors is limited
+// to the generic HTTP status text, which hides useful provider-specific
+// detail such as scope mismatches or payload complaints.
+func TestOAuthTransport_RetryFailureExposesResponseBody(t *testing.T) {
+	const errBody = `{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"insufficient_scope: missing users:read"}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer stored-at" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(errBody))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	store := NewInMemoryTokenStore()
+	if err := store.StoreToken(srv.URL, &OAuthToken{
+		AccessToken: "stored-at",
+		TokenType:   "Bearer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &oauthTransport{
+		base:       http.DefaultTransport,
+		tokenStore: store,
+		baseURL:    srv.URL,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := transport.roundTrip(req, true)
+	if err != nil {
+		t.Fatalf("roundTrip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body after retry: %v", err)
+	}
+	if string(got) != errBody {
+		t.Errorf("response body = %q, want %q", string(got), errBody)
+	}
+}
+
+// TestOAuthTransport_NonRetryFailureExposesResponseBody verifies that when
+// the *first* request fails with a non-2xx that we cannot retry via OAuth
+// (e.g. a 400 Bad Request rather than a 401), the response body is still
+// preserved and made available to the caller.
+//
+// Regression test for: Slack's MCP endpoint answering
+//
+//	400 Bad Request
+//	{"jsonrpc":"2.0","id":null,"error":{"code":-32600,
+//	 "message":"App is not enabled for Slack MCP server access. ..."}}
+//
+// where the user previously saw only "Bad Request" bubbled up from the
+// MCP SDK because our transport was swallowing the body. We couldn't
+// surface the single line that actually tells the user what to do.
+func TestOAuthTransport_NonRetryFailureExposesResponseBody(t *testing.T) {
+	const errBody = `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"App is not enabled for Slack MCP server access."}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(errBody))
+	}))
+	defer srv.Close()
+
+	store := NewInMemoryTokenStore()
+	if err := store.StoreToken(srv.URL, &OAuthToken{
+		AccessToken: "stored-at",
+		TokenType:   "Bearer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &oauthTransport{
+		base:       http.DefaultTransport,
+		tokenStore: store,
+		baseURL:    srv.URL,
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Use the exported RoundTrip, which is always called with isRetry=false.
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading body on first attempt: %v", err)
+	}
+	if string(got) != errBody {
+		t.Errorf("response body = %q, want %q", string(got), errBody)
+	}
+}
+
+// TestGetValidToken_DiscardsTokenWhenScopesNoLongerCovered verifies that
+// a stored token whose RequestedScopes do not cover the config's current
+// scopes is discarded (removed from the store and not returned), so the
+// next authenticated request triggers a fresh OAuth flow.
+func TestGetValidToken_DiscardsTokenWhenScopesNoLongerCovered(t *testing.T) {
+	store := NewInMemoryTokenStore()
+	if err := store.StoreToken("https://mcp.example.com", &OAuthToken{
+		AccessToken:     "stale-at",
+		TokenType:       "Bearer",
+		RequestedScopes: []string{"users:read"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &oauthTransport{
+		base:       http.DefaultTransport,
+		tokenStore: store,
+		baseURL:    "https://mcp.example.com",
+		oauthConfig: &latest.RemoteOAuthConfig{
+			Scopes: []string{"users:read", "channels:history"},
+		},
+	}
+
+	if got := transport.getValidToken(t.Context()); got != nil {
+		t.Fatalf("expected nil when configured scopes exceed stored scopes, got %+v", got)
+	}
+
+	// Token must have been purged so the next call doesn't keep returning it.
+	if _, err := store.GetToken("https://mcp.example.com"); err == nil {
+		t.Error("expected token to be removed from the store")
+	}
+}
+
+// TestGetValidToken_ReturnsTokenWhenScopesSatisfied verifies the happy
+// path: a stored token whose RequestedScopes cover every configured scope
+// is returned unchanged (no re-auth, no refresh).
+func TestGetValidToken_ReturnsTokenWhenScopesSatisfied(t *testing.T) {
+	store := NewInMemoryTokenStore()
+	if err := store.StoreToken("https://mcp.example.com", &OAuthToken{
+		AccessToken:     "good-at",
+		TokenType:       "Bearer",
+		RequestedScopes: []string{"users:read", "channels:history", "extra:scope"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &oauthTransport{
+		base:       http.DefaultTransport,
+		tokenStore: store,
+		baseURL:    "https://mcp.example.com",
+		oauthConfig: &latest.RemoteOAuthConfig{
+			Scopes: []string{"users:read", "channels:history"},
+		},
+	}
+
+	got := transport.getValidToken(t.Context())
+	if got == nil || got.AccessToken != "good-at" {
+		t.Fatalf("expected stored token to be returned, got %+v", got)
+	}
+}
+
+// TestGetValidToken_LeavesLegacyTokenAlone verifies that stored tokens
+// that predate the RequestedScopes field (empty slice) are treated as
+// sufficient, so an upgrade doesn't forcibly invalidate every existing
+// user's session.
+func TestGetValidToken_LeavesLegacyTokenAlone(t *testing.T) {
+	store := NewInMemoryTokenStore()
+	if err := store.StoreToken("https://mcp.example.com", &OAuthToken{
+		AccessToken: "legacy-at",
+		TokenType:   "Bearer",
+		// RequestedScopes intentionally nil (legacy).
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &oauthTransport{
+		base:       http.DefaultTransport,
+		tokenStore: store,
+		baseURL:    "https://mcp.example.com",
+		oauthConfig: &latest.RemoteOAuthConfig{
+			Scopes: []string{"users:read"},
+		},
+	}
+
+	if got := transport.getValidToken(t.Context()); got == nil {
+		t.Fatal("legacy token without RequestedScopes should not be invalidated on scope mismatch")
+	}
+}
+
+// TestOAuthTransport_NonInteractiveCtxSkipsElicitation verifies that when
+// the request context is marked non-interactive (via WithoutInteractivePrompts),
+// a 401 with WWW-Authenticate does NOT trigger the OAuth flow. Instead the
+// transport returns a recognisable AuthorizationRequiredError, so callers can
+// surface a deferred-auth notice without the goroutine getting stuck on a
+// dialog the UI is not yet ready to show.
+//
+// We deliberately leave the transport's `client` field nil: in non-interactive
+// mode the short-circuit must happen before anything in the OAuth flow
+// (which would dereference `client` to send an elicitation) is reached. A
+// nil-pointer panic here would be a clear, loud signal that the contract
+// is broken.
+//
+// Regression test for: "docker agent run ./examples/slack.yaml" hanging
+// during startup, with Ctrl-C unable to interrupt because the OAuth
+// elicitation was synchronously waiting on a TUI prompt that hadn't been
+// rendered yet.
+func TestOAuthTransport_NonInteractiveCtxSkipsElicitation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer resource="https://example.test/.well-known/oauth-protected-resource"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	transport := &oauthTransport{
+		base:       http.DefaultTransport,
+		tokenStore: NewInMemoryTokenStore(),
+		baseURL:    srv.URL,
+		// client intentionally left nil — see test comment above.
+	}
+
+	ctx := WithoutInteractivePrompts(t.Context())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, gotErr := transport.RoundTrip(req)
+	if resp != nil {
+		resp.Body.Close()
+	}
+
+	if gotErr == nil {
+		t.Fatalf("expected an error in non-interactive mode, got resp=%v err=nil", resp)
+	}
+	if !IsAuthorizationRequired(gotErr) {
+		t.Errorf("expected IsAuthorizationRequired(err)=true, got err=%v", gotErr)
+	}
+}
+
+// TestExtractServerMessage covers the body-to-string conversion used when
+// wrapping Initialize errors. The goal is to pick the most human-readable
+// string out of whatever the server returns so it can be shown as a TUI
+// warning, falling back gracefully instead of leaking opaque JSON.
+func TestExtractServerMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "jsonrpc_error_message",
+			body: `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"App is not enabled."}}`,
+			want: "App is not enabled.",
+		},
+		{
+			name: "top_level_message",
+			body: `{"message":"rate limited"}`,
+			want: "rate limited",
+		},
+		{
+			name: "slack_style_error_string",
+			body: `{"ok":false,"error":"invalid_auth"}`,
+			want: "invalid_auth",
+		},
+		{
+			name: "plain_text",
+			body: "Service   Unavailable\n\n",
+			want: "Service Unavailable",
+		},
+		{
+			name: "empty_body",
+			body: "   ",
+			want: "",
+		},
+		{
+			name: "very_long_plaintext_is_capped",
+			body: strings.Repeat("A", 1000),
+			want: strings.Repeat("A", 400) + "\u2026",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractServerMessage([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("extractServerMessage(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
 	}
 }

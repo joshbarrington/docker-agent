@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
+	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
 type stubToolSet struct {
@@ -835,6 +837,327 @@ func TestProcessToolCalls_UnknownTool_ReturnsErrorResponse(t *testing.T) {
 	}
 	require.NotEmpty(t, toolContent, "expected an error tool response for unknown tools")
 	assert.Contains(t, toolContent, "not available")
+}
+
+// oauthAwareToolSet simulates a remote MCP toolset that needs an elicitation
+// handler and the managed-OAuth flag configured before Start() runs. The
+// Slack-MCP bug reported by users shows up exactly when Start() triggers an
+// OAuth flow with neither handler installed, so this test captures the
+// handler state at the moment Start() is entered.
+type oauthAwareToolSet struct {
+	mu                   sync.Mutex
+	elicitationHandler   tools.ElicitationHandler
+	managedOAuth         bool
+	managedOAuthSet      bool
+	started              bool
+	startHandlerCaptured tools.ElicitationHandler
+	startManagedCaptured bool
+	startManagedWasSet   bool
+}
+
+// Verify interface compliance
+var (
+	_ tools.ToolSet      = (*oauthAwareToolSet)(nil)
+	_ tools.Startable    = (*oauthAwareToolSet)(nil)
+	_ tools.Elicitable   = (*oauthAwareToolSet)(nil)
+	_ tools.OAuthCapable = (*oauthAwareToolSet)(nil)
+)
+
+func (s *oauthAwareToolSet) Start(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.started = true
+	// Snapshot the handler state at the moment Start runs — this is what
+	// the OAuth flow would see when it tries to prompt the user.
+	s.startHandlerCaptured = s.elicitationHandler
+	s.startManagedCaptured = s.managedOAuth
+	s.startManagedWasSet = s.managedOAuthSet
+	return nil
+}
+
+func (s *oauthAwareToolSet) Stop(context.Context) error { return nil }
+
+func (s *oauthAwareToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return nil, nil
+}
+
+func (s *oauthAwareToolSet) SetElicitationHandler(h tools.ElicitationHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.elicitationHandler = h
+}
+
+func (s *oauthAwareToolSet) SetOAuthSuccessHandler(func()) {}
+
+func (s *oauthAwareToolSet) SetManagedOAuth(managed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.managedOAuth = managed
+	s.managedOAuthSet = true
+}
+
+// TestEmitStartupInfo_DoesNotBlockOnInteractiveOAuth verifies that the
+// startup path does NOT trigger interactive flows on toolsets. In particular:
+//
+//   - EmitStartupInfo must complete promptly even when a toolset's Start()
+//     would normally prompt the user (e.g. an OAuth elicitation for a remote
+//     MCP server).
+//   - The runtime's elicitation/OAuth handlers must not be wired into the
+//     toolset during startup; the OAuth dialog only makes sense once the
+//     user is interacting with the agent.
+//
+// Regression test for: "docker agent run ./examples/slack.yaml" hanging
+// before the TUI was even ready, with Ctrl-C unable to interrupt because
+// the OAuth elicitation was synchronously blocked on a TUI dialog that the
+// app hadn't started yet. The fix marks the startup context with
+// mcptools.WithoutInteractivePrompts and defers OAuth to the first
+// RunStream call.
+func TestEmitStartupInfo_DoesNotBlockOnInteractiveOAuth(t *testing.T) {
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	oauthTS := &oauthAwareToolSet{}
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(oauthTS),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 20)
+
+	done := make(chan struct{})
+	go func() {
+		rt.EmitStartupInfo(t.Context(), nil, events)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("EmitStartupInfo blocked: it must complete promptly even for toolsets that need OAuth")
+	}
+	close(events)
+	for range events {
+	}
+
+	oauthTS.mu.Lock()
+	defer oauthTS.mu.Unlock()
+
+	require.True(t, oauthTS.started, "toolset should still be started during EmitStartupInfo (just not interactively)")
+
+	// During startup, no interactive plumbing should be wired up. OAuth and
+	// elicitation are deferred to the first RunStream call where the user
+	// is actively interacting with the agent.
+	require.Nil(t, oauthTS.startHandlerCaptured,
+		"elicitation handler must NOT be set during startup; OAuth is deferred until the user sends a message")
+	require.False(t, oauthTS.startManagedWasSet,
+		"managed-OAuth flag must NOT be set during startup")
+}
+
+// TestEmitStartupInfo_SurfacesToolsetStartFailureAsWarning verifies that
+// when a toolset fails to start during EmitStartupInfo, the failure is
+// emitted as a WarningEvent on the events channel so the TUI can show
+// the user the actual cause — not just silently drop the toolset.
+//
+// Without this, a remote MCP server returning a 4xx during initialize
+// (e.g. Slack's "App is not enabled for Slack MCP server access")
+// disappears from the sidebar with only a debug-log trace, leaving the
+// user with no hint about what went wrong.
+func TestEmitStartupInfo_SurfacesToolsetStartFailureAsWarning(t *testing.T) {
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	// A toolset whose Start() always fails with a rich, provider-specific
+	// message — mimicking the error returned by remoteMCPClient.Initialize
+	// after it has been enriched with the server's own explanation.
+	failingTS := newStubToolSet(
+		errors.New("failed to initialize MCP client: failed to connect to MCP server: sending \"initialize\": Bad Request (server responded 400: App is not enabled for Slack MCP server access.)"),
+		nil,
+		nil,
+	)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(failingTS),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 32)
+	rt.EmitStartupInfo(t.Context(), nil, events)
+	close(events)
+
+	var warning *WarningEvent
+	for e := range events {
+		if w, ok := e.(*WarningEvent); ok {
+			warning = w
+		}
+	}
+
+	require.NotNil(t, warning, "EmitStartupInfo should emit a WarningEvent when a toolset fails to start")
+	assert.Contains(t, warning.Message, "App is not enabled for Slack MCP server access.",
+		"warning should include the toolset's actual error message so the user can see the real cause")
+}
+
+// TestEmitStartupInfo_AuthRequiredIsSilent verifies that when a toolset's
+// Start() returns an mcptools.IsAuthorizationRequired error — the runtime
+// deliberately deferred OAuth until the user is interacting — the user
+// sees no warning event for it. The OAuth dialog will appear naturally on
+// the first RunStream, so a pre-announcement would just be noise.
+func TestEmitStartupInfo_AuthRequiredIsSilent(t *testing.T) {
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	deferralErr := &mcptools.AuthorizationRequiredError{URL: "https://example.test/mcp"}
+	require.True(t, mcptools.IsAuthorizationRequired(deferralErr),
+		"sanity: AuthorizationRequiredError must be detected by IsAuthorizationRequired")
+
+	failingTS := newStubToolSet(deferralErr, nil, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(failingTS),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 32)
+	rt.EmitStartupInfo(t.Context(), nil, events)
+	close(events)
+
+	for e := range events {
+		if w, ok := e.(*WarningEvent); ok {
+			t.Fatalf("deferred-OAuth must not produce a WarningEvent (would be redundant noise); got: %q", w.Message)
+		}
+	}
+}
+
+// TestEmitStartupInfo_DeferredAuthPreservesFreshFailureFlag verifies that
+// when a toolset's Start fails with AuthorizationRequiredError during the
+// non-interactive startup phase, the StartableToolSet's freshFailure flag is
+// LEFT INTACT — not silently consumed by the "is this the first failure?"
+// check.
+//
+// Why this matters: the deferred-OAuth case is an *expected*, transient
+// failure. The first user-visible failure that should produce a warning is
+// whatever happens on the eventual interactive retry (e.g. "server
+// responded 400: App is not enabled for Slack MCP server access"). If the
+// flag is consumed during startup, the StartableToolSet's once-per-streak
+// guard fires for the deferred case and silently swallows the real cause,
+// leaving the user staring at "0 tools" with nothing in the UI explaining
+// why.
+func TestEmitStartupInfo_DeferredAuthPreservesFreshFailureFlag(t *testing.T) {
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	deferralErr := &mcptools.AuthorizationRequiredError{URL: "https://example.test/mcp"}
+	failingTS := newStubToolSet(deferralErr, nil, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(failingTS),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 32)
+	rt.EmitStartupInfo(t.Context(), nil, events)
+	close(events)
+	for range events {
+	}
+
+	// Locate the StartableToolSet wrapping our stub so we can probe its
+	// internal state (the public API uses ShouldReportFailure as both the
+	// query and the consume operation).
+	var wrapped *tools.StartableToolSet
+	for _, ts := range root.ToolSets() {
+		if s, ok := ts.(*tools.StartableToolSet); ok {
+			wrapped = s
+			break
+		}
+	}
+	require.NotNil(t, wrapped, "agent.ToolSets() should return a *StartableToolSet wrapper")
+
+	require.True(t, wrapped.ShouldReportFailure(),
+		"deferred-OAuth must NOT consume freshFailure during EmitStartupInfo: "+
+			"otherwise the next real failure (Slack 4xx after OAuth, etc.) is silently dropped "+
+			"and the user sees zero tools with no explanation")
+}
+
+// TestEmitAgentWarnings_RecoveryNoticeIsNotFramedAsFailure verifies that
+// when a previously-failed toolset recovers ("is now available"), the
+// emitted WarningEvent is framed neutrally rather than wrapped in the
+// "Some toolsets failed to initialize" framing used for real failures.
+//
+// Regression test for: after lazy-init OAuth completes and the toolset
+// reconnects, the user saw a notification that read
+//
+//	"Some toolsets failed to initialize for agent 'root'.
+//	 Details:
+//	 - mcp(remote host=mcp.slack.com transport=streamable) is now available"
+//
+// The body says "is now available" (success) but the framing says "failed"
+// (failure), which the user reasonably read as "is NOT available".
+func TestEmitAgentWarnings_RecoveryNoticeIsNotFramedAsFailure(t *testing.T) {
+	prov := &mockProvider{id: "test/m", stream: &mockStream{}}
+	root := agent.New("root", "agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+	rt, err := NewLocalRuntime(tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	root.AddToolNotice("mcp(remote host=mcp.slack.com transport=streamable) is now available")
+
+	var emitted []Event
+	rt.emitAgentWarnings(root, func(e Event) { emitted = append(emitted, e) })
+
+	require.Len(t, emitted, 1, "expected exactly one event from a single notice")
+	w, ok := emitted[0].(*WarningEvent)
+	require.True(t, ok, "expected a *WarningEvent, got %T", emitted[0])
+
+	assert.NotContains(t, strings.ToLower(w.Message), "failed",
+		"recovery notice must not be framed as a failure; got: %q", w.Message)
+	assert.Contains(t, w.Message, "is now available",
+		"recovery notice must preserve the actual content; got: %q", w.Message)
+}
+
+// TestEmitAgentWarnings_FailureAndRecoveryAreEmittedSeparately verifies that
+// when both a real failure and a recovery notice are pending, they are
+// emitted as two separate events with appropriate framing each — not
+// merged into a single message that conflates them.
+func TestEmitAgentWarnings_FailureAndRecoveryAreEmittedSeparately(t *testing.T) {
+	prov := &mockProvider{id: "test/m", stream: &mockStream{}}
+	root := agent.New("root", "agent", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(root))
+	rt, err := NewLocalRuntime(tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	root.AddToolWarning("toolset_a start failed: connection refused")
+	root.AddToolNotice("toolset_b is now available")
+
+	var emitted []*WarningEvent
+	rt.emitAgentWarnings(root, func(e Event) {
+		if w, ok := e.(*WarningEvent); ok {
+			emitted = append(emitted, w)
+		}
+	})
+
+	require.Len(t, emitted, 2, "failures and notices must be emitted as separate events")
+
+	// Identify which is which (order is failure first, then notice).
+	failure, notice := emitted[0], emitted[1]
+	assert.Contains(t, strings.ToLower(failure.Message), "failed",
+		"failure event must use the failure framing; got: %q", failure.Message)
+	assert.Contains(t, failure.Message, "toolset_a start failed: connection refused")
+
+	assert.NotContains(t, strings.ToLower(notice.Message), "failed",
+		"recovery event must NOT use the failure framing; got: %q", notice.Message)
+	assert.Contains(t, notice.Message, "toolset_b is now available")
 }
 
 func TestEmitStartupInfo(t *testing.T) {

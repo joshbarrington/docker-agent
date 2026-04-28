@@ -44,11 +44,13 @@ type Agent struct {
 	hooks                   *latest.HooksConfig
 	cache                   *cache.Cache
 
-	// warningsMu guards pendingWarnings. addToolWarning and DrainWarnings
-	// may be called concurrently from the runtime loop, the MCP server,
-	// the TUI and session manager.
+	// warningsMu guards pendingWarnings and pendingNotices. AddToolWarning,
+	// AddToolNotice, DrainWarnings and DrainNotices may be called
+	// concurrently from the runtime loop, the MCP server, the TUI and
+	// session manager.
 	warningsMu      sync.Mutex
 	pendingWarnings []string
+	pendingNotices  []string
 }
 
 // New creates a new agent
@@ -288,7 +290,7 @@ func (a *Agent) collectTools(ctx context.Context) ([]tools.Tool, error) {
 		if err != nil {
 			desc := tools.DescribeToolSet(toolSet)
 			slog.Warn("Toolset listing failed; skipping", "agent", a.Name(), "toolset", desc, "error", err)
-			a.addToolWarning(fmt.Sprintf("%s list failed: %v", desc, err))
+			a.AddToolWarning(fmt.Sprintf("%s list failed: %v", desc, err))
 			continue
 		}
 		agentTools = append(agentTools, ta...)
@@ -321,7 +323,7 @@ func (a *Agent) ensureToolSetsAreStarted(ctx context.Context) {
 			if toolSet.ShouldReportFailure() {
 				desc := tools.DescribeToolSet(toolSet)
 				slog.Warn("Toolset start failed; will retry on next turn", "agent", a.Name(), "toolset", desc, "error", err)
-				a.addToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
+				a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
 			} else {
 				desc := tools.DescribeToolSet(toolSet)
 				slog.Debug("Toolset still unavailable; retrying next turn", "agent", a.Name(), "toolset", desc, "error", err)
@@ -332,18 +334,35 @@ func (a *Agent) ensureToolSetsAreStarted(ctx context.Context) {
 		if toolSet.ConsumeRecovery() {
 			desc := tools.DescribeToolSet(toolSet)
 			slog.Info("Toolset now available", "agent", a.Name(), "toolset", desc)
-			a.addToolWarning(desc + " is now available")
+			a.AddToolNotice(desc + " is now available")
 		}
 	}
 }
 
-// addToolWarning records a warning generated while loading or starting toolsets.
-func (a *Agent) addToolWarning(msg string) {
+// AddToolWarning records a warning generated while loading or starting toolsets.
+// Warnings represent real failures the user should know about (a remote MCP
+// server returning 4xx, an MCP binary missing, ...). For positive notices
+// (a previously-failed toolset becoming available again) use AddToolNotice
+// instead so the message isn't framed as a failure.
+func (a *Agent) AddToolWarning(msg string) {
 	if msg == "" {
 		return
 	}
 	a.warningsMu.Lock()
 	a.pendingWarnings = append(a.pendingWarnings, msg)
+	a.warningsMu.Unlock()
+}
+
+// AddToolNotice records a positive, informational notice about a toolset
+// (typically: a previously-failed toolset is now available). Notices are
+// surfaced to the user separately from warnings so the framing doesn't
+// say "failed to initialize" for a recovery message.
+func (a *Agent) AddToolNotice(msg string) {
+	if msg == "" {
+		return
+	}
+	a.warningsMu.Lock()
+	a.pendingNotices = append(a.pendingNotices, msg)
 	a.warningsMu.Unlock()
 }
 
@@ -354,6 +373,15 @@ func (a *Agent) DrainWarnings() []string {
 	warnings := a.pendingWarnings
 	a.pendingWarnings = nil
 	return warnings
+}
+
+// DrainNotices returns pending notices and clears them.
+func (a *Agent) DrainNotices() []string {
+	a.warningsMu.Lock()
+	defer a.warningsMu.Unlock()
+	notices := a.pendingNotices
+	a.pendingNotices = nil
+	return notices
 }
 
 func (a *Agent) StopToolSets(ctx context.Context) error {

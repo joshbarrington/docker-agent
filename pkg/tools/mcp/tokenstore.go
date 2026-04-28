@@ -27,6 +27,13 @@ type OAuthToken struct {
 	ClientID     string    `json:"client_id,omitempty"`
 	ClientSecret string    `json:"client_secret,omitempty"`
 	AuthServer   string    `json:"auth_server,omitempty"`
+
+	// RequestedScopes records the scope list the config asked for when this
+	// token was obtained. Unlike Scope (which is whatever the authorization
+	// server chose to return, sometimes empty, sometimes comma/space
+	// separated), RequestedScopes reflects our intent and is used to detect
+	// when the config has changed and a new OAuth flow is required.
+	RequestedScopes []string `json:"requested_scopes,omitempty"`
 }
 
 // IsExpired checks if the token is expired

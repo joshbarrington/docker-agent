@@ -370,21 +370,23 @@ func TestAgentReProbeEmitsWarningThenNotice(t *testing.T) {
 	}
 	a := New("root", "test", WithToolSets(stub))
 
-	// Turn 1: start fails → 1 warning, 0 tools.
+	// Turn 1: start fails → 1 warning, 0 tools, no notice yet.
 	got, err := a.Tools(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, got, "turn 1: no tools while toolset is unavailable")
 	warnings := a.DrainWarnings()
 	require.Len(t, warnings, 1, "turn 1: exactly one warning expected")
 	assert.Contains(t, warnings[0], "start failed")
+	assert.Empty(t, a.DrainNotices(), "turn 1: no recovery notice while still failing")
 
-	// Turn 2: start succeeds → 1 recovery warning, tools available.
+	// Turn 2: start succeeds → 1 recovery NOTICE (not warning), tools available.
 	got, err = a.Tools(t.Context())
 	require.NoError(t, err)
 	assert.Len(t, got, 1, "turn 2: tool should be available after recovery")
-	recovery := a.DrainWarnings()
-	require.Len(t, recovery, 1, "turn 2: exactly one recovery warning expected")
-	assert.Contains(t, recovery[0], "now available", "turn 2: recovery warning must mention availability")
+	assert.Empty(t, a.DrainWarnings(), "turn 2: recovery is a notice, not a failure warning")
+	notices := a.DrainNotices()
+	require.Len(t, notices, 1, "turn 2: exactly one recovery notice expected")
+	assert.Contains(t, notices[0], "now available", "turn 2: recovery notice must mention availability")
 }
 
 // TestAgentNoDuplicateStartWarnings verifies that repeated failures generate
@@ -435,7 +437,7 @@ func TestAgentWarningsConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range perWriter {
-				a.addToolWarning("boom")
+				a.AddToolWarning("boom")
 			}
 		}()
 	}

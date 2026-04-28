@@ -848,12 +848,23 @@ func (r *LocalRuntime) EmitStartupInfo(ctx context.Context, sess *session.Sessio
 		send(NewTokenUsageEvent(sess.ID, r.CurrentAgentName(), usage))
 	}
 
-	// Emit agent warnings (if any) - these are quick
-	r.emitAgentWarnings(a, func(e Event) { send(e) })
+	// Tool loading can be slow (MCP servers need to start). Mark the
+	// context as non-interactive so toolsets that require user-driven
+	// flows (e.g. an OAuth elicitation for a remote MCP server) fail
+	// fast with a recognisable error rather than blocking on a dialog
+	// the TUI is not yet ready to render. The actual prompt happens on
+	// the first RunStream when the user is interacting with the agent.
+	nonInteractiveCtx := mcptools.WithoutInteractivePrompts(ctx)
+	r.emitToolsProgressively(nonInteractiveCtx, a, send)
 
-	// Tool loading can be slow (MCP servers need to start)
-	// Emit progressive updates as each toolset loads
-	r.emitToolsProgressively(ctx, a, send)
+	// Flush any agent warnings: load-time warnings recorded at agent
+	// construction (WithLoadTimeWarnings) and per-toolset warnings recorded
+	// during startup above (e.g. a remote MCP server returning 4xx during
+	// initialize). Surfacing them as WarningEvents lets the TUI show a
+	// persistent notice with the actual server-side explanation — otherwise
+	// the user only sees the toolset disappear from the sidebar with no clue
+	// as to why.
+	r.emitAgentWarnings(a, func(e Event) { send(e) })
 }
 
 // emitToolsProgressively loads tools from each toolset and emits progress updates.
@@ -888,7 +899,35 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 		if startable, ok := toolset.(*tools.StartableToolSet); ok {
 			if !startable.IsStarted() {
 				if err := startable.Start(ctx); err != nil {
-					slog.Warn("Toolset start failed; skipping", "agent", a.Name(), "toolset", fmt.Sprintf("%T", startable.ToolSet), "error", err)
+					desc := tools.DescribeToolSet(startable.ToolSet)
+					// IsAuthorizationRequired must be checked BEFORE
+					// ShouldReportFailure: this is the first — expected —
+					// failure of a deferred-OAuth toolset, and consuming
+					// freshFailure here would suppress the *real*
+					// failure (e.g. server 4xx on the eventual interactive
+					// retry) that the user actually needs to see.
+					if mcptools.IsAuthorizationRequired(err) {
+						// The toolset just needs an OAuth approval that we
+						// deliberately deferred until the user is interacting
+						// with the agent. The dialog will appear naturally on
+						// the first RunStream — no need to pre-announce it.
+						slog.Debug("Toolset deferred until first message", "agent", a.Name(), "toolset", desc, "reason", err)
+						continue
+					}
+					// Route real failures through the agent's warning
+					// channel so the TUI surfaces a persistent,
+					// user-visible notice that includes the actual
+					// server-side cause (threaded through by
+					// remoteMCPClient.Initialize). Use the same
+					// once-per-streak guard as ensureToolSetsAreStarted
+					// so a failing toolset doesn't flood the UI with a
+					// new warning every time the agent is restarted.
+					if !startable.ShouldReportFailure() {
+						slog.Debug("Toolset still unavailable; skipping", "agent", a.Name(), "toolset", desc, "error", err)
+						continue
+					}
+					slog.Warn("Toolset start failed; skipping", "agent", a.Name(), "toolset", desc, "error", err)
+					a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
 					continue
 				}
 			}

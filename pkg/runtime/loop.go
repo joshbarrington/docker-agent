@@ -685,14 +685,22 @@ func (r *LocalRuntime) configureToolsetHandlers(a *agent.Agent, events chan Even
 	}
 }
 
-// emitAgentWarnings drains and emits any pending toolset warnings as persistent
-// TUI notifications. Both start failures and recovery notices are emitted as
-// warnings so they remain visible until the user dismisses them.
+// emitAgentWarnings drains and emits any pending toolset warnings and notices
+// as persistent TUI notifications. Failures ("start failed", "list failed")
+// and recoveries ("is now available") flow through separate queues on the
+// agent so each can be framed correctly — a single mixed message saying
+// "Some toolsets failed to initialize ... is now available" reads as a
+// contradiction.
 func (r *LocalRuntime) emitAgentWarnings(a *agent.Agent, send func(Event)) {
 	warnings := a.DrainWarnings()
 	if len(warnings) > 0 {
 		slog.Warn("Tool setup partially failed; continuing", "agent", a.Name(), "warnings", warnings)
 		send(Warning(formatToolWarning(a, warnings), a.Name()))
+	}
+	notices := a.DrainNotices()
+	if len(notices) > 0 {
+		slog.Info("Toolset status update", "agent", a.Name(), "notices", notices)
+		send(Warning(formatToolNotice(a, notices), a.Name()))
 	}
 }
 
@@ -701,6 +709,15 @@ func formatToolWarning(a *agent.Agent, warnings []string) string {
 	fmt.Fprintf(&builder, "Some toolsets failed to initialize for agent '%s'.\n\nDetails:\n\n", a.Name())
 	for _, warning := range warnings {
 		fmt.Fprintf(&builder, "- %s\n", warning)
+	}
+	return strings.TrimSuffix(builder.String(), "\n")
+}
+
+func formatToolNotice(a *agent.Agent, notices []string) string {
+	var builder strings.Builder
+	fmt.Fprintf(&builder, "Toolset status update for agent '%s':\n\n", a.Name())
+	for _, notice := range notices {
+		fmt.Fprintf(&builder, "- %s\n", notice)
 	}
 	return strings.TrimSuffix(builder.String(), "\n")
 }

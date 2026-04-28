@@ -24,6 +24,51 @@ type modelWithFallback struct {
 	index      int // index in fallback list (-1 for primary)
 }
 
+// fallbackExecutor manages the model-fallback chain (primary + configured
+// fallbacks), per-attempt retry/backoff for transient errors, and the
+// per-agent "sticky" cooldown that pins the runtime to a working fallback
+// after a primary failure.
+//
+// All state that used to sit on [LocalRuntime] purely for fallback
+// purposes — the cooldown manager and the retry-on-rate-limit flag —
+// lives here. [LocalRuntime] holds a single *fallbackExecutor and
+// delegates the model-attempt loop to [fallbackExecutor.execute].
+//
+// The executor's [cooldowns] and [telemetry] fields are wired in
+// [NewLocalRuntime] *after* options have been applied, so that
+// [WithClock] / [WithTelemetry] are reflected. [WithRetryOnRateLimit]
+// mutates the executor directly, so the executor itself must exist
+// before opts run; the field assignments after opts complete the wiring.
+type fallbackExecutor struct {
+	// retryOnRateLimit enables retry-with-backoff for HTTP 429 (rate limit)
+	// errors when no fallback models are configured. When false (default),
+	// 429 errors are treated as non-retryable and immediately fail or skip
+	// to the next model. Library consumers can enable this via
+	// [WithRetryOnRateLimit].
+	retryOnRateLimit bool
+
+	// cooldowns owns the per-agent cooldown state for sticky fallback
+	// behaviour: once a fallback succeeds following a non-retryable
+	// primary failure, we pin to that fallback for the agent's
+	// configured cooldown window before re-trying the primary.
+	//
+	// Wired in [NewLocalRuntime] after opts so the cooldown windows
+	// honour [WithClock]; safe for concurrent use.
+	cooldowns *cooldownManager
+
+	// telemetry is forwarded to [handleStream] so it can record per-
+	// stream observability (token usage, finish reason, errors). Wired
+	// in [NewLocalRuntime] after opts so [WithTelemetry] is reflected.
+	telemetry Telemetry
+}
+
+// newFallbackExecutor returns a *fallbackExecutor with rate-limit retries
+// off; [cooldowns] and [telemetry] are wired in [NewLocalRuntime] once
+// runtime opts have finalised the clock and telemetry sink.
+func newFallbackExecutor() *fallbackExecutor {
+	return &fallbackExecutor{}
+}
+
 // buildModelChain returns the ordered list of models to try: primary first, then fallbacks.
 func buildModelChain(primary provider.Provider, fallbacks []provider.Provider) []modelWithFallback {
 	chain := make([]modelWithFallback, 0, 1+len(fallbacks))
@@ -100,7 +145,70 @@ func getEffectiveRetries(a *agent.Agent) int {
 	return retries
 }
 
-// tryModelWithFallback attempts to create a stream and get a response using the primary model,
+// chainStartIndex returns the index in the model chain (primary at 0,
+// fallbacks at 1+) at which to begin trying. Normally 0, but during an
+// active cooldown it returns the position of the pinned fallback so the
+// primary is skipped.
+func (e *fallbackExecutor) chainStartIndex(a *agent.Agent, fallbackCount int) int {
+	state := e.cooldowns.Get(a.Name())
+	if state == nil || fallbackCount <= state.fallbackIndex {
+		return 0
+	}
+	slog.Debug("Skipping primary due to cooldown",
+		"agent", a.Name(),
+		"start_from_fallback_index", state.fallbackIndex,
+		"cooldown_until", state.until.Format(time.RFC3339))
+	// +1 to convert from a.FallbackModels() index to modelChain index
+	// (modelChain[0] is the primary, modelChain[1] is the first fallback).
+	return state.fallbackIndex + 1
+}
+
+// recordSuccess updates the per-agent cooldown state after a successful
+// model attempt. If a fallback rescued a non-retryable primary failure,
+// pin to that fallback for the cooldown window. If the primary itself
+// succeeded, clear any existing cooldown (handles both a clean primary
+// success and recovery after a cooldown expires).
+func (e *fallbackExecutor) recordSuccess(a *agent.Agent, modelEntry modelWithFallback, primaryFailedWithNonRetryable bool) {
+	switch {
+	case modelEntry.isFallback && primaryFailedWithNonRetryable:
+		e.cooldowns.Set(a.Name(), modelEntry.index, getEffectiveCooldown(a))
+	case !modelEntry.isFallback:
+		e.cooldowns.Clear(a.Name())
+	}
+}
+
+// classifyAttemptError handles an error from a stream attempt: checks for
+// context cancellation, classifies the error, and returns either a
+// per-iteration decision (retry the same model or skip to the next) or a
+// non-nil retErr that the caller must return immediately.
+//
+// This consolidates the identical error-handling block that used to
+// follow both CreateChatCompletionStream and handleStream calls.
+func (e *fallbackExecutor) classifyAttemptError(
+	ctx context.Context,
+	err error,
+	a *agent.Agent,
+	modelEntry modelWithFallback,
+	attempt int,
+	hasFallbacks bool,
+	primaryFailedWithNonRetryable *bool,
+) (decision retryDecision, retErr error) {
+	// Context cancellation is never retryable; bubble up the original
+	// error to preserve any cause/wrapping. The returned decision is
+	// irrelevant when retErr != nil — by contract the caller returns
+	// immediately — but use retryDecisionContinue rather than a magic
+	// zero so the value is at least typed and consistent.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return retryDecisionContinue, err
+	}
+	decision = e.handleModelError(ctx, err, a, modelEntry, attempt, hasFallbacks, primaryFailedWithNonRetryable)
+	if decision == retryDecisionReturn {
+		return retryDecisionContinue, ctx.Err()
+	}
+	return decision, nil
+}
+
+// execute attempts to create a stream and get a response using the primary model,
 // falling back to configured fallback models if the primary fails.
 //
 // Retry behavior:
@@ -108,13 +216,13 @@ func getEffectiveRetries(a *agent.Agent) int {
 // - Non-retryable errors (429, 4xx): skip to the next model in the chain immediately
 //
 // Cooldown behavior:
-//   - When the primary fails with a non-retryable error and a fallback succeeds, the runtime
+//   - When the primary fails with a non-retryable error and a fallback succeeds, the executor
 //     "sticks" with that fallback for a configurable cooldown period.
 //   - During cooldown, subsequent calls skip the primary and start from the pinned fallback.
 //   - When cooldown expires, the primary is tried again; if it succeeds, cooldown is cleared.
 //
 // Returns the stream result, the model that was used, and any error.
-func (r *LocalRuntime) tryModelWithFallback(
+func (e *fallbackExecutor) execute(
 	ctx context.Context,
 	a *agent.Agent,
 	primaryModel provider.Provider,
@@ -125,25 +233,9 @@ func (r *LocalRuntime) tryModelWithFallback(
 	events chan Event,
 ) (streamResult, provider.Provider, error) {
 	fallbackModels := a.FallbackModels()
-
 	fallbackRetries := getEffectiveRetries(a)
-
-	// Build the chain of models to try: primary (index 0) + fallbacks (index 1+)
 	modelChain := buildModelChain(primaryModel, fallbackModels)
-
-	// Check if we're in a cooldown period and should skip the primary
-	startIndex := 0
-	inCooldown := false
-	cooldownState := r.cooldowns.Get(a.Name())
-	if cooldownState != nil && len(fallbackModels) > cooldownState.fallbackIndex {
-		// We're in cooldown - start from the pinned fallback (skip primary)
-		startIndex = cooldownState.fallbackIndex + 1 // +1 because index 0 is primary
-		inCooldown = true
-		slog.Debug("Skipping primary due to cooldown",
-			"agent", a.Name(),
-			"start_from_fallback_index", cooldownState.fallbackIndex,
-			"cooldown_until", cooldownState.until.Format(time.RFC3339))
-	}
+	startIndex := e.chainStartIndex(a, len(fallbackModels))
 
 	var lastErr error
 	primaryFailedWithNonRetryable := false
@@ -175,7 +267,6 @@ func (r *LocalRuntime) tryModelWithFallback(
 			// Emit fallback event when transitioning to a new model (but not when starting in cooldown)
 			if chainIdx > startIndex && attempt == 0 {
 				logFallbackAttempt(a.Name(), modelEntry, attempt, fallbackRetries, lastErr)
-				// Get the previous model's ID for the event
 				prevModelID := modelChain[chainIdx-1].provider.ID()
 				reason := ""
 				if lastErr != nil {
@@ -195,28 +286,22 @@ func (r *LocalRuntime) tryModelWithFallback(
 				"agent", a.Name(),
 				"model", modelEntry.provider.ID(),
 				"is_fallback", modelEntry.isFallback,
-				"in_cooldown", inCooldown,
+				"in_cooldown", startIndex > 0,
 				"attempt", attempt+1)
 
 			stream, err := modelEntry.provider.CreateChatCompletionStream(ctx, messages, agentTools)
 			if err != nil {
 				lastErr = err
-
-				// Context cancellation is never retryable
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return streamResult{}, nil, err
+				decision, retErr := e.classifyAttemptError(ctx, err, a, modelEntry, attempt, hasFallbacks, &primaryFailedWithNonRetryable)
+				if retErr != nil {
+					return streamResult{}, nil, retErr
 				}
-
-				decision := r.handleModelError(ctx, err, a, modelEntry, attempt, hasFallbacks, &primaryFailedWithNonRetryable)
-				if decision == retryDecisionReturn {
-					return streamResult{}, nil, ctx.Err()
-				} else if decision == retryDecisionBreak {
+				if decision == retryDecisionBreak {
 					break
 				}
 				continue
 			}
 
-			// Stream created successfully, now handle it
 			slog.Debug("Processing stream", "agent", a.Name(), "model", modelEntry.provider.ID())
 
 			// If the provider is a rule-based router, notify the sidebar
@@ -227,37 +312,20 @@ func (r *LocalRuntime) tryModelWithFallback(
 				}
 			}
 
-			res, err := handleStream(ctx, stream, a, agentTools, sess, m, r.telemetry, events)
+			res, err := handleStream(ctx, stream, a, agentTools, sess, m, e.telemetry, events)
 			if err != nil {
 				lastErr = err
-
-				// Context cancellation stops everything
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return streamResult{}, nil, err
+				decision, retErr := e.classifyAttemptError(ctx, err, a, modelEntry, attempt, hasFallbacks, &primaryFailedWithNonRetryable)
+				if retErr != nil {
+					return streamResult{}, nil, retErr
 				}
-
-				decision := r.handleModelError(ctx, err, a, modelEntry, attempt, hasFallbacks, &primaryFailedWithNonRetryable)
-				if decision == retryDecisionReturn {
-					return streamResult{}, nil, ctx.Err()
-				} else if decision == retryDecisionBreak {
+				if decision == retryDecisionBreak {
 					break
 				}
 				continue
 			}
 
-			// Success!
-			// Handle cooldown state based on which model succeeded
-			switch {
-			case modelEntry.isFallback && primaryFailedWithNonRetryable:
-				// Primary failed with non-retryable error, fallback succeeded.
-				// Set cooldown to stick with this fallback.
-				r.cooldowns.Set(a.Name(), modelEntry.index, getEffectiveCooldown(a))
-			case !modelEntry.isFallback:
-				// Primary succeeded - clear any existing cooldown.
-				// This handles both normal success and recovery after cooldown expires.
-				r.cooldowns.Clear(a.Name())
-			}
-
+			e.recordSuccess(a, modelEntry, primaryFailedWithNonRetryable)
 			return res, modelEntry.provider, nil
 		}
 	}
@@ -298,7 +366,7 @@ const (
 //
 // Side-effect: sets *primaryFailedWithNonRetryable when the primary model fails with a
 // non-retryable (or rate-limited-with-fallbacks) error.
-func (r *LocalRuntime) handleModelError(
+func (e *fallbackExecutor) handleModelError(
 	ctx context.Context,
 	err error,
 	a *agent.Agent,
@@ -313,11 +381,11 @@ func (r *LocalRuntime) handleModelError(
 		// Gate: only retry on 429 if opt-in is enabled AND no fallbacks exist.
 		// Default behavior (retryOnRateLimit=false) treats 429 as non-retryable,
 		// identical to today's behavior before this feature was added.
-		if !r.retryOnRateLimit || hasFallbacks {
+		if !e.retryOnRateLimit || hasFallbacks {
 			slog.Warn("Rate limited, treating as non-retryable",
 				"agent", a.Name(),
 				"model", modelEntry.provider.ID(),
-				"retry_on_rate_limit_enabled", r.retryOnRateLimit,
+				"retry_on_rate_limit_enabled", e.retryOnRateLimit,
 				"has_fallbacks", hasFallbacks,
 				"error", err)
 			if !modelEntry.isFallback {

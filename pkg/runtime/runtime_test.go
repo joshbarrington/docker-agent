@@ -2506,7 +2506,7 @@ func TestSteer_EmptySessionBootstrap(t *testing.T) {
 // hookStream wraps a mockStream and calls onStop synchronously when it
 // returns a chunk with FinishReasonStop. This lets a test inject a Steer()
 // call at the precise moment the stream signals completion — after the stop
-// chunk is read inside tryModelWithFallback but before the mid-loop steer
+// chunk is read inside fallback.execute but before the mid-loop steer
 // drain runs, exercising the end-of-iteration drain at res.Stopped.
 type hookStream struct {
 	*mockStream
@@ -2566,7 +2566,7 @@ func (p *steerInjectProvider) MaxTokens() int          { return 0 }
 // rather than being stranded until the next call.
 //
 // The hookStream fires the injection synchronously inside Recv() when it
-// yields the FinishReasonStop chunk. At that point tryModelWithFallback has
+// yields the FinishReasonStop chunk. At that point fallback.execute has
 // not yet returned; the steer lands in the queue and is guaranteed to be
 // drained by one of the three drain points (mid-loop, end-of-iteration, or
 // top-of-next-turn). The test asserts the key invariant: consumed within

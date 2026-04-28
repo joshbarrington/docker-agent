@@ -8,17 +8,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 )
 
 // newTestFilePickerDialog creates a filePickerDialog pointed at dir without
 // going through NewFilePickerDialog (which uses os.Getwd).
 func newTestFilePickerDialog(dir string) *filePickerDialog {
 	d := &filePickerDialog{
+		pickerCore: newPickerCore(filePickerLayout, "Type to filter files…"),
 		currentDir: dir,
-		scrollview: scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
-		keyMap:     defaultCommandPaletteKeyMap(),
 	}
 	d.loadDirectory()
 	return d

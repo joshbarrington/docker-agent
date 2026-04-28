@@ -1,13 +1,11 @@
 package dialog
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
@@ -16,7 +14,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/runtime"
-	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -26,81 +23,95 @@ import (
 
 // modelPickerDialog is a dialog for selecting a model for the current agent.
 type modelPickerDialog struct {
-	BaseDialog
+	pickerCore
 
-	textInput  textinput.Model
-	models     []runtime.ModelChoice
-	filtered   []runtime.ModelChoice
-	selected   int
-	keyMap     commandPaletteKeyMap
-	errMsg     string // validation error message
-	scrollview *scrollview.Model
+	models   []runtime.ModelChoice
+	filtered []runtime.ModelChoice
+	errMsg   string // validation error message
+}
 
-	// Double-click detection
-	lastClickTime  time.Time
-	lastClickIndex int
+// Model picker dialog dimension constants
+const (
+	// Column widths for the per-row stats. Values are right-aligned in their
+	// own column so the list reads like a table.
+	pickerInputColWidth   = 10
+	pickerOutputColWidth  = 10
+	pickerContextColWidth = 8
+
+	// pickerDetailsLines is the number of lines reserved for the model
+	// details panel rendered below the model list.
+	pickerDetailsLines = 4
+
+	// pickerListVerticalOverhead is the number of rows used by dialog chrome:
+	// title(1) + space(1) + input(1) + separator(1) + column header(1) +
+	// details separator(1) + details (pickerDetailsLines) + space at bottom(1) +
+	// help keys(1) + borders/padding(2) = 10 + pickerDetailsLines
+	pickerListVerticalOverhead = 10 + pickerDetailsLines
+
+	// pickerListStartOffset is the Y offset from dialog top to where the model list starts:
+	// border(1) + padding(1) + title(1) + space(1) + input(1) + separator(1) +
+	// column header(1) = 7
+	pickerListStartOffset = 7
+
+	// pickerDetailsLabelWidth is the column width for the labels in the
+	// details panel ("Reference", "Pricing", "Limits", "Modalities").
+	pickerDetailsLabelWidth = 12
+
+	// catalogSeparatorLabel labels the separator above the catalog group.
+	catalogSeparatorLabel = "Other models"
+	// customSeparatorLabel labels the separator above the custom-models group.
+	customSeparatorLabel = "Custom models"
+)
+
+// modelPickerLayout is the layout used by the model picker.
+var modelPickerLayout = pickerLayout{
+	WidthPercent:    pickerWidthPercent,
+	MinWidth:        pickerMinWidth,
+	MaxWidth:        pickerMaxWidth,
+	HeightPercent:   pickerHeightPercent,
+	MaxHeight:       pickerMaxHeight,
+	ListOverhead:    pickerListVerticalOverhead,
+	ListStartOffset: pickerListStartOffset,
 }
 
 // NewModelPickerDialog creates a new model picker dialog.
 func NewModelPickerDialog(models []runtime.ModelChoice) Dialog {
-	ti := textinput.New()
-	ti.Placeholder = "Type to search or enter custom model (provider/model)…"
-	ti.Focus()
-	ti.CharLimit = 100
-	ti.SetWidth(50)
-
-	// Sort models: config first, then catalog, then custom. Within each section: current first, then default, then alphabetically
-	sortedModels := make([]runtime.ModelChoice, len(models))
-	copy(sortedModels, models)
-	slices.SortFunc(sortedModels, func(a, b runtime.ModelChoice) int {
-		// Get section priority: config (0) < catalog (1) < custom (2)
-		getPriority := func(m runtime.ModelChoice) int {
-			if m.IsCustom {
-				return 2
-			}
-			if m.IsCatalog {
-				return 1
-			}
-			return 0
-		}
-		pa, pb := getPriority(a), getPriority(b)
-		if pa != pb {
-			return cmp.Compare(pa, pb)
-		}
-		// Within each section: current model first
-		if a.IsCurrent != b.IsCurrent {
-			if a.IsCurrent {
-				return -1
-			}
-			return 1
-		}
-		// Then default model
-		if a.IsDefault != b.IsDefault {
-			if a.IsDefault {
-				return -1
-			}
-			return 1
-		}
-		// Then alphabetically by name
-		return cmp.Compare(a.Name, b.Name)
-	})
-
 	d := &modelPickerDialog{
-		textInput:  ti,
-		models:     sortedModels,
-		keyMap:     defaultCommandPaletteKeyMap(),
-		scrollview: scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
+		pickerCore: newPickerCore(modelPickerLayout, "Type to search or enter custom model (provider/model)…"),
 	}
+	d.textInput.CharLimit = 100
+
+	// Sort models: config first, then catalog, then custom.
+	sortedModels := slices.Clone(models)
+	slices.SortFunc(sortedModels, func(a, b runtime.ModelChoice) int {
+		return comparePickerSortKeys(modelSortKeys(a), modelSortKeys(b))
+	})
+	d.models = sortedModels
 	d.filterModels()
 	return d
 }
 
-func (d *modelPickerDialog) Init() tea.Cmd {
-	return textinput.Blink
+// modelSortKeys derives the sort key tuple from a runtime.ModelChoice.
+func modelSortKeys(m runtime.ModelChoice) pickerSortKeys {
+	section := 0
+	switch {
+	case m.IsCustom:
+		section = 2
+	case m.IsCatalog:
+		section = 1
+	}
+	return pickerSortKeys{
+		Section:   section,
+		IsCurrent: m.IsCurrent,
+		IsDefault: m.IsDefault,
+		Name:      m.Name,
+	}
 }
 
+func (d *modelPickerDialog) Init() tea.Cmd { return textinput.Blink }
+
 func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
-	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end
+	// Scrollview handles mouse scrollbar, wheel, and pgup/pgdn/home/end.
 	if handled, cmd := d.scrollview.Update(msg); handled {
 		return d, cmd
 	}
@@ -111,27 +122,13 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return d, cmd
 
 	case tea.PasteMsg:
-		var cmd tea.Cmd
-		d.textInput, cmd = d.textInput.Update(msg)
-		d.filterModels()
-		d.errMsg = ""
+		cmd := d.handleInputChange(msg)
 		return d, cmd
 
 	case tea.MouseClickMsg:
-		// Scrollbar clicks handled above; this handles list item clicks
-		if msg.Button == tea.MouseLeft {
-			if modelIdx := d.mouseYToModelIndex(msg.Y); modelIdx >= 0 {
-				now := time.Now()
-				if modelIdx == d.lastClickIndex && now.Sub(d.lastClickTime) < styles.DoubleClickThreshold {
-					d.selected = modelIdx
-					d.lastClickTime = time.Time{}
-					cmd := d.handleSelection()
-					return d, cmd
-				}
-				d.selected = modelIdx
-				d.lastClickTime = now
-				d.lastClickIndex = modelIdx
-			}
+		if dbl, _ := d.handleListClick(msg, d.lineToModelIndex); dbl {
+			cmd := d.handleSelection()
+			return d, cmd
 		}
 		return d, nil
 
@@ -139,34 +136,20 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
 		}
-
 		switch {
 		case key.Matches(msg, d.keyMap.Escape):
-			return d, core.CmdHandler(CloseDialogMsg{})
-
+			return d, closeDialogCmd()
 		case key.Matches(msg, d.keyMap.Up):
-			if d.selected > 0 {
-				d.selected--
-				d.scrollview.EnsureLineVisible(d.findSelectedLine(nil))
-			}
+			d.navigate(-1, len(d.filtered), d.findSelectedLine)
 			return d, nil
-
 		case key.Matches(msg, d.keyMap.Down):
-			if d.selected < len(d.filtered)-1 {
-				d.selected++
-				d.scrollview.EnsureLineVisible(d.findSelectedLine(nil))
-			}
+			d.navigate(+1, len(d.filtered), d.findSelectedLine)
 			return d, nil
-
 		case key.Matches(msg, d.keyMap.Enter):
 			cmd := d.handleSelection()
 			return d, cmd
-
 		default:
-			var cmd tea.Cmd
-			d.textInput, cmd = d.textInput.Update(msg)
-			d.filterModels()
-			d.errMsg = ""
+			cmd := d.handleInputChange(msg)
 			return d, cmd
 		}
 	}
@@ -174,82 +157,62 @@ func (d *modelPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
-// mouseYToModelIndex converts a mouse Y position to a model index.
-// Returns -1 if the position is not on a model (e.g., on a separator or outside the list).
-func (d *modelPickerDialog) mouseYToModelIndex(y int) int {
-	dialogRow, _ := d.Position()
-	maxItems := d.scrollview.VisibleHeight()
-
-	listStartY := dialogRow + pickerListStartOffset
-	listEndY := listStartY + maxItems
-
-	// Check if Y is within the model list area
-	if y < listStartY || y >= listEndY {
-		return -1
-	}
-
-	// Calculate which line in the visible area was clicked
-	lineInView := y - listStartY
-	scrollOffset := d.scrollview.ScrollOffset()
-
-	// Calculate the actual line index in allModelLines
-	actualLine := scrollOffset + lineInView
-
-	// Now we need to map the line back to a model index, accounting for separators
-	return d.lineToModelIndex(actualLine)
+// handleInputChange forwards msg to the text input, re-runs the filter, and
+// clears any validation error from a previous submission.
+func (d *modelPickerDialog) handleInputChange(msg tea.Msg) tea.Cmd {
+	return d.updateInput(msg, func() {
+		d.filterModels()
+		d.errMsg = ""
+	})
 }
 
-// lineToModelIndex converts a line index (in allModelLines) to a model index.
-// Returns -1 if the line is a separator.
-func (d *modelPickerDialog) lineToModelIndex(lineIdx int) int {
-	// Pre-compute model type flags (same logic as View)
-	hasConfigModels := false
-	hasCatalogModels := false
+// buildList constructs the list of models with section separators between
+// the (config -> catalog -> custom) groups. Pass contentWidth=0 to compute
+// the layout without rendering items (used by mouse hit-testing and
+// findSelectedLine).
+func (d *modelPickerDialog) buildList(contentWidth int) *groupedList {
+	gl := newGroupedList()
+
+	hasConfig := false
+	hasCatalog := false
 	for _, m := range d.filtered {
 		switch {
 		case m.IsCustom:
-			// Custom models don't affect separator logic for config/catalog
+			// Custom models don't affect the catalog/config separator logic.
 		case m.IsCatalog:
-			hasCatalogModels = true
+			hasCatalog = true
 		default:
-			hasConfigModels = true
+			hasConfig = true
 		}
 	}
 
-	// Walk through the models, counting lines including separators
-	currentLine := 0
-	catalogSeparatorShown := false
-	customSeparatorShown := false
-
+	catalogSepShown := false
+	customSepShown := false
 	for i, model := range d.filtered {
-		// Check if separator would be added before this model
-		if model.IsCatalog && !catalogSeparatorShown && !model.IsCustom {
-			if hasConfigModels {
-				if currentLine == lineIdx {
-					return -1 // Clicked on separator
-				}
-				currentLine++
+		if model.IsCatalog && !model.IsCustom && !catalogSepShown {
+			if hasConfig {
+				gl.AddNonItem(RenderGroupSeparator(catalogSeparatorLabel, contentWidth))
 			}
-			catalogSeparatorShown = true
+			catalogSepShown = true
 		}
-
-		if model.IsCustom && !customSeparatorShown {
-			if hasConfigModels || hasCatalogModels {
-				if currentLine == lineIdx {
-					return -1 // Clicked on separator
-				}
-				currentLine++
+		if model.IsCustom && !customSepShown {
+			if hasConfig || hasCatalog {
+				gl.AddNonItem(RenderGroupSeparator(customSeparatorLabel, contentWidth))
 			}
-			customSeparatorShown = true
+			customSepShown = true
 		}
-
-		if currentLine == lineIdx {
-			return i // Found the model at this line
-		}
-		currentLine++
+		gl.AddItem(d.renderModel(model, i == d.selected, contentWidth))
 	}
 
-	return -1 // Line index out of range
+	return gl
+}
+
+func (d *modelPickerDialog) lineToModelIndex(line int) int {
+	return d.buildList(0).ItemForLine(line)
+}
+
+func (d *modelPickerDialog) findSelectedLine() int {
+	return d.buildList(0).LineForItem(d.selected)
 }
 
 func (d *modelPickerDialog) handleSelection() tea.Cmd {
@@ -262,7 +225,7 @@ func (d *modelPickerDialog) handleSelection() tea.Cmd {
 			return nil
 		}
 		return tea.Sequence(
-			core.CmdHandler(CloseDialogMsg{}),
+			closeDialogCmd(),
 			core.CmdHandler(messages.ChangeModelMsg{ModelRef: query}),
 		)
 	}
@@ -276,7 +239,7 @@ func (d *modelPickerDialog) handleSelection() tea.Cmd {
 			modelRef = ""
 		}
 		return tea.Sequence(
-			core.CmdHandler(CloseDialogMsg{}),
+			closeDialogCmd(),
 			core.CmdHandler(messages.ChangeModelMsg{ModelRef: modelRef}),
 		)
 	}
@@ -330,7 +293,7 @@ func (d *modelPickerDialog) filterModels() {
 	// If query contains "/", show "Custom" option as well as matches
 	isCustomQuery := strings.Contains(query, "/")
 
-	d.filtered = nil
+	d.filtered = d.filtered[:0]
 	for _, model := range d.models {
 		if query == "" {
 			d.filtered = append(d.filtered, model)
@@ -355,148 +318,29 @@ func (d *modelPickerDialog) filterModels() {
 	if d.selected >= len(d.filtered) {
 		d.selected = max(0, len(d.filtered)-1)
 	}
-	// Reset scroll when filtering
 	d.scrollview.SetScrollOffset(0)
-}
-
-// Model picker dialog dimension constants
-const (
-	// pickerWidthPercent is the percentage of screen width to use for the dialog
-	pickerWidthPercent = 80
-	// pickerMinWidth is the minimum width of the dialog
-	pickerMinWidth = 50
-	// pickerMaxWidth is the maximum width of the dialog
-	pickerMaxWidth = 100
-	// pickerHeightPercent is the percentage of screen height to use for the dialog
-	pickerHeightPercent = 70
-	// pickerMaxHeight is the maximum height of the dialog
-	pickerMaxHeight = 150
-
-	// pickerDialogPadding is the horizontal padding inside the dialog border (2 on each side + border)
-	pickerDialogPadding = 6
-
-	// Column widths for the per-row stats. Values are right-aligned in their
-	// own column so the list reads like a table.
-	pickerInputColWidth   = 10
-	pickerOutputColWidth  = 10
-	pickerContextColWidth = 8
-
-	// pickerDetailsLines is the number of lines reserved for the model
-	// details panel rendered below the model list.
-	pickerDetailsLines = 4
-
-	// pickerListVerticalOverhead is the number of rows used by dialog chrome:
-	// title(1) + space(1) + input(1) + separator(1) + column header(1) +
-	// details separator(1) + details (pickerDetailsLines) + space at bottom(1) +
-	// help keys(1) + borders/padding(2) = 10 + pickerDetailsLines
-	pickerListVerticalOverhead = 10 + pickerDetailsLines
-
-	// pickerListStartOffset is the Y offset from dialog top to where the model list starts:
-	// border(1) + padding(1) + title(1) + space(1) + input(1) + separator(1) +
-	// column header(1) = 7
-	pickerListStartOffset = 7
-
-	// pickerDetailsLabelWidth is the column width for the labels in the
-	// details panel ("Reference", "Pricing", "Limits", "Modalities").
-	pickerDetailsLabelWidth = 12
-
-	// catalogSeparatorLabel is the text for the catalog section separator
-	catalogSeparatorLabel = "── Other models "
-	// customSeparatorLabel is the text for the custom models section separator
-	customSeparatorLabel = "── Custom models "
-)
-
-func (d *modelPickerDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
-	dialogWidth = max(min(d.Width()*pickerWidthPercent/100, pickerMaxWidth), pickerMinWidth)
-	maxHeight = min(d.Height()*pickerHeightPercent/100, pickerMaxHeight)
-	contentWidth = dialogWidth - pickerDialogPadding - d.scrollview.ReservedCols()
-	return dialogWidth, maxHeight, contentWidth
-}
-
-// SetSize sets the dialog dimensions and configures the scrollview.
-func (d *modelPickerDialog) SetSize(width, height int) tea.Cmd {
-	cmd := d.BaseDialog.SetSize(width, height)
-	_, maxHeight, contentWidth := d.dialogSize()
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
-	visLines := max(1, maxHeight-pickerListVerticalOverhead)
-	d.scrollview.SetSize(regionWidth, visLines)
-	return cmd
 }
 
 func (d *modelPickerDialog) View() string {
 	dialogWidth, _, contentWidth := d.dialogSize()
-
 	d.textInput.SetWidth(contentWidth)
 
-	// Build all model lines first to calculate total height
-	var allModelLines []string
-	catalogSeparatorShown := false
-	customSeparatorShown := false
-
-	// Pre-compute if we have different model types to decide on separators
-	hasConfigModels := false
-	hasCatalogModels := false
-	for _, m := range d.filtered {
-		switch {
-		case m.IsCustom:
-			// Custom models don't affect separator logic for config/catalog
-		case m.IsCatalog:
-			hasCatalogModels = true
-		default:
-			hasConfigModels = true
-		}
-	}
-
-	for i, model := range d.filtered {
-		// Add separator before first catalog model (if there are config models anywhere in the list)
-		if model.IsCatalog && !catalogSeparatorShown && !model.IsCustom {
-			if hasConfigModels {
-				separatorLine := styles.MutedStyle.Render(catalogSeparatorLabel + strings.Repeat("─", max(0, contentWidth-len(catalogSeparatorLabel)-2)))
-				allModelLines = append(allModelLines, separatorLine)
-			}
-			catalogSeparatorShown = true
-		}
-
-		// Add separator before first custom model (if there are other models anywhere in the list)
-		if model.IsCustom && !customSeparatorShown {
-			if hasConfigModels || hasCatalogModels {
-				separatorLine := styles.MutedStyle.Render(customSeparatorLabel + strings.Repeat("─", max(0, contentWidth-len(customSeparatorLabel)-2)))
-				allModelLines = append(allModelLines, separatorLine)
-			}
-			customSeparatorShown = true
-		}
-
-		allModelLines = append(allModelLines, d.renderModel(model, i == d.selected, contentWidth))
-	}
-
-	regionWidth := contentWidth + d.scrollview.ReservedCols()
-
-	// Set scrollview position for mouse hit-testing (auto-computed from dialog position)
-	dialogRow, dialogCol := d.Position()
-	d.scrollview.SetPosition(dialogCol+3, dialogRow+pickerListStartOffset)
-
-	d.scrollview.SetContent(allModelLines, len(allModelLines))
+	gl := d.buildList(contentWidth)
+	d.updateScrollviewPosition()
+	d.scrollview.SetContent(gl.Lines(), len(gl.Lines()))
 
 	var scrollableContent string
 	if len(d.filtered) == 0 {
-		visLines := d.scrollview.VisibleHeight()
-		emptyLines := []string{"", styles.DialogContentStyle.
-			Italic(true).Align(lipgloss.Center).Width(contentWidth).
-			Render("No models found")}
-		for len(emptyLines) < visLines {
-			emptyLines = append(emptyLines, "")
-		}
-		scrollableContent = d.scrollview.ViewWithLines(emptyLines)
+		scrollableContent = d.renderEmptyState("No models found", contentWidth)
 	} else {
 		scrollableContent = d.scrollview.View()
 	}
 
-	contentBuilder := NewContent(regionWidth).
+	contentBuilder := NewContent(d.regionWidth(contentWidth)).
 		AddTitle("Select Model").
 		AddSpace().
 		AddContent(d.textInput.View())
 
-	// Show error message if present
 	if d.errMsg != "" {
 		contentBuilder.AddContent(styles.ErrorStyle.Render("⚠ " + d.errMsg))
 	}
@@ -512,59 +356,6 @@ func (d *modelPickerDialog) View() string {
 		Build()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content)
-}
-
-// findSelectedLine returns the line index in allModelLines that corresponds to the selected model.
-// This accounts for separator lines that are inserted before catalog and custom sections.
-func (d *modelPickerDialog) findSelectedLine(allModelLines []string) int {
-	if d.selected < 0 || d.selected >= len(d.filtered) {
-		return 0
-	}
-
-	// Pre-compute model type flags (same logic as View)
-	hasConfigModels := false
-	hasCatalogModels := false
-	for _, m := range d.filtered {
-		switch {
-		case m.IsCustom:
-			// Custom models don't affect separator logic for config/catalog
-		case m.IsCatalog:
-			hasCatalogModels = true
-		default:
-			hasConfigModels = true
-		}
-	}
-
-	// Count lines before the selected model, including separators
-	lineIndex := 0
-	catalogSeparatorShown := false
-	customSeparatorShown := false
-
-	for i := range d.selected + 1 {
-		model := d.filtered[i]
-
-		// Check if separator was added before this model
-		if model.IsCatalog && !catalogSeparatorShown && !model.IsCustom {
-			if hasConfigModels && i <= d.selected {
-				lineIndex++ // Count the separator
-			}
-			catalogSeparatorShown = true
-		}
-
-		if model.IsCustom && !customSeparatorShown {
-			if (hasConfigModels || hasCatalogModels) && i <= d.selected {
-				lineIndex++ // Count the separator
-			}
-			customSeparatorShown = true
-		}
-
-		if i == d.selected {
-			return lineIndex
-		}
-		lineIndex++
-	}
-
-	return min(lineIndex, len(allModelLines)-1)
 }
 
 // pickerRowPalette is the set of styles used to render one row of the
@@ -605,6 +396,9 @@ func pickerRowStyles(selected bool) pickerRowPalette {
 }
 
 func (d *modelPickerDialog) renderModel(model runtime.ModelChoice, selected bool, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
 	p := pickerRowStyles(selected)
 	nameWidth := pickerNameColWidth(maxWidth)
 	return renderRowName(model, nameWidth, p) + renderRowStats(model, p)
@@ -865,9 +659,4 @@ func joinOrDash(parts []string) string {
 		return "—"
 	}
 	return strings.Join(parts, ", ")
-}
-
-func (d *modelPickerDialog) Position() (row, col int) {
-	dialogWidth, maxHeight, _ := d.dialogSize()
-	return CenterPosition(d.Width(), d.Height(), dialogWidth, maxHeight)
 }
